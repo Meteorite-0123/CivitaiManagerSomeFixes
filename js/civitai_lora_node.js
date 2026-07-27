@@ -734,7 +734,7 @@ function addLoraToTargetNode(node, entry, notify = false) {
     syncNodeWidgets(node, next);
     if (popup.node === node && overlay?.classList.contains("show")) {
         if (popup.tab === "applied") popup.selectedAppliedIndex = existingIndex >= 0 ? existingIndex : next.length - 1;
-        renderPopup();
+        if (!updateRemoteDownloadState()) renderPopup();
     }
 }
 
@@ -1111,6 +1111,18 @@ function renderNav() {
     const clearTag = nav.querySelector("[data-clear-lora-tag]");
     if (clearTag) clearTag.onclick = () => selectTag("");
     if (popup.tab === "favorites") bindLoraFavoriteSidebar(nav);
+}
+
+function updateDownloadNavCount() {
+    const button = overlay?.querySelector('[data-lora-tab="downloads"]');
+    if (!button) return false;
+    let badge = button.querySelector("b");
+    if (!badge) {
+        badge = document.createElement("b");
+        button.appendChild(badge);
+    }
+    badge.textContent = String(navCount("downloads"));
+    return true;
 }
 
 function loraFavoriteItems() {
@@ -1719,8 +1731,6 @@ function renderRemoteDetail() {
     const file = selectedFile();
     const media = remotePreviewMedia(model, version);
     const raw = media.rawUrl || rawPreview(model, version);
-    const local = findLocalForRemote(model, version);
-    const pending = pendingForRemote(model, version);
     const favorite = remoteFavorite(model);
     const words = Array.isArray(version.trainedWords) ? version.trainedWords : [];
     const stats = modelStats(model, version);
@@ -1762,16 +1772,33 @@ function renderRemoteDetail() {
             </div>
             <div class="cmgr-section-title">${escapeHtml(t("Trigger Words"))}</div>
             <div class="cmgr-trained">${words.length ? words.slice(0, 16).map((word) => `<button data-copy="${escapeAttr(word)}">${escapeHtml(word)}</button>`).join("") : `<span>${escapeHtml(t("No trained words listed."))}</span>`}</div>
-            ${pending ? renderPendingDownload(pending.job) : ""}
-            <div class="cmgr-lora-detail-actions">
-                ${local
-                    ? `<button class="cmgr-primary cmgr-full" data-action="apply-installed">${escapeHtml(t(isAppliedAsset(local) ? "Applied" : "Apply to Node"))}</button>`
-                    : `<button class="cmgr-primary cmgr-full" data-action="download-apply" ${pending || !file ? "disabled" : ""}>${escapeHtml(t(pending ? "Downloading..." : file ? "Download and Apply" : "No downloadable file"))}</button>`}
-            </div>
+            <div data-remote-download-state>${renderRemoteDownloadState(model, version, file)}</div>
             <div class="cmgr-section-title">${escapeHtml(t("Description"))}</div>
             <div class="cmgr-description">${sanitizeDescriptionHtml(model.description || version.description || "")}</div>
         </div>
     `;
+}
+
+function renderRemoteDownloadState(model = popup.selectedRemote, version = selectedVersion(), file = selectedFile()) {
+    const local = findLocalForRemote(model, version);
+    const pending = pendingForRemote(model, version);
+    return `
+        ${pending ? renderPendingDownload(pending.job) : ""}
+        <div class="cmgr-lora-detail-actions">
+            ${local
+                ? `<button class="cmgr-primary cmgr-full" data-action="apply-installed">${escapeHtml(t(isAppliedAsset(local) ? "Applied" : "Apply to Node"))}</button>`
+                : `<button class="cmgr-primary cmgr-full" data-action="download-apply" ${pending || !file ? "disabled" : ""}>${escapeHtml(t(pending ? "Downloading..." : file ? "Download and Apply" : "No downloadable file"))}</button>`}
+        </div>
+    `;
+}
+
+function updateRemoteDownloadState() {
+    if (popup.tab !== "discover" || !popup.selectedRemote) return false;
+    const host = popupBody?.querySelector("[data-remote-download-state]");
+    if (!host) return false;
+    host.innerHTML = renderRemoteDownloadState();
+    bindRemoteDownloadEvents(host);
+    return true;
 }
 
 function filteredLoraFavorites() {
@@ -2078,10 +2105,11 @@ async function downloadAndApply() {
         };
         showToast(t("Download queued; it will be applied when complete."));
         startDownloadPolling();
-        renderPopup();
+        updateDownloadNavCount();
+        if (!updateRemoteDownloadState()) renderPopup();
     } catch (error) {
         popup.error = error.message;
-        renderPopup();
+        if (!updatePopupMessages()) renderPopup();
     }
 }
 
@@ -2564,24 +2592,57 @@ function renderDownloads() {
             <div class="cmgr-toolbar cmgr-lora-toolbar cmgr-download-toolbar cmgr-lora-download-toolbar">
                 <div class="cmgr-download-toolbar-heading">
                     <h2>${escapeHtml(t("LoRA Downloads"))}</h2>
-                    <span>${escapeHtml(t("{active} active · {finished} finished", { active: activeCount, finished: finishedJobs.length }))}</span>
+                    <span data-lora-download-summary>${renderDownloadSummary(activeCount, finishedJobs.length)}</span>
                 </div>
-                <div class="cmgr-download-toolbar-actions">
-                    ${finishedJobs.length ? `<button class="cmgr-secondary" data-action="clear-lora-downloads">${escapeHtml(t("Clear finished"))}</button>` : ""}
-                    <button class="cmgr-secondary" data-action="refresh-lora-downloads">${escapeHtml(t("Refresh"))}</button>
+                <div class="cmgr-download-toolbar-actions" data-lora-download-actions>
+                    ${renderDownloadToolbarActions(finishedJobs.length)}
                 </div>
             </div>
             <div class="cmgr-lora-download-list">
-                ${jobs.length ? jobs.map(renderDownloadJob).join("") : renderCollectionEmptyState({
-                    kind: "downloads",
-                    kicker: t("Downloads"),
-                    title: t("No download tasks yet"),
-                    description: t("Downloads you queue from Discover will appear here with their progress and status."),
-                    hints: [t("Live progress"), t("Retry failed tasks")],
-                })}
+                ${renderLoraDownloadJobs(jobs)}
             </div>
         </section>
     `;
+}
+
+function renderDownloadSummary(activeCount, finishedCount) {
+    return escapeHtml(t("{active} active · {finished} finished", {
+        active: activeCount,
+        finished: finishedCount,
+    }));
+}
+
+function renderDownloadToolbarActions(finishedCount) {
+    return `
+        ${finishedCount ? `<button class="cmgr-secondary" data-action="clear-lora-downloads">${escapeHtml(t("Clear finished"))}</button>` : ""}
+        <button class="cmgr-secondary" data-action="refresh-lora-downloads">${escapeHtml(t("Refresh"))}</button>
+    `;
+}
+
+function renderLoraDownloadJobs(jobs = loraDownloads()) {
+    return jobs.length ? jobs.map(renderDownloadJob).join("") : renderCollectionEmptyState({
+        kind: "downloads",
+        kicker: t("Downloads"),
+        title: t("No download tasks yet"),
+        description: t("Downloads you queue from Discover will appear here with their progress and status."),
+        hints: [t("Live progress"), t("Retry failed tasks")],
+    });
+}
+
+function updateDownloadView() {
+    if (popup.tab !== "downloads") return false;
+    const list = popupBody?.querySelector(".cmgr-lora-download-list");
+    if (!list) return false;
+    const jobs = loraDownloads();
+    const activeCount = jobs.filter((job) => ACTIVE_DOWNLOAD_STATUSES.has(job.status)).length;
+    const finishedCount = jobs.filter((job) => TERMINAL_DOWNLOAD_STATUSES.has(job.status)).length;
+    const summary = popupBody.querySelector("[data-lora-download-summary]");
+    const actions = popupBody.querySelector("[data-lora-download-actions]");
+    if (summary) summary.innerHTML = renderDownloadSummary(activeCount, finishedCount);
+    if (actions) actions.innerHTML = renderDownloadToolbarActions(finishedCount);
+    list.innerHTML = renderLoraDownloadJobs(jobs);
+    bindLoraDownloadEvents(popupBody);
+    return true;
 }
 
 function loraDownloads() {
@@ -2649,7 +2710,10 @@ async function loadDownloads(shouldRender = true) {
         popup.downloads = popup.downloads || {};
     }
     if (hasActiveDownloads()) startDownloadPolling();
-    if (shouldRender && overlay?.classList.contains("show")) renderPopup();
+    updateDownloadNavCount();
+    if (shouldRender && overlay?.classList.contains("show") && !updateDownloadView() && !updateRemoteDownloadState()) {
+        renderPopup();
+    }
 }
 
 function startDownloadPolling() {
@@ -2678,7 +2742,15 @@ async function pollDownloads() {
             clearInterval(pollTimer);
             pollTimer = null;
         }
-        if (overlay?.classList.contains("show") && (popup.tab === "downloads" || popup.selectedRemote)) renderPopup();
+        updateDownloadNavCount();
+        if (overlay?.classList.contains("show")) {
+            if (popup.tab === "downloads") {
+                if (!updateDownloadView()) renderPopup();
+            } else if (popup.tab === "discover" && popup.selectedRemote) {
+                if (!updateRemoteDownloadState()) renderPopup();
+            }
+            updatePopupMessages();
+        }
     } catch (_) {
         // Keep the existing state and retry on the next poll.
     } finally {
@@ -2840,13 +2912,7 @@ function bindPopupEvents() {
     };
     const file = popupBody?.querySelector('[data-field="remote-file"]');
     if (file) file.onchange = () => { popup.selectedFileName = file.value; };
-    const installed = popupBody?.querySelector('[data-action="apply-installed"]');
-    if (installed) installed.onclick = () => {
-        const asset = findLocalForRemote(popup.selectedRemote, selectedVersion());
-        if (asset) addLoraToNode(entryFromAsset(asset));
-    };
-    const download = popupBody?.querySelector('[data-action="download-apply"]');
-    if (download) download.onclick = () => void downloadAndApply();
+    bindRemoteDownloadEvents(popupBody);
     const favoriteRemote = popupBody?.querySelector('[data-action="favorite-remote-lora"]');
     if (favoriteRemote) favoriteRemote.onclick = () => void toggleRemoteFavorite();
     const remoteFavoriteFolder = popupBody?.querySelector('[data-action="assign-remote-favorite-folder"]');
@@ -2975,13 +3041,27 @@ function bindPopupEvents() {
         renderPopup();
     };
 
-    const refreshDownloads = popupBody?.querySelector('[data-action="refresh-lora-downloads"]');
+    bindLoraDownloadEvents(popupBody);
+}
+
+function bindRemoteDownloadEvents(root) {
+    const installed = root?.querySelector('[data-action="apply-installed"]');
+    if (installed) installed.onclick = () => {
+        const asset = findLocalForRemote(popup.selectedRemote, selectedVersion());
+        if (asset) addLoraToNode(entryFromAsset(asset));
+    };
+    const download = root?.querySelector('[data-action="download-apply"]');
+    if (download) download.onclick = () => void downloadAndApply();
+}
+
+function bindLoraDownloadEvents(root) {
+    const refreshDownloads = root?.querySelector('[data-action="refresh-lora-downloads"]');
     if (refreshDownloads) refreshDownloads.onclick = () => void loadDownloads(true);
-    const clearDownloads = popupBody?.querySelector('[data-action="clear-lora-downloads"]');
+    const clearDownloads = root?.querySelector('[data-action="clear-lora-downloads"]');
     if (clearDownloads) clearDownloads.onclick = () => void clearFinishedDownloadRecords();
-    popupBody?.querySelectorAll('[data-action="cancel-lora-download"]').forEach((button) => { button.onclick = () => void cancelDownload(button.dataset.taskId); });
-    popupBody?.querySelectorAll('[data-action="retry-lora-download"]').forEach((button) => { button.onclick = () => void retryDownload(button.dataset.taskId); });
-    popupBody?.querySelectorAll('[data-action="remove-lora-download"]').forEach((button) => { button.onclick = () => void removeDownloadRecord(button.dataset.taskId); });
+    root?.querySelectorAll('[data-action="cancel-lora-download"]').forEach((button) => { button.onclick = () => void cancelDownload(button.dataset.taskId); });
+    root?.querySelectorAll('[data-action="retry-lora-download"]').forEach((button) => { button.onclick = () => void retryDownload(button.dataset.taskId); });
+    root?.querySelectorAll('[data-action="remove-lora-download"]').forEach((button) => { button.onclick = () => void removeDownloadRecord(button.dataset.taskId); });
 }
 
 function showToast(message) {
