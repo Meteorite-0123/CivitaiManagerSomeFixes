@@ -242,6 +242,8 @@ const messages = {
         Strength: "强度",
         Remove: "移除",
         "Open LoRA Manager": "打开 LoRA 管理器",
+        "{enabled} / {total} enabled": "已启用 {enabled} / {total}",
+        "Double-click to reset to 1.00": "双击恢复为 1.00",
         "LoRA Manager": "LoRA 管理器",
         "Search, download, apply, and manage LoRAs for this node.": "为当前节点搜索、下载、应用和管理 LoRA。",
         "Local LoRAs": "本地 LoRA",

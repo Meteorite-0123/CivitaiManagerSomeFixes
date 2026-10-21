@@ -32,6 +32,240 @@ export function injectStyles() {
             --cmgr-danger-soft: color-mix(in srgb, var(--cmgr-bad) 14%, transparent);
             --cmgr-danger-border: color-mix(in srgb, var(--cmgr-bad) 22%, transparent);
         }
+        .cmgr-node-loras {
+            --cmgr-node-card: color-mix(in srgb, var(--cmgr-text) 4%, transparent);
+            --cmgr-node-card-hover: color-mix(in srgb, var(--cmgr-text) 7%, transparent);
+            --cmgr-node-line: color-mix(in srgb, var(--cmgr-text) 9%, transparent);
+            --cmgr-node-line-strong: color-mix(in srgb, var(--cmgr-text) 20%, transparent);
+            --cmgr-node-track: color-mix(in srgb, var(--cmgr-text) 14%, transparent);
+            --cmgr-node-fill: var(--cmgr-accent);
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            width: 100%;
+            min-width: 0;
+            box-sizing: border-box;
+            overflow: hidden;
+            color: var(--cmgr-text);
+            font-family: inherit;
+            font-size: 12px;
+            line-height: 1.3;
+            user-select: none;
+            pointer-events: auto;
+        }
+        .cmgr-node-loras *, .cmgr-node-loras *::before, .cmgr-node-loras *::after { box-sizing: border-box; }
+        .cmgr-node-loras [hidden] { display: none !important; }
+        .cmgr-node-loras button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex: 0 0 auto;
+            min-width: 0;
+            margin: 0;
+            padding: 0;
+            border: 0;
+            color: inherit;
+            background: transparent;
+            font: inherit;
+            cursor: pointer;
+        }
+        .cmgr-node-loras button:focus-visible, .cmgr-node-loras input:focus-visible { outline: 2px solid var(--cmgr-accent); outline-offset: 1px; }
+        .cmgr-node-lora-list { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+        .cmgr-node-lora {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex: 0 0 56px;
+            height: 56px;
+            min-width: 0;
+            padding: 7px 6px 7px 7px;
+            border: 1px solid var(--cmgr-node-line);
+            border-radius: 9px;
+            background: var(--cmgr-node-card);
+            transition: border-color .15s ease, background-color .15s ease;
+        }
+        .cmgr-node-lora:hover { border-color: var(--cmgr-node-line-strong); background: var(--cmgr-node-card-hover); }
+        .cmgr-node-lora-thumb {
+            position: relative;
+            display: grid;
+            place-items: center;
+            flex: 0 0 40px;
+            width: 40px;
+            height: 40px;
+            overflow: hidden;
+            border-radius: 7px;
+            color: var(--cmgr-accent);
+            background: linear-gradient(140deg, color-mix(in srgb, var(--cmgr-accent) 26%, transparent), color-mix(in srgb, var(--cmgr-accent) 6%, transparent));
+            box-shadow: inset 0 0 0 1px var(--cmgr-node-line);
+        }
+        .cmgr-node-lora-thumb svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linejoin: round; stroke-linecap: round; }
+        .cmgr-node-lora-thumb img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; pointer-events: none; transition: opacity .2s ease, filter .2s ease; }
+        .cmgr-node-lora-thumb.has-image img { opacity: 1; }
+        .cmgr-node-lora-thumb.has-image svg { visibility: hidden; }
+        .cmgr-node-lora-body { display: flex; flex: 1 1 auto; flex-direction: column; gap: 4px; min-width: 0; }
+        .cmgr-node-lora-header { display: flex; align-items: center; gap: 7px; height: 18px; min-width: 0; }
+        .cmgr-node-loras .cmgr-node-lora-toggle {
+            position: relative;
+            flex: 0 0 26px;
+            width: 26px;
+            height: 14px;
+            border-radius: 7px;
+            background: color-mix(in srgb, var(--cmgr-text) 26%, transparent);
+            transition: background-color .15s ease;
+        }
+        .cmgr-node-lora-toggle::after {
+            content: "";
+            position: absolute;
+            left: 2px;
+            top: 2px;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 1px 2px rgba(0, 0, 0, .35);
+            transition: transform .15s ease;
+        }
+        .cmgr-node-loras .cmgr-node-lora-toggle[aria-checked="true"] { background: var(--cmgr-accent); }
+        .cmgr-node-lora-toggle[aria-checked="true"]::after { transform: translateX(12px); }
+        .cmgr-node-loras .cmgr-node-lora-name {
+            display: block;
+            flex: 1 1 0;
+            overflow: hidden;
+            white-space: nowrap;
+            text-overflow: ellipsis;
+            text-align: left;
+            color: var(--cmgr-text);
+            font-size: 12px;
+            font-weight: 600;
+            line-height: 18px;
+            transition: color .15s ease;
+        }
+        .cmgr-node-loras .cmgr-node-lora-name:hover { color: var(--cmgr-accent); }
+        .cmgr-node-loras .cmgr-node-lora-icon {
+            flex: 0 0 22px;
+            width: 22px;
+            height: 22px;
+            margin: -2px 0;
+            border-radius: 6px;
+            color: var(--cmgr-muted);
+            opacity: .6;
+            transition: opacity .15s ease, color .15s ease, background-color .15s ease;
+        }
+        .cmgr-node-lora:hover .cmgr-node-lora-icon { opacity: 1; }
+        .cmgr-node-lora-icon svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+        .cmgr-node-loras .cmgr-node-lora-copy.is-empty, .cmgr-node-lora:hover .cmgr-node-lora-copy.is-empty { opacity: .35; }
+        .cmgr-node-loras .cmgr-node-lora-copy:hover { color: var(--cmgr-accent); background: var(--cmgr-accent-soft); opacity: 1; }
+        .cmgr-node-loras .cmgr-node-lora-remove:hover { color: var(--cmgr-danger); background: var(--cmgr-danger-soft); opacity: 1; }
+        .cmgr-node-lora-strength { display: flex; align-items: center; gap: 8px; height: 18px; min-width: 0; padding-right: 2px; }
+        .cmgr-node-lora-strength input[type="range"] {
+            --cmgr-fill-a: calc(6px + (100% - 12px) * var(--cmgr-fill-from, 0));
+            --cmgr-fill-b: calc(6px + (100% - 12px) * var(--cmgr-fill-to, 0));
+            --cmgr-track: linear-gradient(to right, var(--cmgr-node-track) var(--cmgr-fill-a), var(--cmgr-node-fill) var(--cmgr-fill-a), var(--cmgr-node-fill) var(--cmgr-fill-b), var(--cmgr-node-track) var(--cmgr-fill-b));
+            flex: 1 1 auto;
+            min-width: 0;
+            height: 18px;
+            margin: 0;
+            padding: 0;
+            outline-offset: 2px;
+            background: linear-gradient(var(--cmgr-node-line-strong), var(--cmgr-node-line-strong)) no-repeat;
+            background-size: 1px 10px;
+            background-position: calc(6px + (100% - 12px) * var(--cmgr-zero, .5)) center;
+            appearance: none;
+            -webkit-appearance: none;
+            cursor: pointer;
+        }
+        .cmgr-node-lora-strength input[type="range"]::-webkit-slider-runnable-track { height: 4px; border-radius: 2px; background: var(--cmgr-track); }
+        .cmgr-node-lora-strength input[type="range"]::-moz-range-track { height: 4px; border-radius: 2px; background: var(--cmgr-track); }
+        .cmgr-node-lora-strength input[type="range"]::-webkit-slider-thumb {
+            width: 12px;
+            height: 12px;
+            margin-top: -4px;
+            border: 0;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 0 0 3px color-mix(in srgb, var(--cmgr-node-fill) 38%, transparent), 0 1px 3px rgba(0, 0, 0, .45);
+            appearance: none;
+            -webkit-appearance: none;
+            transition: transform .12s ease, box-shadow .12s ease;
+        }
+        .cmgr-node-lora-strength input[type="range"]::-moz-range-thumb {
+            width: 12px;
+            height: 12px;
+            border: 0;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 0 0 3px color-mix(in srgb, var(--cmgr-node-fill) 38%, transparent), 0 1px 3px rgba(0, 0, 0, .45);
+        }
+        .cmgr-node-lora-strength input[type="range"]:not(:disabled):hover::-webkit-slider-thumb,
+        .cmgr-node-lora-strength input[type="range"]:not(:disabled):active::-webkit-slider-thumb { transform: scale(1.15); }
+        .cmgr-node-lora-strength input[type="number"] {
+            flex: 0 0 46px;
+            width: 46px;
+            height: 20px;
+            margin: 0;
+            padding: 0 4px;
+            border: 1px solid transparent;
+            border-radius: 5px;
+            outline: none;
+            background: color-mix(in srgb, var(--cmgr-text) 7%, transparent);
+            color: var(--cmgr-text);
+            font: inherit;
+            font-size: 11.5px;
+            font-weight: 600;
+            font-variant-numeric: tabular-nums;
+            text-align: center;
+            appearance: textfield;
+            -moz-appearance: textfield;
+            user-select: text;
+            transition: border-color .15s ease, background-color .15s ease;
+        }
+        .cmgr-node-lora-strength input[type="number"]::-webkit-inner-spin-button,
+        .cmgr-node-lora-strength input[type="number"]::-webkit-outer-spin-button { appearance: none; margin: 0; }
+        .cmgr-node-lora-strength input[type="number"]:not(:disabled):hover { border-color: var(--cmgr-node-line-strong); }
+        .cmgr-node-lora-strength input[type="number"]:focus { border-color: var(--cmgr-accent); background: var(--cmgr-accent-soft); }
+        .cmgr-node-lora.is-negative { --cmgr-node-fill: var(--cmgr-warn); }
+        .cmgr-node-lora.is-negative .cmgr-node-lora-strength input[type="number"] { color: var(--cmgr-warn); }
+        .cmgr-node-lora.is-disabled { --cmgr-node-fill: color-mix(in srgb, var(--cmgr-text) 30%, transparent); background: transparent; }
+        .cmgr-node-lora.is-disabled .cmgr-node-lora-thumb { opacity: .45; filter: grayscale(1); }
+        .cmgr-node-loras .cmgr-node-lora.is-disabled .cmgr-node-lora-name { color: var(--cmgr-muted); font-weight: 500; }
+        .cmgr-node-lora.is-disabled .cmgr-node-lora-strength { opacity: .5; }
+        .cmgr-node-lora.is-disabled .cmgr-node-lora-strength input { cursor: default; }
+        .cmgr-node-lora.is-disabled .cmgr-node-lora-strength input[type="number"] { color: var(--cmgr-muted); }
+        .cmgr-node-loras .cmgr-node-lora-empty {
+            justify-content: flex-start;
+            gap: 12px;
+            width: 100%;
+            height: 64px;
+            padding: 0 14px;
+            border: 1px dashed var(--cmgr-node-line-strong);
+            border-radius: 9px;
+            text-align: left;
+            transition: border-color .15s ease, background-color .15s ease;
+        }
+        .cmgr-node-loras .cmgr-node-lora-empty:hover { border-color: var(--cmgr-accent); background: var(--cmgr-accent-soft); }
+        .cmgr-node-lora-empty-icon { display: grid; place-items: center; flex: 0 0 32px; width: 32px; height: 32px; border-radius: 8px; color: var(--cmgr-accent); background: var(--cmgr-accent-soft); }
+        .cmgr-node-lora-empty-icon svg, .cmgr-node-lora-open-icon svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; }
+        .cmgr-node-lora-empty-text { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+        .cmgr-node-lora-empty-text strong { overflow: hidden; color: var(--cmgr-text); font-size: 12px; font-weight: 600; white-space: nowrap; text-overflow: ellipsis; }
+        .cmgr-node-lora-empty-text span { color: var(--cmgr-accent); font-size: 11px; }
+        .cmgr-node-lora-footer { display: flex; flex: 0 0 28px; align-items: center; justify-content: space-between; gap: 8px; height: 28px; min-width: 0; padding-left: 2px; }
+        .cmgr-node-lora-summary { overflow: hidden; color: var(--cmgr-muted); font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; text-overflow: ellipsis; }
+        .cmgr-node-loras .cmgr-node-lora-open {
+            gap: 6px;
+            height: 28px;
+            padding: 0 12px 0 9px;
+            border: 1px solid var(--cmgr-accent-border);
+            border-radius: 7px;
+            background: var(--cmgr-accent-soft);
+            color: var(--cmgr-accent);
+            font-size: 12px;
+            font-weight: 600;
+            white-space: nowrap;
+            transition: background-color .15s ease, border-color .15s ease;
+        }
+        .cmgr-node-loras .cmgr-node-lora-open:hover { border-color: var(--cmgr-accent); background: color-mix(in srgb, var(--cmgr-accent) 24%, transparent); }
+        .cmgr-node-lora-open-icon { display: inline-grid; place-items: center; }
+        .cmgr-node-lora-open-icon svg { width: 14px; height: 14px; }
         .cmgr-left-entry {
             position: fixed;
             left: 8px;
@@ -3709,7 +3943,8 @@ export function injectStyles() {
         .cmgr-search-toolbar-actions > :only-child {
             grid-column: 2;
         }
-        .cmgr-library > .cmgr-library-match-status {
+        .cmgr-library > .cmgr-library-match-status,
+        .cmgr-lora-page > .cmgr-library-match-status {
             flex: 0 0 auto;
             box-sizing: border-box;
             padding: 9px 24px;

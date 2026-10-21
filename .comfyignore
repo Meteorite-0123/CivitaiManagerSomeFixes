@@ -4,6 +4,7 @@ tests/
 img/
 .agents/
 .codex/
+.dashboard/
 .test-user/
 __pycache__/
 *.py[cod]

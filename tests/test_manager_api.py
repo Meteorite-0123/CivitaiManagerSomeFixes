@@ -9,6 +9,7 @@ import tempfile
 import time
 import types
 import unittest
+import urllib.request
 from pathlib import Path
 from unittest import mock
 
@@ -523,6 +524,46 @@ class ConfigApiAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status, 400)
         self.assertIn("must be a boolean", response.body["error"])
+
+
+class DownloadRedirectTests(unittest.TestCase):
+    def _redirect(self, target_url):
+        request = urllib.request.Request(
+            "https://civitai.com/api/download/models/123",
+            headers={
+                "Authorization": "Bearer secret",
+                "Cookie": "session=secret",
+                "User-Agent": "CivitaiManager/test",
+            },
+        )
+        return manager._SafeDownloadRedirectHandler().redirect_request(
+            request,
+            None,
+            302,
+            "Found",
+            {},
+            target_url,
+        )
+
+    def test_cross_host_redirect_strips_credentials(self):
+        redirected = self._redirect("https://storage.example/model.safetensors")
+
+        self.assertIsNotNone(redirected)
+        self.assertIsNone(redirected.get_header("Authorization"))
+        self.assertIsNone(redirected.get_header("Cookie"))
+        self.assertEqual(redirected.get_header("User-agent"), "CivitaiManager/test")
+
+    def test_same_host_redirect_keeps_credentials(self):
+        redirected = self._redirect("https://civitai.com/api/download/models/123?fileId=456")
+
+        self.assertEqual(redirected.get_header("Authorization"), "Bearer secret")
+        self.assertEqual(redirected.get_header("Cookie"), "session=secret")
+
+    def test_fallback_download_url_uses_download_endpoint_without_v1(self):
+        self.assertEqual(
+            manager._download_url_for({"id": 123}, {}),
+            "https://civitai.com/api/download/models/123",
+        )
 
 
 class DownloadJobTests(unittest.TestCase):

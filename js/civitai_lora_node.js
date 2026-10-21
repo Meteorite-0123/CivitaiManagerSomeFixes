@@ -40,16 +40,11 @@ import {
     isModelPreviewFiltered,
 } from "./civitai/media.js";
 import { injectStyles } from "./civitai/styles.js";
+import { ensureLoraDataWidget, syncLoraWidgets } from "./civitai/lora_widgets.js";
 
 const NODE_NAME = "CivitaiMultiLoraLoader";
 const ACTIVE_DOWNLOAD_STATUSES = new Set(["pending", "downloading", "cancelling"]);
 const TERMINAL_DOWNLOAD_STATUSES = new Set(["completed", "failed", "cancelled"]);
-const NODE_CONTROL_HEIGHT = 28;
-const NODE_SIDE_MARGIN = 14;
-const NODE_SWITCH_WIDTH = 34;
-const NODE_SWITCH_HEIGHT = 18;
-const NODE_REMOVE_SIZE = 22;
-const NODE_COPY_ICON_SIZE = 14;
 
 let overlay = null;
 let popupBody = null;
@@ -62,6 +57,16 @@ let toastTimer = null;
 let renderedPopupTab = "";
 let previewObserver = null;
 let popupPreviewSetupFrame = 0;
+let localMetadataBatch = {
+    running: false,
+    cancelRequested: false,
+    total: 0,
+    completed: 0,
+    matched: 0,
+    notFound: 0,
+    failed: 0,
+    current: "",
+};
 
 const popup = {
     node: null,
@@ -85,6 +90,7 @@ const popup = {
     selectedFileName: "",
     libraryItems: [],
     libraryLoading: false,
+    config: { save_preview: true },
     selectedAssetId: "",
     favoritesLoading: false,
     favoriteItems: [],
@@ -126,39 +132,11 @@ app.registerExtension({
 
         const originalConfigure = nodeType.prototype.onConfigure;
         nodeType.prototype.onConfigure = function (info) {
-            const restored = findSerializedLoraList(info?.widgets_values);
-            if (restored) syncNodeWidgets(this, restored);
+            const restored = parseLoraJson(info?.widgets_values_named?.lora_list_json)
+                ?? findSerializedLoraList(info?.widgets_values);
             const result = originalConfigure?.apply(this, arguments);
-            syncNodeWidgets(this, readJsonWidget(this) || restored || this._cmgrLoras || []);
+            syncNodeWidgets(this, restored ?? readJsonWidget(this) ?? [], { restoring: true });
             return result;
-        };
-
-        const originalResize = nodeType.prototype.onResize;
-        nodeType.prototype.onResize = function () {
-            const result = originalResize?.apply(this, arguments);
-            updateNodeLoraLabels(this);
-            return result;
-        };
-
-        const originalDrawForeground = nodeType.prototype.onDrawForeground;
-        nodeType.prototype.onDrawForeground = function () {
-            const result = originalDrawForeground?.apply(this, arguments);
-            const width = Number(this.size?.[0] || 0);
-            if (width && Math.abs(width - Number(this._cmgrLastLoraWidth || 0)) >= 8) updateNodeLoraLabels(this);
-            return result;
-        };
-
-        const originalMouseMove = nodeType.prototype.onMouseMove;
-        nodeType.prototype.onMouseMove = function (event, pos, graphCanvas) {
-            const result = originalMouseMove?.apply(this, arguments);
-            updateNodeLoraControlHover(this, pos, graphCanvas);
-            return result;
-        };
-
-        const originalMouseLeave = nodeType.prototype.onMouseLeave;
-        nodeType.prototype.onMouseLeave = function () {
-            clearNodeLoraControlHover(this);
-            return originalMouseLeave?.apply(this, arguments);
         };
     },
 });
@@ -220,36 +198,7 @@ function readJsonWidget(node) {
     return parseLoraJson(node?.widgets?.find((widget) => widget.name === "lora_list_json")?.value);
 }
 
-function setWidgetProperty(widget, name, value) {
-    try {
-        widget[name] = value;
-    } catch (_) {}
-}
-
-function hideWidgetElement(element) {
-    if (!element?.style || element === document.body || element === document.documentElement) return;
-    element.style.setProperty("display", "none", "important");
-    element.style.setProperty("visibility", "hidden", "important");
-    element.style.setProperty("pointer-events", "none", "important");
-    element.style.setProperty("width", "0", "important");
-    element.style.setProperty("height", "0", "important");
-    element.setAttribute?.("aria-hidden", "true");
-}
-
-function hideJsonWidget(node) {
-    const widget = node?.widgets?.find((item) => item.name === "lora_list_json");
-    if (!widget) return;
-    setWidgetProperty(widget, "type", "hidden");
-    setWidgetProperty(widget, "serialize", true);
-    setWidgetProperty(widget, "options", { ...(widget.options || {}), hidden: true });
-    setWidgetProperty(widget, "computeSize", () => [0, 0]);
-    setWidgetProperty(widget, "draw", () => {});
-    setWidgetProperty(widget, "mouse", () => false);
-    setWidgetProperty(widget, "computedHeight", 0);
-    [widget.element, widget.inputEl, widget.el, widget.domElement].forEach(hideWidgetElement);
-}
-
-function writeNodeData(node, loras = node?._cmgrLoras || []) {
+function writeNodeData(node, loras) {
     if (!node) return;
     node._cmgrLoras = normalizeLoraList(loras);
     const widget = node.widgets?.find((item) => item.name === "lora_list_json");
@@ -257,50 +206,28 @@ function writeNodeData(node, loras = node?._cmgrLoras || []) {
     redrawNode(node);
 }
 
+function updateNodeLoras(node, value) {
+    if (!node) return;
+    const loras = normalizeLoraList(value);
+    const widget = ensureLoraDataWidget(node);
+    const changed = widget.value !== JSON.stringify(loras);
+    const graph = node.graph;
+    if (changed) graph?.beforeChange();
+    try {
+        syncNodeWidgets(node, loras);
+    } finally {
+        if (changed) graph?.afterChange();
+    }
+}
+
 function redrawNode(node) {
     node?.setDirtyCanvas?.(true, true);
     app?.canvas?.setDirty?.(true, true);
-    (node?.widgets || []).forEach((widget) => {
-        if (!widget?.__cmgrLoraControl) return;
-        widget.triggerDraw?.();
-    });
 }
 
 function shortLoraName(entry, maxLength = 30) {
     const label = String(entry?.display_name || entry?.name || "LoRA").split("/").pop();
     return label.length > maxLength ? `${label.slice(0, maxLength - 1)}…` : label;
-}
-
-function loraBaseName(entry) {
-    const raw = String(entry?.display_name || entry?.name || "LoRA").replaceAll("\\", "/");
-    return raw.split("/").pop().replace(/\.safetensors$/i, "") || "LoRA";
-}
-
-function adaptiveLoraName(entry, nodeWidth) {
-    const name = loraBaseName(entry);
-    const maxChars = Math.max(12, Math.floor((Math.max(180, Number(nodeWidth || 300)) - 136) / 7));
-    if (name.length <= maxChars) return name;
-    const head = Math.ceil((maxChars - 3) * 0.68);
-    const tail = Math.max(0, maxChars - 3 - head);
-    return `${name.slice(0, head)}...${tail ? name.slice(-tail) : ""}`;
-}
-
-function roundedNodeRect(ctx, x, y, width, height, radius) {
-    const safeRadius = Math.max(0, Math.min(radius, width / 2, height / 2));
-    ctx.beginPath();
-    if (typeof ctx.roundRect === "function") {
-        ctx.roundRect(x, y, width, height, safeRadius);
-        return;
-    }
-    ctx.moveTo(x + safeRadius, y);
-    ctx.lineTo(x + width - safeRadius, y);
-    ctx.quadraticCurveTo(x + width, y, x + width, y + safeRadius);
-    ctx.lineTo(x + width, y + height - safeRadius);
-    ctx.quadraticCurveTo(x + width, y + height, x + width - safeRadius, y + height);
-    ctx.lineTo(x + safeRadius, y + height);
-    ctx.quadraticCurveTo(x, y + height, x, y + height - safeRadius);
-    ctx.lineTo(x, y + safeRadius);
-    ctx.quadraticCurveTo(x, y, x + safeRadius, y);
 }
 
 function normalizedTriggerWords(entry) {
@@ -378,330 +305,26 @@ async function copyNodeLoraTriggerWords(entry) {
     }
 }
 
-function nodeLoraControlGeometry(widget, node) {
-    const width = Number(widget?.__cmgrDrawWidth || node?.size?.[0] || 300);
-    const rowY = Number(widget?.__cmgrRowY ?? widget?.last_y ?? 0);
-    const rowHeight = Number(widget?.__cmgrRowHeight || NODE_CONTROL_HEIGHT);
-    const switchRight = NODE_SIDE_MARGIN + 7 + NODE_SWITCH_WIDTH + 5;
-    const removeLeft = width - NODE_SIDE_MARGIN - NODE_REMOVE_SIZE - 6;
-    return {
-        width,
-        rowY,
-        rowHeight,
-        switchRight,
-        removeLeft,
-        contentLeft: switchRight,
-        contentRight: removeLeft - 4,
-    };
-}
-
-function nodeLoraControlHitRegion(widget, pos, node) {
-    const x = Number(pos?.[0]);
-    const y = Number(pos?.[1]);
-    if (!Number.isFinite(x) || !Number.isFinite(y)) return "";
-    const geometry = nodeLoraControlGeometry(widget, node);
-    if (
-        y < geometry.rowY
-        || y > geometry.rowY + geometry.rowHeight
-        || x < NODE_SIDE_MARGIN
-        || x > geometry.width - NODE_SIDE_MARGIN
-    ) return "";
-    if (x <= geometry.switchRight) return "toggle";
-    if (x >= geometry.removeLeft - 4) return "remove";
-    if (x >= geometry.contentLeft && x < geometry.contentRight) return "copy";
-    return "";
-}
-
-function nodeCanvasElement(graphCanvas) {
-    return graphCanvas?.canvas || app?.canvas?.canvas || null;
-}
-
-function updateNodeLoraControlHover(node, pos, graphCanvas) {
-    let activeRegion = "";
-    let changed = false;
-    (node?.widgets || []).forEach((widget) => {
-        if (!widget?.__cmgrLoraControl) return;
-        const nextRegion = activeRegion ? "" : nodeLoraControlHitRegion(widget, pos, node);
-        if (nextRegion) activeRegion = nextRegion;
-        if (widget.__cmgrHoverRegion !== nextRegion) {
-            widget.__cmgrHoverRegion = nextRegion;
-            changed = true;
-        }
-    });
-
-    const canvas = nodeCanvasElement(graphCanvas);
-    if (canvas?.style && activeRegion) {
-        canvas.style.cursor = "pointer";
-        node._cmgrOwnsCanvasCursor = true;
-    } else if (canvas?.style && node?._cmgrOwnsCanvasCursor) {
-        canvas.style.cursor = "";
-        node._cmgrOwnsCanvasCursor = false;
-    }
-    if (changed) redrawNode(node);
-}
-
-function clearNodeLoraControlHover(node) {
-    let changed = false;
-    (node?.widgets || []).forEach((widget) => {
-        if (!widget?.__cmgrLoraControl || !widget.__cmgrHoverRegion) return;
-        widget.__cmgrHoverRegion = "";
-        changed = true;
-    });
-    const canvas = nodeCanvasElement();
-    if (canvas?.style && node?._cmgrOwnsCanvasCursor) canvas.style.cursor = "";
-    if (node) node._cmgrOwnsCanvasCursor = false;
-    if (changed) redrawNode(node);
-}
-
-function nextNodeWidgetGeneration(node) {
-    const current = Number(node?._cmgrWidgetGeneration || 0);
-    const next = Number.isSafeInteger(current) && current >= 0 ? current + 1 : 1;
-    node._cmgrWidgetGeneration = next;
-    return next;
-}
-
-function invisibleWidgetIdentity(...values) {
-    const encode = (value) => Math.max(0, Number(value) || 0)
-        .toString(2)
-        .replaceAll("0", "\u200B")
-        .replaceAll("1", "\u200C");
-    return `\u2063${values.map(encode).join("\u2060")}`;
-}
-
-function findNodeLoraIndex(node, entryKey) {
-    return Array.isArray(node?._cmgrLoras)
-        ? node._cmgrLoras.findIndex((item) => loraKey(item) === entryKey)
-        : -1;
-}
-
-function createNodeLoraControl({ entry, nodeWidth, widgetIdentity, onToggle, onRemove }) {
-    const widget = {
-        type: "custom",
-        // Vue nodes bind legacy widgets by name and keep that instance locally.
-        // A fresh identity forces WidgetLegacy to rebind after a dynamic rebuild.
-        name: `cmgr_lora_control:${widgetIdentity}:${entry.name}`,
-        value: entry.enabled !== false,
-        options: {},
-        serialize: false,
-        computedHeight: NODE_CONTROL_HEIGHT,
-        __cmgrLoraWidget: true,
-        __cmgrLoraControl: true,
-        __cmgrLoraEntry: entry,
-        __cmgrDisplayName: adaptiveLoraName(entry, nodeWidth),
-        __cmgrHoverRegion: "",
-        tooltip: `${entry.name}\n${t("Click the LoRA name to copy its trigger words.")}`,
-        computeSize(width) {
-            return [width || 300, NODE_CONTROL_HEIGHT];
-        },
-        draw(ctx, node, width, y, height) {
-            const rowHeight = Math.min(NODE_CONTROL_HEIGHT, Math.max(24, height || NODE_CONTROL_HEIGHT));
-            const rowY = y + Math.max(0, ((height || NODE_CONTROL_HEIGHT) - rowHeight) / 2);
-            const rowWidth = Math.max(120, width - NODE_SIDE_MARGIN * 2);
-            const enabled = widget.__cmgrLoraEntry.enabled !== false;
-            const vueWidgetCanvas = ctx?.canvas?.closest?.(".lg-node-widget") ? ctx.canvas : null;
-            if (vueWidgetCanvas?.style) {
-                vueWidgetCanvas.style.cursor = "pointer";
-                vueWidgetCanvas.title = t("Click the switch, LoRA name, or remove button.");
-            }
-            widget.last_y = y;
-            widget.__cmgrDrawWidth = width;
-            widget.__cmgrRowY = rowY;
-            widget.__cmgrRowHeight = rowHeight;
-
-            ctx.save();
-            roundedNodeRect(ctx, NODE_SIDE_MARGIN, rowY, rowWidth, rowHeight, 8);
-            ctx.fillStyle = widget.__cmgrHoverRegion === "copy"
-                ? (enabled ? "rgba(55, 145, 255, 0.19)" : "rgba(255, 255, 255, 0.065)")
-                : (enabled ? "rgba(55, 145, 255, 0.12)" : "rgba(255, 255, 255, 0.035)");
-            ctx.fill();
-            ctx.strokeStyle = enabled ? "rgba(89, 166, 255, 0.42)" : "rgba(255, 255, 255, 0.11)";
-            ctx.lineWidth = 1;
-            ctx.stroke();
-
-            const switchX = NODE_SIDE_MARGIN + 7;
-            const switchY = rowY + (rowHeight - NODE_SWITCH_HEIGHT) / 2;
-            roundedNodeRect(ctx, switchX, switchY, NODE_SWITCH_WIDTH, NODE_SWITCH_HEIGHT, NODE_SWITCH_HEIGHT / 2);
-            ctx.fillStyle = enabled
-                ? (widget.__cmgrHoverRegion === "toggle" ? "#62abff" : "#3b93f6")
-                : (widget.__cmgrHoverRegion === "toggle" ? "#657184" : "#4b5563");
-            ctx.fill();
-            ctx.beginPath();
-            ctx.arc(enabled ? switchX + NODE_SWITCH_WIDTH - 9 : switchX + 9, switchY + NODE_SWITCH_HEIGHT / 2, 6.5, 0, Math.PI * 2);
-            ctx.fillStyle = "#ffffff";
-            ctx.fill();
-
-            const removeX = width - NODE_SIDE_MARGIN - NODE_REMOVE_SIZE - 6;
-            const removeY = rowY + (rowHeight - NODE_REMOVE_SIZE) / 2;
-            roundedNodeRect(ctx, removeX, removeY, NODE_REMOVE_SIZE, NODE_REMOVE_SIZE, 6);
-            ctx.fillStyle = widget.__cmgrHoverRegion === "remove" ? "rgba(239, 68, 68, 0.22)" : "rgba(239, 68, 68, 0.10)";
-            ctx.fill();
-            ctx.strokeStyle = "rgba(239, 68, 68, 0.30)";
-            ctx.stroke();
-            ctx.fillStyle = "#f87171";
-            ctx.font = "600 17px Arial";
-            ctx.textAlign = "center";
-            ctx.textBaseline = "middle";
-            ctx.fillText("×", removeX + NODE_REMOVE_SIZE / 2, removeY + NODE_REMOVE_SIZE / 2 + 0.5);
-
-            const copyX = removeX - NODE_COPY_ICON_SIZE - 9;
-            const copyY = rowY + (rowHeight - NODE_COPY_ICON_SIZE) / 2;
-            const hasTriggerWords = normalizedTriggerWords(widget.__cmgrLoraEntry).length > 0;
-            ctx.strokeStyle = widget.__cmgrHoverRegion === "copy"
-                ? "#8cc5ff"
-                : (hasTriggerWords ? "rgba(190, 220, 255, 0.72)" : "rgba(180, 190, 204, 0.42)");
-            ctx.lineWidth = 1.25;
-            roundedNodeRect(ctx, copyX + 4, copyY, 8, 9, 2);
-            ctx.stroke();
-            roundedNodeRect(ctx, copyX + 1, copyY + 3, 8, 9, 2);
-            ctx.stroke();
-
-            const textX = switchX + NODE_SWITCH_WIDTH + 10;
-            const textRight = copyX - 7;
-            ctx.beginPath();
-            ctx.rect(textX, rowY, Math.max(0, textRight - textX), rowHeight);
-            ctx.clip();
-            ctx.fillStyle = enabled ? "#e5f2ff" : "#8b94a3";
-            ctx.font = enabled ? "600 12px Arial" : "500 12px Arial";
-            ctx.textAlign = "left";
-            ctx.fillText(widget.__cmgrDisplayName, textX, rowY + rowHeight / 2 + 0.5);
-            ctx.restore();
-        },
-        mouse(event, pointerOffset, node) {
-            const eventType = String(event?.type || "");
-            if (["pointerup", "mouseup"].includes(eventType)) {
-                const pressedRegion = widget.__cmgrPressedRegion || "";
-                widget.__cmgrPressedRegion = "";
-                if (pressedRegion === "remove") {
-                    // Vue's WidgetLegacy uses widget-local coordinates on down,
-                    // but its shared pointer finalizer supplies node coordinates
-                    // on up. The down hit already proved this is the remove area.
-                    onRemove?.();
-                    redrawNode(node);
-                    return true;
-                }
-                return false;
-            }
-            if (eventType && !["pointerdown", "mousedown"].includes(eventType)) return false;
-            const region = nodeLoraControlHitRegion(widget, pointerOffset, node);
-            if (region === "toggle") {
-                const enabled = widget.__cmgrLoraEntry.enabled === false;
-                widget.value = enabled;
-                widget.__cmgrLoraEntry.enabled = enabled;
-                if (widget.__cmgrStrengthWidget) widget.__cmgrStrengthWidget.disabled = !enabled;
-                onToggle?.(enabled);
-                redrawNode(node);
-                return true;
-            }
-            if (region === "copy") {
-                void copyNodeLoraTriggerWords(widget.__cmgrLoraEntry);
-                redrawNode(node);
-                return true;
-            }
-            if (region === "remove") {
-                // Rebuilding node.widgets during pointerdown leaves ComfyUI/Vue
-                // holding the removed widget until pointerup. Rebuild only once
-                // the current pointer lifecycle is finishing.
-                widget.__cmgrPressedRegion = "remove";
-                redrawNode(node);
-                return true;
-            }
-            return false;
-        },
-    };
-    return widget;
-}
-
-function updateNodeLoraLabels(node) {
-    const width = Number(node?.size?.[0] || 300);
-    let changed = false;
-    (node?.widgets || []).forEach((widget) => {
-        if (!widget?.__cmgrLoraControl) return;
-        const next = adaptiveLoraName(widget.__cmgrLoraEntry, width);
-        if (next !== widget.__cmgrDisplayName) {
-            widget.__cmgrDisplayName = next;
-            changed = true;
-        }
-    });
-    node._cmgrLastLoraWidth = width;
-    if (changed) redrawNode(node);
-}
-
-function removeDynamicNodeWidgets(node) {
-    if (!Array.isArray(node?.widgets)) return;
-    for (let index = node.widgets.length - 1; index >= 0; index -= 1) {
-        const widget = node.widgets[index];
-        if (!widget?.__cmgrLoraWidget) continue;
-        const element = widget.element || widget.inputEl || widget.el;
-        element?.remove?.();
-        if (typeof node.removeWidget === "function") {
-            try {
-                node.removeWidget(widget);
-                continue;
-            } catch (_) {}
-        }
-        node.widgets.splice(index, 1);
-    }
-}
-
-function syncNodeWidgets(node, value) {
+function syncNodeWidgets(node, value, options) {
     if (!node) return;
-    const width = Math.max(Number(node.size?.[0] || 0), 300);
-    const loras = normalizeLoraList(value);
-    const generation = nextNodeWidgetGeneration(node);
-    removeDynamicNodeWidgets(node);
-    node._cmgrLoras = loras;
-
-    loras.forEach((entry, index) => {
-        let strength = null;
-        const entryKey = loraKey(entry);
-        const widgetIdentity = `${generation}:${index}`;
-        const control = node.addCustomWidget(createNodeLoraControl({
-            entry,
-            nodeWidth: width,
-            widgetIdentity,
-            onToggle: (enabled) => {
-                const currentIndex = findNodeLoraIndex(node, entryKey);
-                const current = node._cmgrLoras[currentIndex];
-                if (!current) return;
-                current.enabled = Boolean(enabled);
-                if (strength) strength.disabled = !current.enabled;
-                writeNodeData(node);
-            },
-            onRemove: () => {
-                const currentIndex = findNodeLoraIndex(node, entryKey);
-                if (currentIndex < 0) return;
-                const next = node._cmgrLoras.filter((_, itemIndex) => itemIndex !== currentIndex);
-                writeNodeData(node, next);
-                syncNodeWidgets(node, next);
-                if (popup.node === node && overlay?.classList.contains("show")) renderPopup();
-            },
-        }));
-
-        const strengthIdentity = invisibleWidgetIdentity(generation, index, 1);
-        strength = node.addWidget("slider", `   ${t("Strength")}${strengthIdentity}`, entry.strength_model, (next) => {
-            const currentIndex = findNodeLoraIndex(node, entryKey);
-            const current = node._cmgrLoras[currentIndex];
-            const number = Number(next);
-            if (!current || !Number.isFinite(number)) return;
-            current.strength_model = Number(number.toFixed(2));
-            writeNodeData(node);
-        }, { min: -4, max: 4, step: 0.05, precision: 2 });
-        strength.__cmgrLoraWidget = true;
-        strength.serialize = false;
-        strength.computedHeight = 18;
-        strength.disabled = entry.enabled === false;
-        control.__cmgrStrengthWidget = strength;
-    });
-
-    const openButton = node.addWidget("button", t("Open LoRA Manager"), null, () => openPopup(node));
-    openButton.__cmgrLoraWidget = true;
-    openButton.serialize = false;
-    hideJsonWidget(node);
-    writeNodeData(node, loras);
-
-    const computed = node.computeSize?.() || [width, 120];
-    node.setSize?.([width, Math.max(100, computed[1])]);
-    updateNodeLoraLabels(node);
+    ensureLoraDataWidget(node);
+    writeNodeData(node, value);
+    syncLoraWidgets(node, node._cmgrLoras, {
+        t,
+        onEdit: (index, patch) => {
+            const next = normalizeLoraList(node._cmgrLoras);
+            if (!next[index]) return;
+            Object.assign(next[index], patch);
+            updateNodeLoras(node, next);
+        },
+        onRemove: (index) => {
+            const next = node._cmgrLoras.filter((_, itemIndex) => itemIndex !== index);
+            updateNodeLoras(node, next);
+            if (popup.node === node && overlay?.classList.contains("show")) renderPopup();
+        },
+        onCopy: (entry) => { if (entry) void copyNodeLoraTriggerWords(entry); },
+        onOpen: () => openPopup(node),
+    }, options);
 }
 
 function loraKey(entry) {
@@ -730,8 +353,7 @@ function addLoraToTargetNode(node, entry, notify = false) {
         next.push(normalized);
         if (notify) showToast(t("LoRA applied to node."));
     }
-    writeNodeData(node, next);
-    syncNodeWidgets(node, next);
+    updateNodeLoras(node, next);
     if (popup.node === node && overlay?.classList.contains("show")) {
         if (popup.tab === "applied") popup.selectedAppliedIndex = existingIndex >= 0 ? existingIndex : next.length - 1;
         if (!updateRemoteDownloadState()) renderPopup();
@@ -745,8 +367,7 @@ function removeLoraFromNode(index) {
     popup.selectedAppliedIndex = selectedIndex > index
         ? selectedIndex - 1
         : Math.min(selectedIndex, Math.max(0, next.length - 1));
-    writeNodeData(popup.node, next);
-    syncNodeWidgets(popup.node, next);
+    updateNodeLoras(popup.node, next);
     renderPopup();
 }
 
@@ -759,8 +380,7 @@ function updateLoraOrder(index, delta) {
     const selectedIndex = Number(popup.selectedAppliedIndex || 0);
     if (selectedIndex === index) popup.selectedAppliedIndex = target;
     else if (selectedIndex === target) popup.selectedAppliedIndex = index;
-    writeNodeData(popup.node, next);
-    syncNodeWidgets(popup.node, next);
+    updateNodeLoras(popup.node, next);
     renderPopup();
 }
 
@@ -811,12 +431,21 @@ function closePopup() {
 
 async function hydratePopup() {
     await Promise.allSettled([
+        loadPopupConfig(),
         loadLibrary(false),
         loadFavorites(false),
         loadDownloads(false),
         loadLoraTaxonomy(),
         popup.remoteItems.length ? Promise.resolve() : searchRemote(true),
     ]);
+}
+
+async function loadPopupConfig() {
+    try {
+        popup.config = await apiGet("/config");
+    } catch (_) {
+        popup.config = popup.config || { save_preview: true };
+    }
 }
 
 function applyFavoriteStore(data = {}) {
@@ -2131,11 +1760,17 @@ function renderLocal() {
             placeholder: t("Filter local LoRAs..."),
             clearAction: "clear-lora-local-search",
         }),
-        actionsHtml: `<button class="cmgr-secondary cmgr-search-submit" data-action="refresh-local-loras">${escapeHtml(t(popup.libraryLoading ? "Scanning..." : "Refresh"))}</button>`,
+        actionsHtml: `
+            ${localMetadataBatch.running
+                ? `<button class="cmgr-secondary" data-action="cancel-match-local-loras">${escapeHtml(t("Stop matching"))}</button>`
+                : `<button class="cmgr-secondary" data-action="match-missing-local-loras">${escapeHtml(t("Match missing Civitai info"))}</button>`}
+            <button class="cmgr-secondary cmgr-search-submit" data-action="refresh-local-loras" ${localMetadataBatch.running ? "disabled" : ""}>${escapeHtml(t(popup.libraryLoading ? "Scanning..." : "Refresh"))}</button>
+        `,
     });
     return `
         <section class="cmgr-page cmgr-lora-page">
             ${toolbar}
+            ${renderLocalMetadataBatchStatus()}
             <div class="cmgr-split has-detail cmgr-lora-split">
                 <div class="cmgr-results cmgr-lora-results">
                     ${renderLocalResults()}
@@ -2338,6 +1973,116 @@ function assetPayload(asset) {
     };
 }
 
+function localAssetHasCivitaiMatch(asset) {
+    const matchStatus = String(asset?.metadata_match_status || "").toLowerCase();
+    return Boolean(
+        asset?.model_id
+        || matchStatus === "matched"
+        || (asset?.source === "civitai" && asset?.version_id)
+    );
+}
+
+function localAssetNeedsCivitaiMetadata(asset) {
+    const wantsPreview = popup.config?.save_preview !== false;
+    return !localAssetHasCivitaiMatch(asset) || (wantsPreview && !asset.has_preview);
+}
+
+function localMetadataBatchText() {
+    if (!localMetadataBatch.running && !localMetadataBatch.total) return "";
+    if (localMetadataBatch.cancelRequested && localMetadataBatch.running) {
+        return t("Stopping after current model...");
+    }
+    return t("Matching metadata {completed}/{total} · matched {matched} · not found {notFound} · failed {failed}", {
+        completed: localMetadataBatch.completed,
+        total: localMetadataBatch.total,
+        matched: localMetadataBatch.matched,
+        notFound: localMetadataBatch.notFound,
+        failed: localMetadataBatch.failed,
+    });
+}
+
+function renderLocalMetadataBatchStatus() {
+    if (!localMetadataBatch.running && !localMetadataBatch.total) return "";
+    const pct = localMetadataBatch.total
+        ? Math.round((localMetadataBatch.completed / localMetadataBatch.total) * 100)
+        : 0;
+    return `
+        <div class="cmgr-library-match-status" data-local-match-status>
+            <div class="cmgr-library-match-progress"><span style="width:${pct}%"></span></div>
+            <b>${escapeHtml(localMetadataBatchText())}</b>
+            <span data-local-match-current>${escapeHtml(localMetadataBatch.current || "")}</span>
+        </div>
+    `;
+}
+
+function updateLocalMetadataBatchStatus() {
+    const status = popupBody?.querySelector("[data-local-match-status]");
+    if (!status) return;
+    const pct = localMetadataBatch.total
+        ? Math.round((localMetadataBatch.completed / localMetadataBatch.total) * 100)
+        : 0;
+    const progress = status.querySelector(".cmgr-library-match-progress span");
+    const label = status.querySelector("b");
+    const current = status.querySelector("[data-local-match-current]");
+    if (progress) progress.style.width = `${pct}%`;
+    if (label) label.textContent = localMetadataBatchText();
+    if (current) current.textContent = localMetadataBatch.current || "";
+}
+
+async function matchMissingLocalLoraMetadata() {
+    if (localMetadataBatch.running) return;
+    const candidates = filteredLocalItems().filter(localAssetNeedsCivitaiMetadata);
+    if (!candidates.length) {
+        showToast(t("All visible models already have Civitai metadata and previews"));
+        return;
+    }
+    if (!confirm(t("Match Civitai information for {count} visible models? Hashing large files may take a while.", { count: candidates.length }))) {
+        return;
+    }
+    localMetadataBatch = {
+        running: true,
+        cancelRequested: false,
+        total: candidates.length,
+        completed: 0,
+        matched: 0,
+        notFound: 0,
+        failed: 0,
+        current: "",
+    };
+    renderPopup();
+    for (const asset of candidates) {
+        if (localMetadataBatch.cancelRequested) break;
+        localMetadataBatch.current = asset.name || asset.filename || "";
+        updateLocalMetadataBatchStatus();
+        try {
+            const data = await apiPost("/asset/metadata", assetPayload(asset));
+            if (data.matched) localMetadataBatch.matched += 1;
+            else localMetadataBatch.notFound += 1;
+        } catch (error) {
+            localMetadataBatch.failed += 1;
+            console.warn("[CivitaiManager] LoRA metadata match failed:", asset.absolute_path, error);
+        } finally {
+            localMetadataBatch.completed += 1;
+            updateLocalMetadataBatchStatus();
+        }
+    }
+    const cancelled = localMetadataBatch.cancelRequested;
+    localMetadataBatch.running = false;
+    localMetadataBatch.current = "";
+    await loadLibrary(true, false);
+    if (overlay?.classList.contains("show")) {
+        if (popup.tab === "local") renderPopup();
+        else rerenderNavPreservingScroll();
+    }
+    showToast(t(cancelled ? "Metadata matching stopped" : "Metadata matching completed"));
+}
+
+function cancelLocalLoraMetadataMatch() {
+    if (!localMetadataBatch.running) return;
+    localMetadataBatch.cancelRequested = true;
+    updateLocalMetadataBatchStatus();
+}
+
 function entryFromAsset(asset) {
     return {
         name: asset.relative_path || asset.filename,
@@ -2403,7 +2148,7 @@ function updateLocalLibraryLoadingState() {
     const refresh = popupBody?.querySelector('[data-action="refresh-local-loras"]');
     if (!refresh) return;
     refresh.textContent = t(popup.libraryLoading ? "Scanning..." : "Refresh");
-    refresh.disabled = popup.libraryLoading;
+    refresh.disabled = popup.libraryLoading || localMetadataBatch.running;
 }
 
 async function manageSelectedAsset(action) {
@@ -2437,8 +2182,7 @@ async function manageSelectedAsset(action) {
             if (!confirm(t("Delete this LoRA file and its companion metadata?"))) return;
             await apiPost("/asset/delete", assetPayload(asset));
             const next = normalizeLoraList(popup.node?._cmgrLoras).filter((entry) => loraKey(entry) !== loraKey(entryFromAsset(asset)));
-            writeNodeData(popup.node, next);
-            syncNodeWidgets(popup.node, next);
+            updateNodeLoras(popup.node, next);
             popup.selectedAssetId = "";
             await loadLibrary(true, false);
             deleted = true;
@@ -2969,6 +2713,10 @@ function bindPopupEvents() {
     };
     const refreshLocal = popupBody?.querySelector('[data-action="refresh-local-loras"]');
     if (refreshLocal) refreshLocal.onclick = () => void loadLibrary(true);
+    const matchMissingLocal = popupBody?.querySelector('[data-action="match-missing-local-loras"]');
+    if (matchMissingLocal) matchMissingLocal.onclick = () => void matchMissingLocalLoraMetadata();
+    const cancelLocalMatch = popupBody?.querySelector('[data-action="cancel-match-local-loras"]');
+    if (cancelLocalMatch) cancelLocalMatch.onclick = () => cancelLocalLoraMetadataMatch();
     const localActions = {
         "apply-local": "apply",
         "match-local": "match",
@@ -3008,8 +2756,7 @@ function bindPopupEvents() {
             const next = normalizeLoraList(popup.node?._cmgrLoras);
             if (!next[index]) return;
             next[index].enabled = input.checked;
-            writeNodeData(popup.node, next);
-            syncNodeWidgets(popup.node, next);
+            updateNodeLoras(popup.node, next);
             renderPopup();
         };
     });
@@ -3019,7 +2766,7 @@ function bindPopupEvents() {
             const next = normalizeLoraList(popup.node?._cmgrLoras);
             if (!next[index]) return;
             next[index].strength_model = Number(input.value);
-            writeNodeData(popup.node, next);
+            updateNodeLoras(popup.node, next);
             input.style.setProperty("--cmgr-strength-percent", `${((Number(input.value) + 4) / 8) * 100}%`);
             const output = input.closest(".cmgr-lora-strength")?.querySelector("output");
             if (output) output.value = Number(input.value).toFixed(2);
@@ -3036,8 +2783,7 @@ function bindPopupEvents() {
     if (clearApplied) clearApplied.onclick = () => {
         if (!confirm(t("Remove all LoRAs from this node?"))) return;
         popup.selectedAppliedIndex = 0;
-        writeNodeData(popup.node, []);
-        syncNodeWidgets(popup.node, []);
+        updateNodeLoras(popup.node, []);
         renderPopup();
     };
 

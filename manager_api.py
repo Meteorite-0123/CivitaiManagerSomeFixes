@@ -48,6 +48,7 @@ except ImportError:  # Standalone test loading
 
 API_PREFIX = "/civitai-manager/api"
 CIVITAI_API_BASE = "https://civitai.red/api/v1"
+CIVITAI_DOWNLOAD_BASE = "https://civitai.com/api/download/models"
 MODEL_EXTENSIONS = {".ckpt", ".pt", ".pt2", ".bin", ".pth", ".safetensors", ".pkl", ".sft"}
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
 WORKFLOW_EXTENSIONS = {".json"}
@@ -1189,7 +1190,7 @@ def _download_url_for(version: dict[str, Any], file_info: dict[str, Any]) -> str
             return value
     version_id = version.get("id")
     if version_id:
-        return f"{CIVITAI_API_BASE}/download/models/{version_id}"
+        return f"{CIVITAI_DOWNLOAD_BASE}/{version_id}"
     return ""
 
 
@@ -1309,16 +1310,22 @@ def _first_preview_url(version: dict[str, Any], model: dict[str, Any]) -> str:
     return ""
 
 
-def _append_api_key_to_download(url: str, api_key: str | None) -> str:
-    if not api_key:
-        return url
-    parsed = urllib.parse.urlparse(url)
-    if "civitai" not in parsed.netloc.lower():
-        return url
-    query = urllib.parse.parse_qs(parsed.query)
-    if "token" not in query:
-        query["token"] = [api_key]
-    return urllib.parse.urlunparse(parsed._replace(query=urllib.parse.urlencode(query, doseq=True)))
+class _SafeDownloadRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Do not forward Civitai credentials to redirected storage hosts."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is None:
+            return None
+        source_host = (urllib.parse.urlparse(req.full_url).hostname or "").lower()
+        target_host = (urllib.parse.urlparse(newurl).hostname or "").lower()
+        if source_host != target_host:
+            redirected.remove_header("Authorization")
+            redirected.remove_header("Cookie")
+        return redirected
+
+
+_DOWNLOAD_URL_OPENER = urllib.request.build_opener(_SafeDownloadRedirectHandler())
 
 
 class DownloadCancelled(Exception):
@@ -1382,7 +1389,6 @@ def _download_worker(
     cancel_event = store.cancel_event(task_id)
     config = load_config()
     api_key = str(config.get("civitai_api_key") or "").strip() or None
-    request_url = _append_api_key_to_download(download_url, api_key)
     total = 0
     progress = 0
 
@@ -1390,8 +1396,8 @@ def _download_worker(
         if cancel_event.is_set():
             raise DownloadCancelled()
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
-        req = urllib.request.Request(request_url, headers=_request_headers(api_key, json_content=False))
-        with urllib.request.urlopen(req, timeout=60) as resp, open(temp_path, "wb") as handle:
+        req = urllib.request.Request(download_url, headers=_request_headers(api_key, json_content=False))
+        with _DOWNLOAD_URL_OPENER.open(req, timeout=60) as resp, open(temp_path, "wb") as handle:
             total = int(resp.headers.get("Content-Length") or 0)
             store.update(task_id, status="downloading", total=total, error="")
             while True:

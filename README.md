@@ -4,7 +4,7 @@
 
 ### 在 ComfyUI 内完成 Civitai 模型的发现、下载、整理与使用
 
-[![Version](https://img.shields.io/badge/version-1.0.3-4f8cff?style=flat-square)](https://github.com/nregret/CivitaiManager)
+[![Version](https://img.shields.io/badge/version-1.0.4-4f8cff?style=flat-square)](https://github.com/nregret/CivitaiManager)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-CivitaiManager-8b5cf6?style=flat-square)](https://registry.comfy.org/zh/publishers/nnegret/nodes/CivitaiManager)
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.10-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![ComfyUI](https://img.shields.io/badge/ComfyUI-Custom_Node-111827?style=flat-square)](https://github.com/comfyanonymous/ComfyUI)
@@ -146,6 +146,8 @@ MODEL → CivitaiManager - Multi LoRA Loader → MODEL
 
 点击节点中的 **打开 LoRA 管理器**，即可搜索、下载、应用和管理 LoRA。节点会把 LoRA 路径、强度、开关与顺序保存在工作流中。
 
+每条 LoRA 保持紧凑的两行布局：第一行集成开关、名称、复制触发词和 **×** 移除按钮，第二行集成强度滑条与数值输入。控件由 ComfyUI 原生 DOMWidget 托管，直接使用浏览器点击事件。修改强度或开关会保留手动调整的节点尺寸；增删条目时按固定行高调整高度。已有工作流可直接载入，增删和参数修改支持撤销。
+
 ## 常见问题
 
 <details>
@@ -208,6 +210,7 @@ CivitaiManager/
 
 ```powershell
 python -m unittest discover -s tests -v
+node tests/test_lora_widgets.mjs
 python -c "import ast,pathlib; files=list(pathlib.Path('.').glob('*.py'))+list(pathlib.Path('backend').glob('*.py')); [ast.parse(p.read_text(encoding='utf-8'), filename=str(p)) for p in files]"
 Get-ChildItem js -Recurse -Filter *.js | ForEach-Object { node --check $_.FullName }
 ```
