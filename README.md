@@ -1,235 +1,261 @@
 <div align="center">
 
+**English** · [简体中文](./README.zh-CN.md)
+
 # CivitaiManager
 
-### 在 ComfyUI 内完成 Civitai 模型的发现、下载、整理与使用
+### Find, download, organize, and use Civitai models without leaving ComfyUI
 
 [![Version](https://img.shields.io/badge/version-1.1.1-4f8cff?style=flat-square)](https://github.com/nregret/CivitaiManager)
-[![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-CivitaiManager-8b5cf6?style=flat-square)](https://registry.comfy.org/zh/publishers/nnegret/nodes/CivitaiManager)
+[![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-CivitaiManager-8b5cf6?style=flat-square)](https://registry.comfy.org/publishers/nnegret/nodes/CivitaiManager)
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.10-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![ComfyUI](https://img.shields.io/badge/ComfyUI-Custom_Node-111827?style=flat-square)](https://github.com/comfyanonymous/ComfyUI)
-[![Languages](https://img.shields.io/badge/UI-中文%20%7C%20English-22c55e?style=flat-square)](https://github.com/nregret/CivitaiManager)
+[![Languages](https://img.shields.io/badge/UI-English%20%7C%20中文-22c55e?style=flat-square)](https://github.com/nregret/CivitaiManager)
 
-**CivitaiManager** 是一个面向 ComfyUI 的一站式 Civitai 资源管理扩展。<br>
-无需离开工作流界面，即可浏览、筛选、下载和整理 **Checkpoint、UNet、LoRA 与 Workflow**，并通过专用的多 LoRA 加载节点直接投入创作。
+**CivitaiManager** is a ComfyUI extension for managing Civitai resources.<br>
+Search, download, and organize **Checkpoints, UNets, LoRAs, and Workflows** right inside the workflow editor, then put them to work with the built-in multi-LoRA loader node.
 
-[界面预览](#功能与界面) · [安装](#安装) · [快速开始](#快速开始) · [常见问题](#常见问题) · [支持项目](#支持项目)
+[Features](#features) · [Installation](#installation) · [Quick Start](#quick-start) · [FAQ](#faq) · [Support](#support-the-project)
 
 </div>
 
 <p align="center">
-  <img src="./img/Civitai管理器主页面.jpeg" width="100%" alt="CivitaiManager 主页面：在 ComfyUI 中搜索、筛选和查看 Civitai 模型">
+  <img src="./img/en/discover.jpg" width="100%" alt="CivitaiManager Discover page: search result cards with the model detail panel">
 </p>
 
-> 从“找到模型”到“放进工作流”，尽可能只做一次选择。CivitaiManager 将在线资源、本地模型、收藏夹、下载任务和多 LoRA 节点连接成一条完整链路。
+> From "found a model" to "it's in my workflow" in as few steps as possible: online discovery, your local library, favorites, downloads, and the multi-LoRA node all work as one connected flow.
 
-## 功能与界面
+## Features
 
-### 在线发现：浏览、筛选与下载
+### Discover: search, filter, and download
 
-在 ComfyUI 内直接访问 Civitai 资源。卡片列表负责快速浏览，右侧详情面板用于确认版本、文件、预览图与触发词；选定资源后即可按照自动规划的目录加入下载队列。
+Browse Civitai from inside ComfyUI. Cards on the left let you scan results quickly; the detail panel on the right shows versions, files, preview images, and trigger words. When you're ready, the model is queued for download into an automatically planned folder.
 
-- 覆盖 Checkpoint、UNet、LoRA 与 Workflow。
-- 支持关键词、基础模型、分类、标签和排序组合筛选。
-- 支持多版本、多文件和多预览图切换；点击预览图可在管理器内查看大图。
-- 卡片支持方向键浏览；窗口较窄时详情以侧滑抽屉展开，`Esc` 收起。
-- 可在下载前确认资源类型、基础模型、分类和文件名。
+- Covers Checkpoint / UNet, LoRA, and Workflow, with search-as-you-type. Combine base model, category, tag, and sort filters; click a tag in the detail panel to filter by it.
+- Images load as they approach the viewport and fade in where they land. When a search yields only a few results, the manager keeps looking in the background and shows a progress bar above the cards instead of empty placeholders.
+- The detail panel has a multi-image gallery (with a full-size viewer inside the manager), version and file pickers, plus type, base model, size, format, and publish date. Click a trigger word to copy it.
+- Early Access versions, which must be unlocked with Buzz first, get a lock badge on their card and a notice in the detail panel with a link to unlock them on Civitai.
+- Before downloading, you can confirm or change the planned folder and file name.
+- Browse cards with the arrow keys. In narrow windows the detail panel opens as a slide-in drawer; press `Esc` to close it.
+
+### Library: keep your model folders under control
+
+CivitaiManager reads every model root that ComfyUI has configured and brings models scattered across folders and subfolders into a single view.
 
 <p align="center">
-  <img src="./img/Civitai管理器主页面.jpeg" width="100%" alt="CivitaiManager 在线模型发现与详情页面">
+  <img src="./img/en/library.jpg" width="100%" alt="CivitaiManager Library: folder tree, model cards, and detail panel">
 </p>
 
-### 本地资源库：让模型目录真正可管理
+- A folder tree shows where your models live and how many each folder holds. Filter by resource type, base model, folder, and tag.
+- View previews, metadata, trigger words, and the Civitai match status, and open the containing folder in one click.
+- Move, rename, favorite, and delete models; companion metadata JSON and preview images are updated along with them.
+- Models without Civitai information can be matched automatically by SHA256.
 
-CivitaiManager 会读取 ComfyUI 已解析的模型目录，并把散落在不同根目录和子文件夹中的资产整理成统一视图。你可以快速定位模型、查看预览与元数据，也可以批量补全缺失的 Civitai 信息。
-
-- 文件夹树展示资源分布与数量。
-- 支持按资源类型、基础模型和本地目录筛选。
-- 支持移动、重命名、收藏与删除资源。
-- 移动资源时同步更新 companion JSON、预览图和相对路径信息。
-- 支持通过 SHA256 匹配缺失的 Civitai 元数据。
+### Downloads: progress, failure reasons, and details
 
 <p align="center">
-  <img src="./img/本地资源管理.jpeg" width="100%" alt="CivitaiManager 本地资源管理页面">
+  <img src="./img/en/downloads.jpg" width="100%" alt="CivitaiManager Downloads: an expanded download record with preview gallery and model details">
 </p>
 
-### Multi LoRA Loader：从管理器直接进入工作流
+- Downloads run in the background, up to 3 at a time, with progress, speed, and time remaining. Closing the manager does not stop them.
+- Task records are stored in your user directory, and finished ones are kept for 24 hours (up to 100). Tasks interrupted by a ComfyUI restart are marked as failed and can be retried in one click.
+- Failures are grouped by cause: Early Access, API key rejected, access denied, file no longer available, too many requests, Civitai unavailable, network error, and could not save the file. Each comes with a suggested next step and Civitai's original message.
+- Click a record to expand it (one at a time). You'll see a preview gallery, model and version, file, save location, and timestamps, plus download and like counts, trigger words, tags, and the description fetched from Civitai. Completed records can open their folder directly.
 
-`CivitaiManager - Multi LoRA Loader` 将多个 LoRA 收纳在一个清晰的节点中。条目按照界面顺序依次应用，每个 LoRA 都有独立开关和强度控制。
+### Multi LoRA Loader and the LoRA Manager
 
-- 在节点中启用、停用、调整或移除 LoRA。
-- 从节点打开精简 LoRA 管理器，搜索远程资源或浏览本地 LoRA。
-- 支持“下载并应用”，减少下载后再次查找文件的操作。
-- 支持调整应用顺序；缺失文件会安全跳过并输出日志，不中断整个列表。
+`CivitaiManager - Multi LoRA Loader` holds multiple LoRAs in one node and applies them in list order.
 
 <p align="center">
-  <img src="./img/多LoRA加载节点.jpeg" width="720" alt="CivitaiManager Multi LoRA Loader 节点">
+  <img src="./img/en/lora-node.jpg" width="440" alt="CivitaiManager Multi LoRA Loader node">
 </p>
 
-### 设置：路径、内容偏好与伴随文件
-
-设置页集中管理 Civitai 访问能力与下载行为。模型目录直接来自 ComfyUI 配置，Workflow 可以指定独立保存目录。
-
-- 保存并测试 Civitai API Key。
-- 控制是否允许 NSFW 搜索结果。
-- 选择是否保存模型元数据 JSON 与预览图。
-- 查看 Checkpoint、UNet、LoRA 和 Workflow 的实际解析目录。
+- Each LoRA gets one row: thumbnail, on/off switch, name, copy trigger words, remove, plus a strength slider and number field (negative strengths are supported). Changes can be undone.
+- Click **Open LoRA Manager** on the node to switch between five pages: Discover, Local LoRAs, Favorites, Applied, and Downloads.
+- Discover offers **Download and Apply**: when the download finishes, the LoRA is added to the current node with its preview image.
 
 <p align="center">
-  <img src="./img/设置NSFW和CIVITAI%20key.jpeg" width="100%" alt="CivitaiManager API Key、NSFW 和下载路径设置页面">
+  <img src="./img/en/lora-manager.jpg" width="100%" alt="CivitaiManager LoRA Manager: the list of LoRAs applied to the node">
 </p>
 
-### 收藏夹与下载任务
+- The **Applied** page manages the node's LoRAs as a list. Reorder them by dragging the handle or with the arrow keys, enable or disable them with a button, and adjust strength in place. While you drag, the strength is only previewed; it is written when you let go, so it creates a single undo step. Double-click the slider to reset it to 1.00.
+- Removing a LoRA can be undone from the toast. LoRAs whose local file is missing are flagged, and clicking a name jumps to it on the Local LoRAs page.
 
-收藏不再依赖模型是否已经下载。远程模型可以先加入收藏夹，之后下载到本地时会按照 Civitai 模型 ID 和资源类型自动合并为同一条记录。
+### Favorites
 
-下载任务在后台运行并持久化到用户目录。关闭管理器不会中断状态记录；ComfyUI 重启后，未正常结束的任务会标记为失败并可重新入队。
+Favorite remote models without downloading them, and sort them into your own folders. When you later download a favorited model, it is merged with the existing favorite by its Civitai model ID.
 
-## 安装
+### Settings and theme
+
+<p align="center">
+  <img src="./img/en/settings.jpg" width="100%" alt="CivitaiManager Settings: API key, download defaults, and model folders">
+</p>
+
+- Save and test your Civitai API key, choose whether NSFW content is shown, and whether metadata JSON and preview images are saved.
+- Set the folder for downloaded workflows and see which folders Checkpoints, UNets, LoRAs, and Workflows actually resolve to.
+- The interface colors follow your current ComfyUI palette: light, dark, or custom.
+
+## Installation
 
 <details>
-<summary><strong>展开安装说明</strong></summary>
+<summary><strong>Show installation steps</strong></summary>
 
 <br>
 
-### 方法一：ComfyUI Manager（推荐）
+### Option 1: ComfyUI Manager (recommended)
 
-1. 打开 ComfyUI Manager。
-2. 搜索 `CivitaiManager`。
-3. 点击 **Install**。
-4. 安装完成后重启 ComfyUI。
+1. Open ComfyUI Manager.
+2. Search for `CivitaiManager`.
+3. Click **Install**.
+4. Restart ComfyUI.
 
-也可以访问 [Comfy Registry 中的 CivitaiManager](https://registry.comfy.org/zh/publishers/nnegret/nodes/CivitaiManager) 查看已发布版本。
+You can also see the published versions on [the Comfy Registry](https://registry.comfy.org/publishers/nnegret/nodes/CivitaiManager).
 
-### 方法二：Comfy CLI
+### Option 2: Comfy CLI
 
 ```bash
 comfy node install CivitaiManager
 ```
 
-安装完成后重启 ComfyUI。
+Then restart ComfyUI.
 
-### 方法三：Git 克隆
+### Option 3: Git clone
 
-在 ComfyUI 的 `custom_nodes` 目录中执行：
+From ComfyUI's `custom_nodes` folder, run:
 
 ```bash
 git clone https://github.com/nregret/CivitaiManager.git
 ```
 
-然后重启 ComfyUI。项目不需要额外执行 `pip install`。
+Then restart ComfyUI. There are no extra dependencies, so no `pip install` is needed.
 
 </details>
 
-## 快速开始
+## Quick Start
 
-1. 重启 ComfyUI 后，点击左侧边栏的 **Civitai** 入口；旧版前端会显示兼容的悬浮入口。
-2. 第一次使用建议先进入 **设置**，填写 Civitai API Key，并确认模型与 Workflow 保存目录。
-3. 在 **发现** 中选择资源类型并搜索模型，打开卡片查看版本和文件详情。
-4. 确认自动保存路径后加入下载队列，在 **下载任务** 中查看进度。
-5. 进入 **本地模型库** 管理已下载资源，或在工作流中添加 `CivitaiManager - Multi LoRA Loader`。
+1. After restarting ComfyUI, click the **Civitai** icon in the left sidebar; the manager opens directly. Older frontends show a floating launcher button instead.
+2. On first use, open **Settings**, enter your Civitai API key, and check the model and workflow folders.
+3. In **Discover**, pick a resource type and search. Click a card to see its versions, files, and previews.
+4. Confirm the save location and click download, then follow the progress in **Downloads**.
+5. Manage downloaded models in the **Library**, or add the `CivitaiManager - Multi LoRA Loader` node to your workflow.
 
-> Civitai API Key 不是浏览公开内容的绝对前提，但建议配置，以获得更稳定的访问体验和与你账户权限一致的内容结果。
+> An API key is not strictly required to browse public content, but it is recommended: some downloads require a signed-in account, and search results then match your account's permissions.
 
-## Multi LoRA Loader 使用方式
+## Using the Multi LoRA Loader
 
-在节点菜单的 `CivitaiManager/Loaders` 分类中添加：
+Add it from the `CivitaiManager/Loaders` category of the node menu:
 
 ```text
 CivitaiManager - Multi LoRA Loader
 ```
 
-连接方式：
+Connect it like this:
 
 ```text
 MODEL → CivitaiManager - Multi LoRA Loader → MODEL
 ```
 
-点击节点中的 **打开 LoRA 管理器**，即可搜索、下载、应用和管理 LoRA。节点会把 LoRA 路径、强度、开关与顺序保存在工作流中。
+LoRA paths, strengths, switches, and order are saved in the workflow, and existing workflows load as-is. The node's controls are built on ComfyUI's native DOMWidget, and changing a strength or switch keeps any size you set by hand. A LoRA whose file cannot be found is skipped with a message in the terminal, so the rest of the list still loads.
 
-每条 LoRA 保持紧凑的两行布局：第一行集成开关、名称、复制触发词和 **×** 移除按钮，第二行集成强度滑条与数值输入。控件由 ComfyUI 原生 DOMWidget 托管，直接使用浏览器点击事件。修改强度或开关会保留手动调整的节点尺寸；增删条目时按固定行高调整高度。已有工作流可直接载入，增删和参数修改支持撤销。
-
-## 常见问题
+## FAQ
 
 <details>
-<summary><strong>展开常见问题</strong></summary>
+<summary><strong>Show FAQ</strong></summary>
 
 <br>
 
-### 为什么本地模型没有预览或 Civitai 信息？
+### A download failed with "Early Access". What now?
 
-在 **本地模型库** 中点击 **匹配缺失的 Civitai 信息**。管理器会计算 SHA256，并尝试匹配对应的 Civitai 文件记录。
+The creator released this version as Early Access, so it must be unlocked with Buzz on the Civitai website first. Until then Civitai refuses the download no matter which API key you use. Expand the failed record, click **Unlock on Civitai**, and once it's unlocked, click **Retry** in Downloads.
 
-### 下载后的文件保存在哪里？
+### Why does a local model have no preview or Civitai information?
 
-Checkpoint、UNet 和 LoRA 使用 ComfyUI 已配置的对应模型目录；Workflow 使用设置页指定的 Workflow 目录。实际解析结果会显示在设置页右侧。
+Select the model in the **Library** and click **Match Civitai info**, or choose **Match missing Civitai info** from the menu in the top-right corner to match many at once. The manager computes the file's SHA256 and looks up the matching file on Civitai.
 
-### 可以同时管理多个模型根目录吗？
+### Where are downloaded files saved?
 
-可以。本地资源库会读取 ComfyUI 为各资源类型配置的全部根目录，并保留每个资产所属的存储根标识。
+Checkpoints, UNets, and LoRAs go to ComfyUI's folder for that model type; workflows go to the folder set in Settings. The actual paths are listed on the right side of the Settings page, and you can change the folder and file name in the detail panel before downloading.
 
-### 为什么取消下载不是瞬间完成？
+### Can it manage multiple model roots?
 
-取消会在网络读取边界生效。如果底层请求正处于阻塞读取，可能需要等待当前读取或超时返回。
+Yes. The Library reads every root that ComfyUI has configured for each resource type and remembers which root each model lives in.
+
+### Why are "base model + keyword" searches slower?
+
+Civitai can't search by keyword within a specific base model, so the manager pages through that base model's catalog and filters by keyword itself. Results appear as they are found, a progress bar runs above the cards, and the search stops once the scan is done.
+
+### Which Civitai site does the manager use?
+
+Search, model details, and downloads all go through `civitai.red`. Older download records that point to `civitai.com` are converted automatically.
+
+### Why doesn't cancelling a download take effect immediately?
+
+Cancellation is checked between network reads. If a request is waiting on the network, it takes effect once that read completes or times out.
 
 </details>
 
-## 反馈与贡献
+## Feedback and Contributing
 
-欢迎通过 [GitHub Issues](https://github.com/nregret/CivitaiManager/issues) 提交问题、功能建议和兼容性反馈。反馈问题时，建议附上：
+Please report bugs, ideas, and compatibility issues on [GitHub Issues](https://github.com/nregret/CivitaiManager/issues). It helps to include:
 
-- ComfyUI 与前端版本
-- 操作系统和 Python 版本
-- 可复现步骤
-- 浏览器控制台或 ComfyUI 终端中的相关错误
+- Your ComfyUI and frontend versions
+- Your operating system and Python version
+- Steps to reproduce
+- Related errors from the browser console or the ComfyUI terminal
 
 <details>
-<summary><strong>项目结构与开发验证</strong></summary>
+<summary><strong>Project layout and checks</strong></summary>
 
 ```text
 CivitaiManager/
-├── __init__.py                 # ComfyUI 扩展入口与 Web 目录声明
-├── nodes.py                    # API 注册与 Multi LoRA Loader 节点
-├── manager_api.py              # 后端编排与 API handlers
+├── __init__.py                 # ComfyUI entry point and web directory
+├── nodes.py                    # API registration and the Multi LoRA Loader node
+├── manager_api.py              # Backend orchestration and API handlers
 ├── backend/
-│   ├── client.py               # Civitai 请求辅助
-│   ├── config.py               # 配置读取与校验
-│   ├── downloads.py            # 持久化下载任务
-│   ├── library.py              # 本地资源索引缓存
-│   └── routes.py               # HTTP 路由表
+│   ├── client.py               # Civitai requests (gzip, keep-alive, host checks)
+│   ├── config.py               # Config loading and validation
+│   ├── downloads.py            # Persistent download jobs
+│   ├── library.py              # Local model index cache
+│   └── routes.py               # HTTP route table
 ├── js/
-│   ├── civitai_manager.js      # 主管理器 UI 与交互
-│   ├── civitai_lora_node.js    # Multi LoRA 节点与精简管理器
-│   └── civitai/                # API、状态、收藏、样式与国际化模块
-├── locales/{en,zh}/            # ComfyUI 官方 locale 资源
-├── img/                        # README 界面截图
-├── tests/                      # 后端与节点回归测试
-└── pyproject.toml              # Comfy Registry 发布元数据
+│   ├── civitai_manager.js      # Main manager
+│   ├── civitai_lora_node.js    # Multi LoRA node and LoRA Manager
+│   └── civitai/                # Modules shared by both managers
+│       ├── api.js              # API calls plus search and detail caches
+│       ├── card_media.js       # Card image lazy loading and skeletons
+│       ├── detail.js           # Detail gallery, tags, Early Access notice
+│       ├── downloads.js        # Download list and expandable details
+│       ├── selector_ui.js      # Shared controls
+│       ├── selector_styles.js  # Styles and theme colors
+│       └── ...                 # State, favorites, i18n, node widgets, and more
+├── locales/{en,zh}/            # ComfyUI locale resources
+├── img/{en,zh}/                # README screenshots (English / Chinese UI)
+├── tests/                      # Backend and node regression tests
+└── pyproject.toml              # Comfy Registry metadata
 ```
 
-运行验证：
+Run the checks:
 
 ```powershell
 python -m unittest discover -s tests -v
 node tests/test_lora_widgets.mjs
-python -c "import ast,pathlib; files=list(pathlib.Path('.').glob('*.py'))+list(pathlib.Path('backend').glob('*.py')); [ast.parse(p.read_text(encoding='utf-8'), filename=str(p)) for p in files]"
 Get-ChildItem js -Recurse -Filter *.js | ForEach-Object { node --check $_.FullName }
 ```
 
-测试使用临时目录和 ComfyUI 模块替身，不访问网络，也不会修改真实模型目录。
+Tests use temporary folders and ComfyUI stand-ins; they never touch the network or your real model folders.
 
 </details>
 
-## 支持项目
+## Support the Project
 
-如果 CivitaiManager 帮你节省了整理模型和搭建工作流的时间，欢迎点一个 **Star**，或在爱发电请作者喝一杯咖啡。你的支持会用于持续维护、兼容新版 ComfyUI，并开发更多实用功能。
+If CivitaiManager saves you time organizing models and building workflows, a **Star** on GitHub is much appreciated, or you can buy the author a coffee on Afdian. Your support goes toward ongoing maintenance, keeping up with new ComfyUI releases, and more useful features.
 
 <p align="center">
   <a href="https://www.ifdian.net/a/nnegret?utm_source=copylink&utm_medium=link">
-    <img src="https://img.shields.io/badge/爱发电-请作者喝杯咖啡-946ce6?style=for-the-badge" alt="在爱发电支持 CivitaiManager">
+    <img src="https://img.shields.io/badge/Afdian-Buy_me_a_coffee-946ce6?style=for-the-badge" alt="Support CivitaiManager on Afdian">
   </a>
 </p>
 
 <p align="center">
-  感谢每一位使用、反馈和支持 CivitaiManager 的朋友 ☕
+  Thanks to everyone who uses, reports issues for, and supports CivitaiManager ☕
 </p>
