@@ -15,7 +15,7 @@
 **CivitaiManager** 是一个面向 ComfyUI 的 Civitai 资源管理扩展。<br>
 不离开工作流界面，就能搜索、下载和整理 **Checkpoint、UNet、LoRA 与 Workflow**，再通过多 LoRA 加载节点直接用进工作流。
 
-[功能](#功能) · [安装](#安装) · [快速开始](#快速开始) · [常见问题](#常见问题) · [支持项目](#支持项目)
+[功能](#功能) · [安装](#安装) · [API Key](#设置-civitai-api-key) · [快速开始](#快速开始) · [常见问题](#常见问题) · [支持项目](#支持项目)
 
 </div>
 
@@ -131,15 +131,29 @@ git clone https://github.com/nregret/CivitaiManager.git
 
 </details>
 
+## 设置 Civitai API Key
+
+浏览公开内容不需要 API Key，但建议配置：
+
+- 部分模型只允许登录用户下载，没有有效的 Key 时会下载失败并提示 **API Key 无效**。
+- 搜索结果会与你账号的权限和内容设置保持一致。
+
+配置步骤：
+
+1. 登录 Civitai，打开 [账户设置 → Security & Apps → API keys](https://civitai.red/user/account/security#api-keys)。
+2. 点击 **Add API key**，起一个名字（如 `ComfyUI`），复制生成的 Key。
+3. 在 ComfyUI 中打开 CivitaiManager → **设置**，把 Key 粘贴到 **Civitai API 密钥**，点击 **测试 API**。
+4. 点击 **保存设置**，连接卡片显示 **密钥已保存** 即完成。
+
+> Key 以明文保存在 ComfyUI 用户目录的 `civitai_manager/config.json` 中，请勿分享该文件。Key 只会发送给 Civitai（下载跳转到其他域名时会自动去掉），保存后设置页不会再显示。输入框留空保存会保留原有的 Key，点击 **清除已保存密钥** 可删除。
+
 ## 快速开始
 
 1. 重启 ComfyUI 后，点击左侧边栏的 **Civitai** 图标，管理器会直接打开。旧版前端会改为显示一个悬浮入口。
-2. 第一次使用时建议先进入 **设置**，填写 Civitai API Key，并确认模型和工作流的保存目录。
+2. 第一次使用时建议先进入 **设置**，填写 [Civitai API Key](#设置-civitai-api-key)，并确认模型和工作流的保存目录。
 3. 在 **发现** 中选择资源类型并搜索，点击卡片查看版本、文件和预览图。
 4. 确认保存路径后点击下载，在 **下载任务** 中查看进度。
 5. 在 **本地模型库** 中管理已下载的模型，或在工作流中添加 `CivitaiManager - Multi LoRA Loader` 节点。
-
-> 浏览公开内容不一定需要 API Key，但建议配置：下载部分模型需要登录，而且搜索结果会与你账号的权限保持一致。
 
 ## Multi LoRA Loader 使用方式
 
@@ -163,6 +177,10 @@ LoRA 的路径、强度、开关和顺序都保存在工作流中，旧工作流
 <summary><strong>展开常见问题</strong></summary>
 
 <br>
+
+### 下载失败，提示“API Key 无效”怎么办？
+
+Civitai 拒绝了这个 Key，可能是输入有误、已被删除或已失效。到 [API keys](https://civitai.red/user/account/security#api-keys) 新建一个 Key，在 **设置** 中粘贴后点击 **测试 API** 和 **保存设置**，再回到下载任务中点击 **重试**。
 
 ### 下载失败，提示“抢先体验”怎么办？
 

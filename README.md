@@ -15,7 +15,7 @@
 **CivitaiManager** is a ComfyUI extension for managing Civitai resources.<br>
 Search, download, and organize **Checkpoints, UNets, LoRAs, and Workflows** right inside the workflow editor, then put them to work with the built-in multi-LoRA loader node.
 
-[Features](#features) · [Installation](#installation) · [Quick Start](#quick-start) · [FAQ](#faq) · [Support](#support-the-project)
+[Features](#features) · [Installation](#installation) · [API Key](#civitai-api-key) · [Quick Start](#quick-start) · [FAQ](#faq) · [Support](#support-the-project)
 
 </div>
 
@@ -131,15 +131,29 @@ Then restart ComfyUI. There are no extra dependencies, so no `pip install` is ne
 
 </details>
 
+## Civitai API Key
+
+Browsing public content works without a key, but adding one is recommended:
+
+- Some models can only be downloaded by signed-in users. Without a valid key, those downloads fail with **API Key rejected**.
+- Search results match your account's permissions and content settings.
+
+To add your key:
+
+1. Sign in to Civitai and open [Account → Security & Apps → API keys](https://civitai.red/user/account/security#api-keys).
+2. Click **Add API key**, give it a name such as `ComfyUI`, and copy the generated key.
+3. In ComfyUI, open CivitaiManager → **Settings**, paste the key into **Civitai API Key**, and click **Test API**.
+4. Click **Save Settings**. The Connection card shows **Key saved** when it's done.
+
+> The key is stored in plain text in `civitai_manager/config.json` inside ComfyUI's user directory, so don't share that file. It is sent only to Civitai (and dropped when a download redirects to another host), and the settings page never shows it again. Saving with the field empty keeps the stored key; **Clear Saved Key** removes it.
+
 ## Quick Start
 
 1. After restarting ComfyUI, click the **Civitai** icon in the left sidebar; the manager opens directly. Older frontends show a floating launcher button instead.
-2. On first use, open **Settings**, enter your Civitai API key, and check the model and workflow folders.
+2. On first use, open **Settings**, add your [Civitai API key](#civitai-api-key), and check the model and workflow folders.
 3. In **Discover**, pick a resource type and search. Click a card to see its versions, files, and previews.
 4. Confirm the save location and click download, then follow the progress in **Downloads**.
 5. Manage downloaded models in the **Library**, or add the `CivitaiManager - Multi LoRA Loader` node to your workflow.
-
-> An API key is not strictly required to browse public content, but it is recommended: some downloads require a signed-in account, and search results then match your account's permissions.
 
 ## Using the Multi LoRA Loader
 
@@ -163,6 +177,10 @@ LoRA paths, strengths, switches, and order are saved in the workflow, and existi
 <summary><strong>Show FAQ</strong></summary>
 
 <br>
+
+### A download failed with "API Key rejected". What now?
+
+Civitai did not accept the key: it may be mistyped, deleted, or no longer valid. Create a new one under [API keys](https://civitai.red/user/account/security#api-keys), paste it in **Settings**, click **Test API** and **Save Settings**, then click **Retry** on the failed download.
 
 ### A download failed with "Early Access". What now?
 
