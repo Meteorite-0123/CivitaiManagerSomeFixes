@@ -18,6 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import folder_paths
@@ -26,6 +27,8 @@ from server import PromptServer
 
 try:
     from .backend.client import (
+        civitai_red_url as _civitai_red_url,
+        fetch as _fetch,
         http_error_message as _http_error_message,
         request_headers as _request_headers,
         validate_civitai_https as _validate_civitai_https,
@@ -36,6 +39,8 @@ try:
     from .backend.routes import register_routes
 except ImportError:  # Standalone test loading
     from backend.client import (
+        civitai_red_url as _civitai_red_url,
+        fetch as _fetch,
         http_error_message as _http_error_message,
         request_headers as _request_headers,
         validate_civitai_https as _validate_civitai_https,
@@ -48,7 +53,7 @@ except ImportError:  # Standalone test loading
 
 API_PREFIX = "/civitai-manager/api"
 CIVITAI_API_BASE = "https://civitai.red/api/v1"
-CIVITAI_DOWNLOAD_BASE = "https://civitai.com/api/download/models"
+CIVITAI_DOWNLOAD_BASE = "https://civitai.red/api/download/models"
 MODEL_EXTENSIONS = {".ckpt", ".pt", ".pt2", ".bin", ".pth", ".safetensors", ".pkl", ".sft"}
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
 WORKFLOW_EXTENSIONS = {".json"}
@@ -61,8 +66,16 @@ CIVITAI_MEDIA_ID_RE = re.compile(
     re.IGNORECASE,
 )
 TAXONOMY_CACHE_TTL = 10 * 60
-SEARCH_RESULT_CACHE_TTL = 60
+SEARCH_RESULT_CACHE_TTL = 5 * 60
 SEARCH_RESULT_CACHE_LIMIT = 64
+MODEL_DETAIL_CACHE_TTL = 5 * 60
+MODEL_DETAIL_CACHE_LIMIT = 64
+# Search cards only need these fields; /model-detail delivers the full record.
+SEARCH_MODEL_FIELDS = ("id", "name", "type", "nsfw", "nsfwLevel", "tags", "stats", "availability")
+SEARCH_VERSION_FIELDS = ("id", "name", "baseModel", "baseModelType", "publishedAt", "trainedWords", "stats", "availability")
+SEARCH_FILE_FIELDS = ("id", "name", "sizeKB", "type", "primary", "metadata", "hashes", "downloadUrl")
+SEARCH_IMAGE_FIELDS = ("url", "type", "nsfwLevel", "width", "height")
+SEARCH_PRIMARY_IMAGE_LIMIT = 12
 SEARCH_FALLBACK_CURSOR_PREFIX = "fallback:"
 SEARCH_FALLBACK_MAX_PAGES = 8
 RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
@@ -98,6 +111,8 @@ _TAXONOMY_CACHE: dict[str, dict[str, Any]] = {}
 _TAXONOMY_LOCK = threading.Lock()
 _SEARCH_RESULT_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _SEARCH_RESULT_CACHE_LOCK = threading.Lock()
+_MODEL_DETAIL_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+_MODEL_DETAIL_CACHE_LOCK = threading.Lock()
 _FAVORITES_LOCK = threading.Lock()
 _LIBRARY_INDEX = LibraryIndex(ttl_seconds=30)
 
@@ -225,6 +240,8 @@ def _save_config_unlocked(data: dict[str, Any]) -> dict[str, Any]:
         _TAXONOMY_CACHE.clear()
     with _SEARCH_RESULT_CACHE_LOCK:
         _SEARCH_RESULT_CACHE.clear()
+    with _MODEL_DETAIL_CACHE_LOCK:
+        _MODEL_DETAIL_CACHE.clear()
     return dict(current)
 
 
@@ -485,35 +502,30 @@ def _favorite_folder_name(value: Any) -> str:
 
 
 def _read_json_url(url: str, api_key: str | None = None, timeout: int = 30, quiet: bool = False) -> dict[str, Any] | None:
-    req = urllib.request.Request(url, headers=_request_headers(api_key), method="GET")
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            raw = resp.read().decode("utf-8", errors="replace")
-            if not raw.strip():
-                return {"error": "Empty response from Civitai"}
-            return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        print(f"[CivitaiManager] Invalid JSON for {url}: {exc}")
-        return {"error": "Invalid JSON response from Civitai"}
-    except urllib.error.HTTPError as exc:
-        body = ""
-        try:
-            body = exc.read().decode("utf-8", errors="replace")[:500]
-        except Exception:
-            pass
-        message = _http_error_message(body, f"HTTP {exc.code}: {exc.reason}")
-        if not quiet:
-            print(f"[CivitaiManager] HTTP {exc.code} for {url}: {body or exc.reason}")
-        return {
-            "error": message,
-            "status": exc.code,
-            "body": body,
-            "retryable": exc.code in RETRYABLE_HTTP_STATUS,
-        }
+        status, reason, body = _fetch(url, _request_headers(api_key), timeout)
     except Exception as exc:
         if not quiet:
             print(f"[CivitaiManager] Request failed for {url}: {exc}")
         return {"error": str(exc)}
+    raw = body.decode("utf-8", errors="replace")
+    if status >= 400:
+        snippet = raw[:500]
+        if not quiet:
+            print(f"[CivitaiManager] HTTP {status} for {url}: {snippet or reason}")
+        return {
+            "error": _http_error_message(snippet, f"HTTP {status}: {reason}"),
+            "status": status,
+            "body": snippet,
+            "retryable": status in RETRYABLE_HTTP_STATUS,
+        }
+    if not raw.strip():
+        return {"error": "Empty response from Civitai"}
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(f"[CivitaiManager] Invalid JSON for {url}: {exc}")
+        return {"error": "Invalid JSON response from Civitai"}
 
 
 def _is_retryable_result(result: dict[str, Any] | None) -> bool:
@@ -1187,7 +1199,7 @@ def _download_url_for(version: dict[str, Any], file_info: dict[str, Any]) -> str
     for key in ("downloadUrl", "download_url", "url"):
         value = file_info.get(key)
         if isinstance(value, str) and value.startswith(("http://", "https://")):
-            return value
+            return _civitai_red_url(value)
     version_id = version.get("id")
     if version_id:
         return f"{CIVITAI_DOWNLOAD_BASE}/{version_id}"
@@ -1561,7 +1573,7 @@ def _scan_library_kind(root_kind: str) -> list[dict[str, Any]]:
                 resolution = metadata.get("resolution") if isinstance(metadata.get("resolution"), dict) else {}
                 hashes = metadata.get("hashes") if isinstance(metadata.get("hashes"), dict) else {}
                 model_id, version_id = _civitai_ids_from_metadata(metadata)
-                civitai_url = metadata.get("civitai_url") or ""
+                civitai_url = _civitai_red_url(str(metadata.get("civitai_url") or ""))
                 if not civitai_url and model_id:
                     civitai_url = f"https://civitai.red/models/{model_id}"
                     if version_id:
@@ -1888,6 +1900,28 @@ def _search_base_model_text_fallback(
     return collected, metadata
 
 
+def _pick(source: Any, fields: tuple[str, ...]) -> dict[str, Any]:
+    return {field: source[field] for field in fields if field in source} if isinstance(source, dict) else {}
+
+
+def _search_card(model: dict[str, Any]) -> dict[str, Any]:
+    card = _pick(model, SEARCH_MODEL_FIELDS)
+    creator = model.get("creator")
+    if isinstance(creator, dict):
+        card["creator"] = {"username": creator.get("username")}
+    versions = []
+    for index, version in enumerate(model.get("modelVersions") or []):
+        if not isinstance(version, dict):
+            continue
+        slim = _pick(version, SEARCH_VERSION_FIELDS)
+        images = [_pick(image, SEARCH_IMAGE_FIELDS) for image in version.get("images") or [] if isinstance(image, dict)]
+        slim["images"] = images[:SEARCH_PRIMARY_IMAGE_LIMIT if index == 0 else 1]
+        slim["files"] = [_pick(file, SEARCH_FILE_FIELDS) for file in version.get("files") or [] if isinstance(file, dict)]
+        versions.append(slim)
+    card["modelVersions"] = versions
+    return card
+
+
 def _search_civitai_models(
     kind: str,
     query: str,
@@ -1990,7 +2024,7 @@ def _search_civitai_models(
 
     taxonomy = _taxonomy_cache_get(kind, config) or _empty_taxonomy(kind)
     response = {
-        "items": collected[:limit],
+        "items": [_search_card(item) for item in collected[:limit]],
         "metadata": metadata or {},
         "taxonomy": taxonomy,
         "content_filter_active": not bool(config.get("allow_nsfw", False)),
@@ -2007,7 +2041,13 @@ def _load_taxonomy(kind: str, config: dict[str, Any], force: bool = False) -> di
 
     api_key = str(config.get("civitai_api_key") or "").strip() or None
     params = _build_model_query_params(kind, sort="Highest Rated", limit=100, config=config)
-    result = _read_models_json(params, api_key, 30)
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        models_request = pool.submit(_read_models_json, params, api_key, 30)
+        enums_request = pool.submit(_read_json_url, _enums_url(), api_key, 30)
+        tags_request = pool.submit(_read_json_url, _tags_url({"limit": "200"}), api_key, 30)
+        result = models_request.result()
+        enums_result = enums_request.result()
+        tag_result = tags_request.result()
     if not result or result.get("error"):
         stale_key = _taxonomy_cache_key(kind, config)
         with _TAXONOMY_LOCK:
@@ -2019,14 +2059,11 @@ def _load_taxonomy(kind: str, config: dict[str, Any], force: bool = False) -> di
         items = [item for item in items if isinstance(item, dict)]
         taxonomy = _taxonomy_from_items(kind, items)
 
-    enums_result = _read_json_url(_enums_url(), api_key, 30)
     if isinstance(enums_result, dict) and not enums_result.get("error"):
         base_models = enums_result.get("BaseModel")
         if isinstance(base_models, list):
             taxonomy = _merge_taxonomy(taxonomy, _taxonomy_from_base_models(kind, base_models))
 
-    tag_params = {"limit": "200"}
-    tag_result = _read_json_url(_tags_url(tag_params), api_key, 30)
     if isinstance(tag_result, dict) and not tag_result.get("error"):
         tag_items = tag_result.get("items") if isinstance(tag_result.get("items"), list) else []
         taxonomy = _merge_taxonomy(taxonomy, _taxonomy_from_tags(kind, tag_items))
@@ -2162,10 +2199,20 @@ async def model_detail_api(request: web.Request) -> web.Response:
         if not model_id:
             return web.json_response({"success": False, "error": "Missing model id"}, status=400)
         api_key = str(load_config().get("civitai_api_key") or "").strip() or None
+        cache_key = (model_id, _api_key_cache_part(api_key))
+        now = _now()
+        with _MODEL_DETAIL_CACHE_LOCK:
+            cached = _MODEL_DETAIL_CACHE.get(cache_key)
+        if cached and now - cached["timestamp"] < MODEL_DETAIL_CACHE_TTL:
+            return web.json_response({"success": True, "model": cached["model"]})
         url = f"{CIVITAI_API_BASE}/models/{urllib.parse.quote(model_id)}"
         data = await asyncio.to_thread(_read_json_url, url, api_key, 30)
         if not data or data.get("error"):
             return web.json_response({"success": False, "error": data.get("error") if data else "Model not found"}, status=404)
+        with _MODEL_DETAIL_CACHE_LOCK:
+            if len(_MODEL_DETAIL_CACHE) >= MODEL_DETAIL_CACHE_LIMIT:
+                _MODEL_DETAIL_CACHE.pop(min(_MODEL_DETAIL_CACHE, key=lambda key: _MODEL_DETAIL_CACHE[key]["timestamp"]), None)
+            _MODEL_DETAIL_CACHE[cache_key] = {"timestamp": now, "model": data}
         return web.json_response({"success": True, "model": data})
     except Exception as exc:
         return web.json_response({"success": False, "error": str(exc)}, status=500)
@@ -2195,7 +2242,7 @@ def _enqueue_download_request(body: dict[str, Any]) -> tuple[str, dict[str, Any]
     requested_kind = str(body.get("kind") or "")
     overrides = body.get("overrides") if isinstance(body.get("overrides"), dict) else {}
     resolution = resolve_download_path(model, version, file_info, requested_kind, overrides)
-    download_url = str(body.get("download_url") or resolution.get("download_url") or "")
+    download_url = _civitai_red_url(str(body.get("download_url") or resolution.get("download_url") or ""))
     if not download_url or not _validate_civitai_https(download_url):
         raise ValueError("Only Civitai HTTPS downloads are supported")
 
@@ -2222,6 +2269,11 @@ def _enqueue_download_request(body: dict[str, Any]) -> tuple[str, dict[str, Any]
         "target_path": resolution["absolute_path"],
         "relative_path": resolution["relative_path"],
         "filename": resolution["filename"],
+        "model_id": model.get("id") or "",
+        "version_id": version.get("id") or "",
+        "model_name": str(model.get("name") or ""),
+        "base_model": str(version.get("baseModel") or model.get("baseModel") or ""),
+        "preview_url": preview_url or "",
         "created_at": _now(),
     }, retry_payload, DOWNLOAD_MAX_ACTIVE_JOBS)
     if not added:

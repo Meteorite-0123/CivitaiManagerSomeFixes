@@ -15,7 +15,7 @@ export function injectStyles() {
             --cmgr-divider: var(--border-color, var(--cmgr-border));
             --cmgr-text: var(--cmgr-sampled-text-color, var(--fg-color, var(--input-text, var(--p-text-color, var(--base-foreground, #f2f3f5)))));
             --cmgr-muted: var(--cmgr-sampled-muted-color, var(--descrip-text, var(--p-text-muted-color, var(--muted-foreground, #9ca3af))));
-            --cmgr-accent: var(--p-primary-color, var(--p-button-primary-background, #62a8ff));
+            --cmgr-accent: var(--cmgr-sampled-accent, var(--p-primary-color, var(--p-button-primary-background, #62a8ff)));
             --cmgr-accent-text: var(--p-primary-contrast-color, #fff);
             --cmgr-good: #31d0aa;
             --cmgr-warn: #f1b84b;
@@ -697,44 +697,6 @@ export function injectStyles() {
             display: grid;
             gap: 12px;
         }
-        .cmgr-download {
-            border: 1px solid #27303a;
-            background: #151a21;
-            border-radius: 8px;
-            padding: 12px;
-        }
-        .cmgr-download-head {
-            display: flex;
-            align-items: start;
-            justify-content: space-between;
-            gap: 12px;
-        }
-        .cmgr-download-head strong,
-        .cmgr-download-head span {
-            display: block;
-        }
-        .cmgr-download-head span {
-            margin-top: 4px;
-            color: #9aa6b6;
-            font-size: 12px;
-        }
-        .cmgr-download-head b.completed {
-            color: #98e5b2;
-        }
-        .cmgr-download-head b.failed {
-            color: #ff9aa3;
-        }
-        .cmgr-progress {
-            height: 8px;
-            border-radius: 99px;
-            background: #0f1319;
-            overflow: hidden;
-            margin: 12px 0 8px;
-        }
-        .cmgr-progress div {
-            height: 100%;
-            background: #4ea8e9;
-        }
         .cmgr-settings-grid {
             padding: 18px;
             display: grid;
@@ -1303,17 +1265,6 @@ export function injectStyles() {
             object-fit: cover;
             display: block;
         }
-        .cmgr-preview-img {
-            opacity: 1;
-            transition: opacity 0.22s ease, transform 0.22s ease;
-        }
-        .cmgr-preview-img.is-pending,
-        .cmgr-preview-img.is-loading {
-            opacity: 0;
-        }
-        .cmgr-preview-img.is-loaded {
-            opacity: 1;
-        }
         .cmgr-no-image {
             position: absolute;
             inset: 0;
@@ -1460,8 +1411,7 @@ export function injectStyles() {
         }
         .cmgr-path-box,
         .cmgr-settings-form,
-        .cmgr-roots,
-        .cmgr-download {
+        .cmgr-roots {
             border: 1px solid rgba(255,255,255,0.08);
             background: rgba(255,255,255,0.045);
             border-radius: 16px;
@@ -1595,46 +1545,6 @@ export function injectStyles() {
         .cmgr-settings-grid {
             padding: 24px 28px;
             background: rgba(10,10,15,0.18);
-        }
-        .cmgr-download-head b.completed {
-            color: #86efac;
-        }
-        .cmgr-download-head b.failed {
-            color: #fca5a5;
-        }
-        .cmgr-progress {
-            position: relative;
-            height: 16px;
-            overflow: hidden;
-            background: rgba(10,10,15,0.72);
-            border: 1px solid rgba(255,255,255,0.08);
-            border-radius: 999px;
-        }
-        .cmgr-progress div {
-            height: 100%;
-            min-width: 0;
-            border-radius: inherit;
-            background: linear-gradient(90deg, #db2777, #f472b6);
-            box-shadow: 0 0 18px rgba(219,39,119,0.36);
-            transition: width 0.28s ease;
-        }
-        .cmgr-progress span {
-            position: absolute;
-            inset: 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            color: #fff;
-            font-size: 10.5px;
-            font-weight: 850;
-            text-shadow: 0 1px 6px rgba(0,0,0,0.75);
-            pointer-events: none;
-        }
-        .cmgr-progress.indeterminate div {
-            position: absolute;
-            width: 38% !important;
-            min-width: 38%;
-            animation: cmgrProgressSlide 1.1s ease-in-out infinite;
         }
         @keyframes cmgrProgressSlide {
             0% { transform: translateX(-110%); }
@@ -2376,11 +2286,6 @@ export function injectStyles() {
             transform: translateX(-115%);
             animation: cmgrSkeletonShimmer 1.35s ease-in-out infinite;
         }
-        .cmgr-thumb:has(.cmgr-preview-img.is-loaded) .cmgr-media-skeleton,
-        .cmgr-thumb:has(.cmgr-no-image) .cmgr-media-skeleton,
-        .cmgr-thumb:has(.cmgr-no-preview) .cmgr-media-skeleton {
-            opacity: 0;
-        }
         .cmgr-filtered-preview {
             box-sizing: border-box;
             padding: 24px;
@@ -2455,8 +2360,7 @@ export function injectStyles() {
         .cmgr-detail-preview,
         .cmgr-path-box,
         .cmgr-settings-form,
-        .cmgr-roots,
-        .cmgr-download {
+        .cmgr-roots {
             background: var(--cmgr-panel-soft);
             border-color: var(--cmgr-border);
             border-radius: var(--cmgr-radius);
@@ -2484,15 +2388,6 @@ export function injectStyles() {
             opacity: 0.82;
             pointer-events: none;
         }
-        .cmgr-detail-preview-overlay {
-            position: absolute;
-            inset: 0;
-            z-index: 1;
-            background: radial-gradient(circle at center, rgba(0, 0, 0, 0.08), rgba(0, 0, 0, 0.42));
-            pointer-events: none;
-        }
-        .cmgr-detail-preview > .cmgr-preview-img,
-        .cmgr-detail-preview > .cmgr-preview-video,
         .cmgr-detail-preview > .cmgr-no-image {
             position: relative;
             inset: auto;
@@ -2501,17 +2396,6 @@ export function injectStyles() {
             height: 100%;
             object-fit: contain;
             background: transparent;
-        }
-        .cmgr-detail-preview-open-original {
-            position: absolute;
-            inset: 0;
-            z-index: 6;
-            display: block;
-            cursor: zoom-in;
-        }
-        .cmgr-detail-preview-open-original:focus-visible {
-            outline: 2px solid var(--cmgr-info);
-            outline-offset: -3px;
         }
         .cmgr-detail-preview-nav {
             position: absolute;
@@ -2779,32 +2663,6 @@ export function injectStyles() {
             background: var(--cmgr-panel-soft);
             border-color: var(--cmgr-border);
             color: var(--cmgr-muted);
-        }
-        .cmgr-download-head b.completed {
-            color: var(--cmgr-success);
-        }
-        .cmgr-download-head b.failed {
-            color: var(--cmgr-danger);
-        }
-        .cmgr-download-head b.cancelled {
-            color: var(--cmgr-muted);
-        }
-        .cmgr-download-head b.cancelling {
-            color: var(--cmgr-warning);
-        }
-        .cmgr-download > .cmgr-action-row {
-            margin-top: 10px;
-        }
-        .cmgr-progress {
-            background: color-mix(in srgb, var(--cmgr-muted) 16%, transparent);
-            border-color: var(--cmgr-border);
-        }
-        .cmgr-progress div {
-            background: var(--cmgr-good);
-            box-shadow: none;
-        }
-        .cmgr-progress span {
-            color: var(--cmgr-accent-text);
         }
         .cmgr-alert {
             background: color-mix(in srgb, var(--cmgr-bad) 14%, var(--cmgr-panel));
@@ -3118,15 +2976,6 @@ export function injectStyles() {
             display: grid;
             grid-template-rows: auto minmax(0, 1fr);
         }
-        .cmgr-lora-toolbar {
-            display: grid;
-            grid-template-columns: auto minmax(220px, 1fr) minmax(150px, 190px) auto;
-            align-items: center;
-            gap: 10px;
-        }
-        .cmgr-lora-toolbar h2 {
-            white-space: nowrap;
-        }
         .cmgr-lora-search {
             min-width: 0;
         }
@@ -3156,147 +3005,10 @@ export function injectStyles() {
             min-width: 0;
             overflow: hidden;
         }
-        .cmgr-lora-detail-preview {
-            height: 260px;
-        }
-        .cmgr-lora-detail-preview a,
-        .cmgr-lora-applied-preview a {
-            display: block;
-            width: 100%;
-            height: 100%;
-        }
-        .cmgr-no-preview {
-            width: 100%;
-            height: 100%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            background: var(--cmgr-control);
-            color: var(--cmgr-muted);
-        }
-        .cmgr-lora-info-block {
-            display: grid;
-            gap: 8px;
-            margin: 16px 0;
-            color: var(--cmgr-muted);
-            font-size: 12px;
-        }
-        .cmgr-lora-info-block em {
-            color: var(--cmgr-muted);
-        }
         .cmgr-lora-detail-actions {
             display: grid;
             gap: 10px;
             margin-top: 18px;
-        }
-        .cmgr-file-actions {
-            display: grid;
-            gap: 10px;
-            margin-top: 16px;
-            padding-top: 2px;
-        }
-        .cmgr-file-actions-title {
-            margin: 0;
-        }
-        .cmgr-file-action-grid {
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 8px;
-        }
-        .cmgr-file-action {
-            min-width: 0;
-            min-height: 62px;
-            display: grid;
-            grid-template-columns: 30px minmax(0, 1fr);
-            align-items: center;
-            gap: 9px;
-            border: 1px solid var(--cmgr-border);
-            border-radius: calc(var(--cmgr-radius) + 1px);
-            background: var(--cmgr-control);
-            color: var(--cmgr-text);
-            cursor: pointer;
-            padding: 9px 10px;
-            text-align: left;
-            transition: background 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
-        }
-        .cmgr-file-action:hover {
-            border-color: color-mix(in srgb, var(--cmgr-accent) 34%, var(--cmgr-border));
-            background: color-mix(in srgb, var(--cmgr-accent) 7%, var(--cmgr-control));
-            transform: translateY(-1px);
-        }
-        .cmgr-file-action.is-active {
-            border-color: color-mix(in srgb, #f59e0b 38%, var(--cmgr-border));
-            background: color-mix(in srgb, #f59e0b 8%, var(--cmgr-control));
-        }
-        .cmgr-file-action > span {
-            min-width: 0;
-            display: grid;
-            gap: 3px;
-        }
-        .cmgr-file-action b,
-        .cmgr-file-action small {
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .cmgr-file-action b {
-            color: var(--cmgr-text);
-            font-size: 11.5px;
-        }
-        .cmgr-file-action small {
-            color: var(--cmgr-muted);
-            font-size: 9.5px;
-            font-weight: 560;
-        }
-        .cmgr-file-action-icon {
-            width: 30px;
-            height: 30px;
-            display: grid;
-            place-items: center;
-            box-sizing: border-box;
-            border-radius: 9px;
-            background: color-mix(in srgb, var(--cmgr-accent) 11%, transparent);
-            color: color-mix(in srgb, var(--cmgr-accent) 72%, var(--cmgr-text));
-            font-size: 15px;
-            font-style: normal;
-        }
-        .cmgr-file-action.is-active .is-favorite {
-            background: color-mix(in srgb, #f59e0b 16%, transparent);
-            color: #f59e0b;
-        }
-        .cmgr-file-action-icon.is-folder::before {
-            content: "";
-            width: 14px;
-            height: 10px;
-            box-sizing: border-box;
-            border: 1.5px solid currentColor;
-            border-radius: 2px;
-            box-shadow: inset 0 -3px 0 color-mix(in srgb, var(--cmgr-accent) 22%, transparent);
-        }
-        .cmgr-file-danger-row {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr) auto;
-            align-items: center;
-            gap: 12px;
-            padding: 10px 0 0;
-            border-top: 1px solid var(--cmgr-border);
-        }
-        .cmgr-file-danger-row > span {
-            min-width: 0;
-            display: grid;
-            gap: 3px;
-        }
-        .cmgr-file-danger-row b {
-            color: var(--cmgr-text);
-            font-size: 11px;
-        }
-        .cmgr-file-danger-row small {
-            color: var(--cmgr-muted);
-            font-size: 9.5px;
-        }
-        .cmgr-file-danger-row .cmgr-danger {
-            min-height: 34px;
-            padding: 0 13px;
         }
         .cmgr-lora-file-info b {
             overflow-wrap: anywhere;
@@ -3410,21 +3122,6 @@ export function injectStyles() {
                 transform: translateY(0) scale(1);
             }
         }
-        .cmgr-lora-pending {
-            display: grid;
-            gap: 8px;
-            margin: 16px 0;
-            padding: 12px;
-            border: 1px solid var(--cmgr-border);
-            border-radius: var(--cmgr-radius);
-            background: var(--cmgr-control);
-        }
-        .cmgr-lora-pending > div:first-child {
-            display: flex;
-            justify-content: space-between;
-            color: var(--cmgr-text);
-            font-size: 12px;
-        }
         .cmgr-lora-applied-list,
         .cmgr-lora-download-list {
             min-height: 0;
@@ -3434,58 +3131,7 @@ export function injectStyles() {
             flex-direction: column;
             gap: 12px;
         }
-        .cmgr-lora-toolbar-note {
-            grid-column: 2 / -2;
-            color: var(--cmgr-muted);
-            font-size: 12px;
-        }
-        .cmgr-lora-applied-item {
-            display: grid;
-            grid-template-columns: 88px minmax(0, 1fr) auto;
-            gap: 14px;
-            align-items: center;
-            padding: 12px;
-            border: 1px solid var(--cmgr-border);
-            border-radius: var(--cmgr-radius);
-            background: var(--cmgr-panel);
-        }
-        .cmgr-lora-applied-item.is-disabled {
-            opacity: 0.58;
-        }
-        .cmgr-lora-applied-preview {
-            width: 88px;
-            height: 88px;
-            overflow: hidden;
-            border-radius: calc(var(--cmgr-radius) - 3px);
-            background: var(--cmgr-control);
-        }
-        .cmgr-lora-applied-preview img {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-        }
-        .cmgr-lora-applied-main,
-        .cmgr-lora-applied-head > div {
-            min-width: 0;
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-        }
-        .cmgr-lora-applied-head {
-            display: flex;
-            align-items: flex-start;
-            justify-content: space-between;
-            gap: 14px;
-        }
-        .cmgr-lora-applied-head b,
-        .cmgr-lora-applied-head span {
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .cmgr-lora-applied-head span,
-        .cmgr-lora-toggle,
-        .cmgr-lora-strength span {
+        .cmgr-lora-toggle {
             color: var(--cmgr-muted);
             font-size: 11px;
         }
@@ -3495,21 +3141,6 @@ export function injectStyles() {
             gap: 6px;
             white-space: nowrap;
         }
-        .cmgr-lora-strength {
-            display: grid;
-            grid-template-columns: auto minmax(120px, 1fr) 44px;
-            align-items: center;
-            gap: 10px;
-        }
-        .cmgr-lora-strength input {
-            width: 100%;
-            accent-color: var(--cmgr-accent);
-        }
-        .cmgr-lora-strength output {
-            color: var(--cmgr-text);
-            font-variant-numeric: tabular-nums;
-            text-align: right;
-        }
         .cmgr-lora-order-actions {
             display: grid;
             grid-template-columns: repeat(2, 38px);
@@ -3517,38 +3148,6 @@ export function injectStyles() {
         }
         .cmgr-lora-order-actions .cmgr-danger {
             grid-column: 1 / -1;
-        }
-        .cmgr-lora-download-item {
-            display: grid;
-            gap: 10px;
-            padding: 14px;
-            border: 1px solid var(--cmgr-border);
-            border-radius: var(--cmgr-radius);
-            background: var(--cmgr-panel);
-        }
-        .cmgr-lora-download-head,
-        .cmgr-lora-download-foot {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-        }
-        .cmgr-lora-download-head b,
-        .cmgr-lora-download-foot > span {
-            min-width: 0;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .cmgr-lora-download-head span,
-        .cmgr-lora-download-foot {
-            color: var(--cmgr-muted);
-            font-size: 12px;
-        }
-        .cmgr-lora-download-foot > div {
-            display: flex;
-            gap: 8px;
-            flex-shrink: 0;
         }
 
         /* A calm, informative placeholder keeps the permanent detail rail
@@ -3733,9 +3332,6 @@ export function injectStyles() {
         .cmgr-lora-split {
             grid-template-columns: minmax(0, 1fr) clamp(340px, 22vw, 400px) !important;
         }
-        .cmgr-lora-detail-preview {
-            height: clamp(240px, 38vh, 420px);
-        }
         .cmgr-detail-stat-row {
             display: grid;
             grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -3803,20 +3399,8 @@ export function injectStyles() {
                 border-left: 0;
                 border-top: 1px solid var(--cmgr-border);
             }
-            .cmgr-lora-toolbar {
-                grid-template-columns: 1fr auto;
-            }
-            .cmgr-lora-toolbar h2,
-            .cmgr-lora-search,
-            .cmgr-lora-toolbar-note {
+            .cmgr-lora-search {
                 grid-column: 1 / -1;
-            }
-            .cmgr-lora-applied-item {
-                grid-template-columns: 64px minmax(0, 1fr);
-            }
-            .cmgr-lora-applied-preview {
-                width: 64px;
-                height: 64px;
             }
             .cmgr-lora-order-actions {
                 grid-column: 1 / -1;
@@ -3826,8 +3410,7 @@ export function injectStyles() {
         }
 
         /* Shared discovery toolbar used by both manager surfaces. */
-        .cmgr-search-toolbar,
-        .cmgr-lora-toolbar.cmgr-search-toolbar {
+        .cmgr-search-toolbar {
             min-height: 74px;
             display: grid;
             grid-template-columns: minmax(0, 1fr) clamp(340px, 22vw, 400px);
@@ -3845,9 +3428,6 @@ export function injectStyles() {
             gap: 14px;
             box-sizing: border-box;
             padding: 11px 18px 11px 24px;
-        }
-        .cmgr-lora-toolbar.cmgr-search-toolbar .cmgr-search-toolbar-main {
-            padding-left: 18px;
         }
         .cmgr-search-toolbar-heading {
             min-width: 0;
@@ -4023,8 +3603,7 @@ export function injectStyles() {
             padding: 0 12px;
         }
         @media (max-width: 900px) {
-            .cmgr-search-toolbar,
-            .cmgr-lora-toolbar.cmgr-search-toolbar {
+            .cmgr-search-toolbar {
                 grid-template-columns: minmax(0, 1fr);
                 align-items: center;
                 gap: 8px;
@@ -4034,9 +3613,6 @@ export function injectStyles() {
                 grid-template-columns: minmax(118px, 148px) minmax(220px, 1fr);
                 gap: 12px;
                 padding: 0;
-            }
-            .cmgr-lora-toolbar.cmgr-search-toolbar .cmgr-search-toolbar-main {
-                padding-left: 0;
             }
             .cmgr-search-toolbar-heading {
                 display: grid;
@@ -4438,40 +4014,11 @@ export function injectStyles() {
             font-variant-numeric: tabular-nums;
         }
 
-        /* Applied LoRAs form a numbered vertical pipeline, preserving execution order. */
-        .cmgr-lora-applied-toolbar {
+        /* Applied LoRAs form a numbered vertical pipeline {
             display: grid;
             grid-template-columns: minmax(0, 1fr) auto auto;
             align-items: center;
             gap: 12px;
-        }
-        .cmgr-lora-applied-toolbar-heading {
-            min-width: 0;
-            display: flex;
-            align-items: baseline;
-            gap: 10px;
-        }
-        .cmgr-lora-applied-toolbar-heading > span {
-            min-height: 26px;
-            display: inline-flex;
-            align-items: center;
-            box-sizing: border-box;
-            padding: 0 8px;
-            border: 1px solid color-mix(in srgb, var(--cmgr-accent) 22%, var(--cmgr-border));
-            border-radius: 999px;
-            background: color-mix(in srgb, var(--cmgr-accent) 7%, var(--cmgr-control));
-            color: color-mix(in srgb, var(--cmgr-accent) 72%, var(--cmgr-text));
-            font-size: 11px;
-            font-weight: 760;
-            white-space: nowrap;
-        }
-        .cmgr-lora-applied-toolbar .cmgr-lora-toolbar-note {
-            grid-column: auto;
-            font-size: 13px;
-            white-space: nowrap;
-        }
-        .cmgr-lora-applied-toolbar > .cmgr-danger {
-            min-height: 34px;
         }
         .cmgr-lora-applied-list {
             min-width: 0;
@@ -4481,336 +4028,6 @@ export function injectStyles() {
             background:
                 radial-gradient(circle at 50% 0, color-mix(in srgb, var(--cmgr-accent) 6%, transparent), transparent 34%),
                 color-mix(in srgb, var(--cmgr-bg) 88%, transparent);
-        }
-        .cmgr-lora-applied-stack {
-            position: relative;
-            width: min(100%, 820px);
-            display: grid;
-            gap: 14px;
-            margin: 0 auto;
-        }
-        .cmgr-lora-applied-stack::before {
-            content: "";
-            position: absolute;
-            left: 30px;
-            top: 38px;
-            bottom: 38px;
-            width: 1px;
-            background: linear-gradient(to bottom, transparent, color-mix(in srgb, var(--cmgr-accent) 28%, var(--cmgr-border)) 10%, color-mix(in srgb, var(--cmgr-accent) 28%, var(--cmgr-border)) 90%, transparent);
-        }
-        .cmgr-lora-applied-item {
-            position: relative;
-            grid-template-columns: 46px 104px minmax(0, 1fr);
-            gap: 16px;
-            align-items: center;
-            min-height: 142px;
-            box-sizing: border-box;
-            padding: 14px 14px 14px 8px;
-            overflow: hidden;
-            border: 1px solid color-mix(in srgb, var(--cmgr-border) 92%, transparent);
-            border-radius: 16px;
-            background:
-                linear-gradient(135deg, color-mix(in srgb, var(--cmgr-panel-soft) 78%, transparent), transparent 56%),
-                var(--cmgr-panel);
-            box-shadow: 0 14px 30px color-mix(in srgb, #000 16%, transparent);
-            opacity: 1;
-            cursor: pointer;
-            transition: border-color 0.16s ease, box-shadow 0.16s ease, transform 0.16s ease;
-        }
-        .cmgr-lora-applied-item::before {
-            content: "";
-            position: absolute;
-            top: 0;
-            left: 70px;
-            right: 18px;
-            height: 1px;
-            background: linear-gradient(90deg, color-mix(in srgb, var(--cmgr-accent) 38%, transparent), transparent 72%);
-        }
-        .cmgr-lora-applied-item:hover {
-            border-color: color-mix(in srgb, var(--cmgr-accent) 30%, var(--cmgr-border));
-            box-shadow: 0 18px 38px color-mix(in srgb, #000 22%, transparent);
-            transform: translateY(-1px);
-        }
-        .cmgr-lora-applied-item.selected {
-            border-color: color-mix(in srgb, var(--cmgr-accent) 62%, var(--cmgr-border));
-            background:
-                linear-gradient(135deg, color-mix(in srgb, var(--cmgr-accent) 11%, var(--cmgr-panel-soft)), transparent 62%),
-                var(--cmgr-panel);
-            box-shadow: 0 18px 42px color-mix(in srgb, #000 24%, transparent), inset 3px 0 0 color-mix(in srgb, var(--cmgr-accent) 76%, transparent);
-        }
-        .cmgr-lora-applied-item:focus-visible {
-            outline: 2px solid color-mix(in srgb, var(--cmgr-accent) 68%, transparent);
-            outline-offset: 3px;
-        }
-        .cmgr-lora-applied-item.is-disabled {
-            opacity: 1;
-        }
-        .cmgr-lora-applied-item.is-disabled .cmgr-lora-applied-preview,
-        .cmgr-lora-applied-item.is-disabled .cmgr-lora-applied-main {
-            filter: saturate(0.4);
-            opacity: 0.62;
-        }
-        .cmgr-lora-applied-order {
-            position: relative;
-            z-index: 2;
-            min-width: 0;
-            display: grid;
-            justify-items: center;
-            gap: 5px;
-        }
-        .cmgr-lora-applied-order > span {
-            color: var(--cmgr-muted);
-            font-size: 8.5px;
-            font-weight: 800;
-            letter-spacing: 0.08em;
-            text-transform: uppercase;
-        }
-        .cmgr-lora-applied-order > b {
-            width: 38px;
-            height: 38px;
-            display: grid;
-            place-items: center;
-            box-sizing: border-box;
-            border: 1px solid color-mix(in srgb, var(--cmgr-accent) 36%, var(--cmgr-border));
-            border-radius: 50%;
-            background: color-mix(in srgb, var(--cmgr-accent) 11%, var(--cmgr-panel));
-            box-shadow: 0 0 0 5px var(--cmgr-panel), 0 7px 18px color-mix(in srgb, #000 20%, transparent);
-            color: color-mix(in srgb, var(--cmgr-accent) 76%, var(--cmgr-text));
-            font-size: 12px;
-            font-variant-numeric: tabular-nums;
-            line-height: 1;
-        }
-        .cmgr-lora-applied-preview-wrap {
-            position: relative;
-            width: 104px;
-            height: 104px;
-        }
-        .cmgr-lora-applied-preview {
-            width: 104px;
-            height: 104px;
-            box-sizing: border-box;
-            overflow: hidden;
-            border: 1px solid color-mix(in srgb, var(--cmgr-border) 86%, transparent);
-            border-radius: 13px;
-            background: var(--cmgr-control);
-            box-shadow: 0 9px 22px color-mix(in srgb, #000 22%, transparent);
-            transition: filter 0.16s ease, opacity 0.16s ease;
-        }
-        .cmgr-lora-applied-preview img,
-        .cmgr-lora-applied-preview video,
-        .cmgr-lora-applied-preview .cmgr-no-preview {
-            width: 100%;
-            height: 100%;
-            object-fit: cover;
-        }
-        .cmgr-lora-applied-state-dot {
-            position: absolute;
-            right: -4px;
-            bottom: -4px;
-            z-index: 2;
-            width: 13px;
-            height: 13px;
-            box-sizing: border-box;
-            border: 3px solid var(--cmgr-panel);
-            border-radius: 50%;
-            background: var(--cmgr-success);
-            box-shadow: 0 0 12px color-mix(in srgb, var(--cmgr-success) 62%, transparent);
-        }
-        .cmgr-lora-applied-item.is-disabled .cmgr-lora-applied-state-dot {
-            background: var(--cmgr-muted);
-            box-shadow: none;
-        }
-        .cmgr-lora-applied-main {
-            min-width: 0;
-            width: 100%;
-            overflow: hidden;
-            display: grid;
-            gap: 14px;
-            transition: filter 0.16s ease, opacity 0.16s ease;
-        }
-        .cmgr-lora-applied-head {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr) auto;
-            align-items: center;
-            gap: 16px;
-        }
-        .cmgr-lora-applied-head > .cmgr-lora-applied-identity {
-            min-width: 0;
-            width: 100%;
-            max-width: 100%;
-            overflow: hidden;
-            display: grid;
-            gap: 4px;
-        }
-        .cmgr-lora-applied-identity > b {
-            display: -webkit-box;
-            overflow: hidden;
-            color: var(--cmgr-text);
-            font-size: 15.5px;
-            font-weight: 820;
-            line-height: 1.3;
-            overflow-wrap: anywhere;
-            text-overflow: ellipsis;
-            white-space: normal;
-            -webkit-box-orient: vertical;
-            -webkit-line-clamp: 2;
-        }
-        .cmgr-lora-applied-identity > span {
-            overflow: hidden;
-            color: var(--cmgr-muted);
-            font-size: 11.5px;
-            line-height: 1.35;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .cmgr-lora-applied-identity > small {
-            width: max-content;
-            max-width: 100%;
-            overflow: hidden;
-            padding: 4px 8px;
-            border: 1px solid color-mix(in srgb, var(--cmgr-accent) 18%, var(--cmgr-border));
-            border-radius: 999px;
-            background: color-mix(in srgb, var(--cmgr-accent) 6%, transparent);
-            color: color-mix(in srgb, var(--cmgr-accent) 68%, var(--cmgr-muted));
-            font-size: 9.5px;
-            font-weight: 740;
-            line-height: 1;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .cmgr-lora-switch {
-            position: relative;
-            display: inline-flex;
-            align-items: center;
-            gap: 7px;
-            flex: 0 0 auto;
-            color: var(--cmgr-muted);
-            cursor: pointer;
-            user-select: none;
-        }
-        .cmgr-lora-applied-head > .cmgr-lora-switch {
-            min-width: 0;
-            justify-self: end;
-        }
-        .cmgr-lora-switch input {
-            position: absolute;
-            width: 1px;
-            height: 1px;
-            opacity: 0;
-            pointer-events: none;
-        }
-        .cmgr-lora-switch-track {
-            position: relative;
-            width: 38px;
-            height: 22px;
-            flex: 0 0 auto;
-            box-sizing: border-box;
-            border: 1px solid color-mix(in srgb, var(--cmgr-border) 92%, transparent);
-            border-radius: 999px;
-            background: color-mix(in srgb, var(--cmgr-muted) 16%, var(--cmgr-control));
-            transition: border-color 0.16s ease, background-color 0.16s ease;
-        }
-        .cmgr-lora-switch-track i {
-            position: absolute;
-            left: 3px;
-            top: 3px;
-            width: 14px;
-            height: 14px;
-            border-radius: 50%;
-            background: color-mix(in srgb, var(--cmgr-muted) 88%, var(--cmgr-text));
-            box-shadow: 0 2px 5px color-mix(in srgb, #000 30%, transparent);
-            transition: background-color 0.16s ease, transform 0.16s ease;
-        }
-        .cmgr-lora-switch input:checked + .cmgr-lora-switch-track {
-            border-color: color-mix(in srgb, var(--cmgr-accent) 58%, var(--cmgr-border));
-            background: color-mix(in srgb, var(--cmgr-accent) 56%, var(--cmgr-control));
-        }
-        .cmgr-lora-switch input:checked + .cmgr-lora-switch-track i {
-            background: var(--cmgr-accent-text);
-            transform: translateX(16px);
-        }
-        .cmgr-lora-switch input:focus-visible + .cmgr-lora-switch-track {
-            outline: 2px solid color-mix(in srgb, var(--cmgr-accent) 50%, transparent);
-            outline-offset: 2px;
-        }
-        .cmgr-lora-switch > b {
-            color: currentColor;
-            font-size: 11px;
-            font-weight: 740;
-            white-space: nowrap;
-        }
-        .cmgr-lora-switch:has(input:checked) {
-            color: color-mix(in srgb, var(--cmgr-success) 68%, var(--cmgr-text));
-        }
-        .cmgr-lora-strength {
-            display: grid;
-            grid-template-columns: minmax(0, 1fr);
-            gap: 8px;
-            box-sizing: border-box;
-            padding: 11px 13px 9px;
-            border: 1px solid color-mix(in srgb, var(--cmgr-border) 84%, transparent);
-            border-radius: 10px;
-            background: color-mix(in srgb, var(--cmgr-control) 54%, transparent);
-        }
-        .cmgr-lora-strength-head,
-        .cmgr-lora-strength-scale {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 10px;
-        }
-        .cmgr-lora-strength-head > b {
-            color: var(--cmgr-muted);
-            font-size: 11px;
-            font-weight: 740;
-        }
-        .cmgr-lora-strength-head > output {
-            min-width: 38px;
-            color: var(--cmgr-text);
-            font-size: 12px;
-            font-weight: 820;
-            font-variant-numeric: tabular-nums;
-            text-align: right;
-        }
-        .cmgr-lora-strength-slider {
-            width: 100%;
-            height: 5px;
-            margin: 0;
-            appearance: none;
-            -webkit-appearance: none;
-            border: 0;
-            border-radius: 999px;
-            outline: none;
-            background: linear-gradient(to right, var(--cmgr-accent) 0 var(--cmgr-strength-percent), color-mix(in srgb, var(--cmgr-muted) 18%, transparent) var(--cmgr-strength-percent) 100%);
-            cursor: pointer;
-        }
-        .cmgr-lora-strength-slider::-webkit-slider-thumb {
-            width: 15px;
-            height: 15px;
-            appearance: none;
-            -webkit-appearance: none;
-            border: 3px solid var(--cmgr-panel);
-            border-radius: 50%;
-            background: var(--cmgr-accent);
-            box-shadow: 0 0 0 1px color-mix(in srgb, var(--cmgr-accent) 50%, var(--cmgr-border)), 0 3px 8px color-mix(in srgb, #000 30%, transparent);
-        }
-        .cmgr-lora-strength-slider::-moz-range-thumb {
-            width: 10px;
-            height: 10px;
-            border: 3px solid var(--cmgr-panel);
-            border-radius: 50%;
-            background: var(--cmgr-accent);
-            box-shadow: 0 0 0 1px color-mix(in srgb, var(--cmgr-accent) 50%, var(--cmgr-border));
-        }
-        .cmgr-lora-strength-slider:focus-visible {
-            outline: 2px solid color-mix(in srgb, var(--cmgr-accent) 50%, transparent);
-            outline-offset: 4px;
-        }
-        .cmgr-lora-strength-scale > i {
-            color: color-mix(in srgb, var(--cmgr-muted) 72%, transparent);
-            font-size: 8.5px;
-            font-style: normal;
-            font-variant-numeric: tabular-nums;
         }
         .cmgr-lora-order-actions {
             display: grid;
@@ -4834,200 +4051,9 @@ export function injectStyles() {
             cursor: default;
             filter: none;
         }
-        .cmgr-lora-order-actions .cmgr-lora-applied-remove {
-            grid-column: auto;
-            min-height: 34px;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 5px;
-            padding: 0 9px;
-            font-size: 9.5px;
-        }
-        .cmgr-lora-applied-remove > span {
-            font-size: 15px;
-            font-weight: 500;
-            line-height: 1;
-        }
-
-        .cmgr-lora-applied-detail {
-            background:
-                radial-gradient(circle at 50% 0, color-mix(in srgb, var(--cmgr-accent) 7%, transparent), transparent 30%),
-                var(--cmgr-panel);
-        }
-        .cmgr-lora-applied-detail .cmgr-detail-scroll {
-            padding: 20px;
-        }
-        .cmgr-lora-applied-detail .cmgr-lora-detail-preview {
-            height: 280px;
-            border-radius: 14px;
-        }
-        .cmgr-lora-applied-detail-head {
-            margin-top: 16px;
-        }
-        .cmgr-lora-applied-detail-head h2 {
-            display: -webkit-box;
-            overflow: hidden;
-            font-size: 21px;
-            line-height: 1.3;
-            overflow-wrap: anywhere;
-            white-space: normal;
-            -webkit-box-orient: vertical;
-            -webkit-line-clamp: 2;
-        }
-        .cmgr-lora-applied-detail-head p {
-            margin-top: 7px;
-            font-size: 12px;
-        }
-        .cmgr-lora-applied-detail-status {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin: 16px 0;
-            padding: 11px 12px;
-            border: 1px solid var(--cmgr-border);
-            border-radius: 11px;
-            background: color-mix(in srgb, var(--cmgr-control) 62%, transparent);
-        }
-        .cmgr-lora-applied-detail-status > span {
-            width: 10px;
-            height: 10px;
-            flex: 0 0 auto;
-            border-radius: 50%;
-            background: var(--cmgr-muted);
-        }
-        .cmgr-lora-applied-detail-status.is-enabled > span {
-            background: var(--cmgr-success);
-            box-shadow: 0 0 13px color-mix(in srgb, var(--cmgr-success) 64%, transparent);
-        }
-        .cmgr-lora-applied-detail-status > div {
-            min-width: 0;
-            display: grid;
-            gap: 3px;
-        }
-        .cmgr-lora-applied-detail-status b {
-            color: var(--cmgr-text);
-            font-size: 12px;
-        }
-        .cmgr-lora-applied-detail-status small {
-            color: var(--cmgr-muted);
-            font-size: 10.5px;
-        }
-        .cmgr-lora-applied-info {
-            gap: 10px;
-            margin: 16px 0 20px;
-        }
-        .cmgr-lora-applied-info div {
-            grid-template-columns: 100px minmax(0, 1fr);
-            font-size: 12.5px;
-        }
-        .cmgr-lora-applied-info span {
-            font-size: 11.5px;
-        }
-        .cmgr-lora-applied-info b {
-            font-size: 12px;
-        }
-        .cmgr-lora-applied-detail .cmgr-section-title {
-            font-size: 12px;
-        }
-        .cmgr-lora-applied-detail .cmgr-trained button,
-        .cmgr-lora-applied-detail .cmgr-trained > span {
-            font-size: 11px;
-        }
-        .cmgr-lora-applied-detail-actions {
-            display: grid;
-            gap: 10px;
-            margin-top: 20px;
-            padding-top: 16px;
-            border-top: 1px solid var(--cmgr-border);
-        }
-        .cmgr-lora-applied-detail-reorder {
-            display: grid;
-            grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 8px;
-        }
-        .cmgr-lora-applied-detail-reorder .cmgr-secondary,
-        .cmgr-lora-applied-detail-remove {
-            min-height: 40px;
-            font-size: 11.5px;
-        }
-        .cmgr-lora-applied-detail-reorder .cmgr-secondary {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 7px;
-        }
-        .cmgr-lora-applied-detail-reorder .cmgr-secondary > span,
-        .cmgr-lora-applied-detail-remove > span {
-            font-size: 16px;
-            line-height: 1;
-        }
-        .cmgr-lora-applied-detail-reorder .cmgr-secondary:disabled {
-            opacity: 0.34;
-            cursor: default;
-            filter: none;
-        }
-        .cmgr-lora-applied-detail-remove {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            gap: 7px;
-        }
-
-        @media (max-width: 840px) {
-            .cmgr-lora-applied-toolbar {
-                grid-template-columns: minmax(0, 1fr) auto;
-            }
-            .cmgr-lora-applied-toolbar .cmgr-lora-toolbar-note {
-                grid-column: 1 / -1;
-                grid-row: 2;
-            }
-            .cmgr-lora-applied-item {
-                grid-template-columns: 42px 84px minmax(0, 1fr);
-                gap: 12px;
-                padding: 12px 12px 12px 7px;
-            }
-            .cmgr-lora-applied-stack::before {
-                left: 27px;
-            }
-            .cmgr-lora-applied-preview-wrap,
-            .cmgr-lora-applied-preview {
-                width: 84px;
-                height: 84px;
-            }
-        }
         @media (max-width: 560px) {
             .cmgr-lora-applied-list {
                 padding: 14px;
-            }
-            .cmgr-lora-applied-toolbar-heading {
-                align-items: flex-start;
-                flex-direction: column;
-                gap: 4px;
-            }
-            .cmgr-lora-applied-item {
-                grid-template-columns: 38px 62px minmax(0, 1fr);
-                gap: 9px;
-            }
-            .cmgr-lora-applied-stack::before {
-                left: 25px;
-            }
-            .cmgr-lora-applied-order > span {
-                display: none;
-            }
-            .cmgr-lora-applied-preview-wrap,
-            .cmgr-lora-applied-preview {
-                width: 62px;
-                height: 62px;
-            }
-            .cmgr-lora-applied-head {
-                gap: 8px;
-            }
-            .cmgr-lora-switch > b {
-                display: none;
-            }
-            .cmgr-lora-strength {
-                padding-inline: 8px;
             }
         }
 
@@ -5132,36 +4158,6 @@ export function injectStyles() {
             font-size: 12px;
             line-height: 1.65;
         }
-
-        /* Download history uses compact responsive cards instead of full-width bars. */
-        .cmgr-download-toolbar {
-            justify-content: space-between;
-            flex-wrap: nowrap;
-        }
-        .cmgr-download-toolbar-heading {
-            min-width: 0;
-            display: flex;
-            align-items: baseline;
-            gap: 10px;
-        }
-        .cmgr-download-toolbar-heading > span {
-            overflow: hidden;
-            color: var(--cmgr-muted);
-            font-size: 11px;
-            font-weight: 650;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .cmgr-download-toolbar-actions {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            flex: 0 0 auto;
-        }
-        .cmgr-lora-download-toolbar {
-            display: flex;
-            justify-content: space-between;
-        }
         .cmgr-lora-applied-list > .cmgr-empty-state {
             flex: 1;
         }
@@ -5179,188 +4175,6 @@ export function injectStyles() {
             align-content: start;
             gap: 16px;
             padding: 22px 24px;
-        }
-        .cmgr-download {
-            position: relative;
-            min-width: 0;
-            min-height: 210px;
-            display: flex;
-            flex-direction: column;
-            box-sizing: border-box;
-            padding: 16px;
-            border: 1px solid color-mix(in srgb, var(--cmgr-border) 92%, transparent);
-            border-radius: 14px;
-            background:
-                linear-gradient(145deg, color-mix(in srgb, var(--cmgr-panel-soft) 78%, transparent), transparent 62%),
-                var(--cmgr-panel);
-            box-shadow: 0 14px 30px color-mix(in srgb, #000 18%, transparent);
-            transition: border-color 0.16s ease, transform 0.16s ease, box-shadow 0.16s ease;
-        }
-        .cmgr-download:hover {
-            border-color: color-mix(in srgb, var(--cmgr-accent) 28%, var(--cmgr-border));
-            box-shadow: 0 18px 38px color-mix(in srgb, #000 24%, transparent);
-            transform: translateY(-1px);
-        }
-        .cmgr-download::before {
-            content: "";
-            position: absolute;
-            top: 0;
-            left: 20px;
-            right: 20px;
-            height: 1px;
-            background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--cmgr-accent) 42%, transparent), transparent);
-        }
-        .cmgr-download-head {
-            min-width: 0;
-            align-items: flex-start;
-        }
-        .cmgr-download-title {
-            min-width: 0;
-            display: grid;
-            gap: 6px;
-        }
-        .cmgr-download-title strong {
-            overflow: hidden;
-            color: var(--cmgr-text);
-            font-size: 13px;
-            line-height: 1.35;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .cmgr-download-kind {
-            width: max-content;
-            max-width: 100%;
-            overflow: hidden;
-            color: color-mix(in srgb, var(--cmgr-accent) 70%, var(--cmgr-text));
-            font-size: 9px;
-            font-weight: 820;
-            letter-spacing: 0.08em;
-            text-overflow: ellipsis;
-            text-transform: uppercase;
-            white-space: nowrap;
-        }
-        .cmgr-download-status {
-            min-height: 24px;
-            display: inline-flex;
-            align-items: center;
-            gap: 6px;
-            flex: 0 0 auto;
-            box-sizing: border-box;
-            padding: 0 8px;
-            border: 1px solid var(--cmgr-border);
-            border-radius: 999px;
-            background: color-mix(in srgb, var(--cmgr-control) 72%, transparent);
-            color: var(--cmgr-muted);
-            font-size: 9.5px;
-            font-weight: 780;
-            line-height: 1;
-        }
-        .cmgr-download-status i {
-            width: 6px;
-            height: 6px;
-            border-radius: 50%;
-            background: currentColor;
-            box-shadow: 0 0 9px currentColor;
-        }
-        .cmgr-download-status.completed { color: var(--cmgr-success); }
-        .cmgr-download-status.failed { color: var(--cmgr-danger); }
-        .cmgr-download-status.downloading,
-        .cmgr-download-status.pending { color: var(--cmgr-info); }
-        .cmgr-download-status.cancelling { color: var(--cmgr-warning); }
-        .cmgr-download-path {
-            min-width: 0;
-            margin-top: 10px;
-            overflow: hidden;
-            color: var(--cmgr-muted);
-            font-size: 10.5px;
-            line-height: 1.4;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .cmgr-download > .cmgr-progress {
-            height: 7px;
-            margin: 16px 0 8px;
-            border: 0;
-            background: color-mix(in srgb, var(--cmgr-muted) 14%, transparent);
-        }
-        .cmgr-download.is-failed > .cmgr-progress div,
-        .cmgr-download.is-cancelled > .cmgr-progress div { background: var(--cmgr-danger); }
-        .cmgr-download-meta {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            color: var(--cmgr-muted);
-            font-size: 10px;
-            font-variant-numeric: tabular-nums;
-        }
-        .cmgr-download-meta strong {
-            overflow: hidden;
-            color: var(--cmgr-text);
-            font-size: 10.5px;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }
-        .cmgr-download > .cmgr-warning {
-            margin: 10px 0 0;
-            padding: 8px 9px;
-            border-radius: 8px;
-            font-size: 10px;
-            line-height: 1.4;
-        }
-        .cmgr-download-actions {
-            min-height: 34px;
-            display: flex;
-            align-items: center;
-            justify-content: flex-end;
-            gap: 7px;
-            margin-top: auto;
-            padding-top: 14px;
-        }
-        .cmgr-download-actions .cmgr-primary,
-        .cmgr-download-actions .cmgr-secondary {
-            min-height: 32px;
-            padding-inline: 10px;
-            font-size: 10px;
-        }
-        .cmgr-download-remove {
-            width: 32px;
-            height: 32px;
-            display: grid;
-            place-items: center;
-            box-sizing: border-box;
-            padding: 0;
-            border: 1px solid color-mix(in srgb, var(--cmgr-danger) 20%, var(--cmgr-border));
-            border-radius: 9px;
-            background: color-mix(in srgb, var(--cmgr-danger) 5%, var(--cmgr-control));
-            color: color-mix(in srgb, var(--cmgr-danger) 72%, var(--cmgr-muted));
-            cursor: pointer;
-        }
-        .cmgr-download-remove > span {
-            position: relative;
-            width: 10px;
-            height: 11px;
-            box-sizing: border-box;
-            border: 1.5px solid currentColor;
-            border-top: 0;
-            border-radius: 0 0 2px 2px;
-        }
-        .cmgr-download-remove > span::before,
-        .cmgr-download-remove > span::after {
-            content: "";
-            position: absolute;
-            left: 50%;
-            height: 1.5px;
-            border-radius: 999px;
-            background: currentColor;
-            transform: translateX(-50%);
-        }
-        .cmgr-download-remove > span::before { top: -4px; width: 13px; }
-        .cmgr-download-remove > span::after { top: -6px; width: 5px; }
-        .cmgr-download-remove:hover {
-            border-color: color-mix(in srgb, var(--cmgr-danger) 50%, var(--cmgr-border));
-            background: color-mix(in srgb, var(--cmgr-danger) 13%, var(--cmgr-control));
-            color: var(--cmgr-danger);
         }
 
         /* Draw the add mark geometrically so it is centered independent of font metrics. */
@@ -5388,17 +4202,6 @@ export function injectStyles() {
         .cmgr-favorite-folder-add > span::after { width: 2px; height: 12px; }
 
         @media (max-width: 720px) {
-            .cmgr-download-toolbar {
-                align-items: stretch;
-                flex-direction: column;
-            }
-            .cmgr-download-toolbar-actions {
-                justify-content: flex-end;
-            }
-            .cmgr-lora-download-toolbar {
-                align-items: stretch;
-                flex-direction: column;
-            }
             .cmgr-download-list {
                 grid-template-columns: minmax(0, 1fr);
                 padding: 16px;
@@ -5444,6 +4247,637 @@ export function injectStyles() {
             width: 100%;
             max-width: none;
             box-sizing: border-box;
+        }
+
+        /* =================================================================
+           UI Refactor: Clean Search Toolbar, Active Filter Chips,
+           Action-First Detail Hub, Collapsible Path Bar, & Card Badges
+           ================================================================= */
+
+        /* 1. Inline clear button inside SearchCombo & single-column picker */
+        .cmgr-search-picker {
+            grid-template-columns: minmax(0, 1fr) !important;
+        }
+        .cmgr-combo-clear[hidden],
+        .cmgr-search-clear[hidden],
+        .cmgr-search-spinner[hidden] {
+            display: none !important;
+        }
+        .cmgr-combo.has-value .cmgr-combo-control {
+            padding-right: 52px;
+            border-color: color-mix(in srgb, var(--cmgr-accent) 36%, var(--cmgr-border));
+            background: color-mix(in srgb, var(--cmgr-accent) 6%, var(--cmgr-control));
+        }
+        .cmgr-combo-clear {
+            position: absolute;
+            top: 50%;
+            right: 28px;
+            z-index: 3;
+            width: 20px;
+            height: 20px;
+            display: grid;
+            place-items: center;
+            padding: 0;
+            border: 0;
+            border-radius: 50%;
+            background: color-mix(in srgb, var(--cmgr-text) 10%, transparent);
+            color: var(--cmgr-muted);
+            font-size: 13px;
+            line-height: 1;
+            cursor: pointer;
+            transform: translateY(-50%);
+            transition: background-color 0.15s ease, color 0.15s ease;
+        }
+        .cmgr-combo-clear:hover {
+            background: color-mix(in srgb, var(--cmgr-danger) 22%, transparent);
+            color: var(--cmgr-danger);
+        }
+
+        /* 2. Top Toolbar: Segmented Kind Tabs, Inline Loading Spinner, & Active Filter Bar */
+        .cmgr-search-toolbar-main {
+            grid-template-columns: auto minmax(220px, 1fr) !important;
+        }
+        .cmgr-search-toolbar-actions {
+            display: flex !important;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 8px;
+            padding: 11px 18px;
+        }
+        .cmgr-search-toolbar.has-filter-bar {
+            row-gap: 0;
+        }
+        .cmgr-search-toolbar-filters {
+            grid-column: 1 / -1;
+            min-width: 0;
+            padding: 0 18px 10px 24px;
+        }
+        .cmgr-active-filters,
+        .cmgr-active-filter-list {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 6px;
+        }
+        .cmgr-active-filter-chip {
+            height: 26px;
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            padding: 0 8px 0 10px;
+            border: 1px solid color-mix(in srgb, var(--cmgr-accent) 34%, var(--cmgr-border));
+            border-radius: 999px;
+            background: color-mix(in srgb, var(--cmgr-accent) 10%, var(--cmgr-control));
+            color: var(--cmgr-text);
+            font-size: 11px;
+            line-height: 1;
+            cursor: pointer;
+            transition: border-color 0.15s ease, background-color 0.15s ease;
+        }
+        .cmgr-active-filter-chip > small {
+            color: var(--cmgr-muted);
+            font-size: 10px;
+            font-weight: 650;
+        }
+        .cmgr-active-filter-chip > b {
+            font-weight: 780;
+            color: var(--cmgr-text);
+        }
+        .cmgr-active-filter-chip > i {
+            width: 15px;
+            height: 15px;
+            display: inline-grid;
+            place-items: center;
+            border-radius: 50%;
+            background: color-mix(in srgb, var(--cmgr-text) 10%, transparent);
+            color: var(--cmgr-muted);
+            font-style: normal;
+            font-size: 11px;
+        }
+        .cmgr-active-filter-chip:hover {
+            border-color: color-mix(in srgb, var(--cmgr-danger) 46%, var(--cmgr-border));
+            background: color-mix(in srgb, var(--cmgr-danger) 10%, var(--cmgr-control));
+        }
+        .cmgr-active-filter-chip:hover > i {
+            background: color-mix(in srgb, var(--cmgr-danger) 24%, transparent);
+            color: var(--cmgr-danger);
+        }
+        .cmgr-reset-filters-btn {
+            height: 26px;
+            padding: 0 10px;
+            border: 1px dashed var(--cmgr-border);
+            border-radius: 999px;
+            background: transparent;
+            color: var(--cmgr-muted);
+            font-size: 11px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: color 0.15s ease, border-color 0.15s ease, background-color 0.15s ease;
+        }
+        .cmgr-reset-filters-btn:hover {
+            border-color: color-mix(in srgb, var(--cmgr-accent) 42%, var(--cmgr-border));
+            background: color-mix(in srgb, var(--cmgr-accent) 8%, transparent);
+            color: var(--cmgr-text);
+        }
+        .cmgr-kind-tabs {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            padding: 3px;
+            border: 1px solid var(--cmgr-border);
+            border-radius: 11px;
+            background: color-mix(in srgb, var(--cmgr-bg) 56%, var(--cmgr-control));
+        }
+        .cmgr-kind-tab {
+            height: 32px;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 0 12px;
+            border: 0;
+            border-radius: 8px;
+            background: transparent;
+            color: var(--cmgr-muted);
+            font-size: 12px;
+            font-weight: 780;
+            white-space: nowrap;
+            cursor: pointer;
+            transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+        }
+        .cmgr-kind-tab:hover {
+            color: var(--cmgr-text);
+            background: color-mix(in srgb, var(--cmgr-text) 5%, transparent);
+        }
+        .cmgr-kind-tab.active {
+            background: color-mix(in srgb, var(--cmgr-accent) 20%, var(--cmgr-panel));
+            color: var(--cmgr-text);
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18), inset 0 0 0 1px color-mix(in srgb, var(--cmgr-accent) 42%, transparent);
+        }
+        .cmgr-kind-tab > b {
+            padding: 1px 6px;
+            border-radius: 999px;
+            background: color-mix(in srgb, var(--cmgr-text) 9%, transparent);
+            color: var(--cmgr-muted);
+            font-size: 10px;
+            font-weight: 800;
+        }
+        .cmgr-kind-tab.active > b {
+            background: color-mix(in srgb, var(--cmgr-accent) 26%, transparent);
+            color: var(--cmgr-text);
+        }
+        .cmgr-toolbar-icon-btn {
+            width: 40px;
+            height: 40px;
+            min-width: 40px;
+            padding: 0 !important;
+            display: inline-grid;
+            place-items: center;
+            border-radius: 10px;
+            font-size: 15px;
+            line-height: 1;
+        }
+        .cmgr-search-spinner {
+            position: absolute;
+            right: 38px;
+            top: 50%;
+            width: 14px;
+            height: 14px;
+            box-sizing: border-box;
+            border: 2px solid color-mix(in srgb, var(--cmgr-muted) 30%, transparent);
+            border-top-color: var(--cmgr-accent);
+            border-radius: 50%;
+            transform: translateY(-50%);
+            animation: cmgrSpin 0.7s linear infinite;
+            pointer-events: none;
+        }
+        @keyframes cmgrSpin {
+            to { transform: translateY(-50%) rotate(360deg); }
+        }
+
+        /* 3. Interactive Card Favorite Button & Card Status Badges */
+        .cmgr-card-favorite-btn {
+            pointer-events: auto !important;
+            cursor: pointer;
+            opacity: 0;
+            transform: translateY(-2px) scale(0.96);
+            transition: opacity 0.16s ease, transform 0.16s ease, background-color 0.16s ease, border-color 0.16s ease;
+        }
+        .cmgr-card:hover .cmgr-card-favorite-btn,
+        .cmgr-card:focus-within .cmgr-card-favorite-btn,
+        .cmgr-card-favorite-btn.is-active {
+            opacity: 1;
+            transform: translateY(0) scale(1);
+        }
+        .cmgr-card-favorite-btn:not(.is-active) {
+            width: 28px;
+            padding: 0;
+            justify-content: center;
+            border-color: color-mix(in srgb, var(--cmgr-border) 85%, transparent);
+            background: color-mix(in srgb, var(--cmgr-panel) 76%, transparent);
+            color: var(--cmgr-text);
+        }
+        .cmgr-card-favorite-btn:hover {
+            border-color: color-mix(in srgb, #f59e0b 65%, var(--cmgr-border)) !important;
+            background: color-mix(in srgb, #f59e0b 20%, var(--cmgr-panel)) !important;
+            color: #fbbf24 !important;
+        }
+        .cmgr-card-top-badges {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 6;
+            max-width: calc(100% - 52px);
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 5px;
+            pointer-events: none;
+        }
+        .cmgr-card-top-badges .cmgr-card-badge {
+            position: static;
+            max-width: 100%;
+        }
+        .cmgr-card-status-slot {
+            position: static;
+            display: inline-flex;
+            gap: 5px;
+            pointer-events: none;
+        }
+        .cmgr-card-status-slot:empty {
+            display: none;
+        }
+        .cmgr-card-status {
+            height: 22px;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 0 8px;
+            border-radius: 999px;
+            font-size: 10px;
+            font-weight: 800;
+            line-height: 1;
+            backdrop-filter: blur(8px);
+            -webkit-backdrop-filter: blur(8px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.28);
+        }
+        .cmgr-card-status.is-installed {
+            border: 1px solid color-mix(in srgb, var(--cmgr-success) 52%, transparent);
+            background: color-mix(in srgb, var(--cmgr-panel) 84%, var(--cmgr-success) 16%);
+            color: var(--cmgr-success);
+        }
+        .cmgr-card-status.is-downloading {
+            border: 1px solid color-mix(in srgb, var(--cmgr-info) 52%, transparent);
+            background: color-mix(in srgb, var(--cmgr-panel) 82%, var(--cmgr-info) 18%);
+            color: var(--cmgr-info);
+        }
+        .cmgr-card-status.is-downloading > i {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: currentColor;
+            box-shadow: 0 0 8px currentColor;
+        }
+        .cmgr-card-creator {
+            overflow: hidden;
+            color: rgba(255, 255, 255, 0.72);
+            font-size: 10.5px;
+            font-weight: 680;
+            line-height: 1.1;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            text-shadow: 0 1px 4px rgba(0, 0, 0, 0.75);
+        }
+        .cmgr-card-stat-chip.is-size {
+            margin-left: auto;
+            opacity: 0.92;
+        }
+
+        /* 4. Right Detail Panel: Unified Download Card, Top Action Hub, Live Progress & Compact Favorite */
+        .cmgr-detail-download-card {
+            display: grid;
+            gap: 10px;
+            margin: 12px 0 16px;
+            padding: 12px;
+            border: 1px solid color-mix(in srgb, var(--cmgr-accent) 26%, var(--cmgr-border));
+            border-radius: 14px;
+            background: linear-gradient(
+                180deg,
+                color-mix(in srgb, var(--cmgr-accent) 7%, var(--cmgr-panel-soft)) 0%,
+                var(--cmgr-panel-soft) 100%
+            );
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+        }
+        .cmgr-detail-download-card .cmgr-detail-field-block {
+            margin: 0;
+        }
+        .cmgr-detail-download-card .cmgr-path-box {
+            margin: 0;
+            background: color-mix(in srgb, var(--cmgr-bg) 42%, var(--cmgr-control));
+        }
+        .cmgr-detail-action-hub {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin: 0;
+        }
+        .cmgr-detail-action-hub.is-inline-cta {
+            display: grid;
+            grid-template-columns: minmax(0, 1fr) auto;
+            align-items: stretch;
+            gap: 8px;
+        }
+        .cmgr-detail-action-hub.is-inline-cta .cmgr-favorite-controls.is-compact {
+            padding: 0;
+            border: 0;
+            background: transparent;
+            box-shadow: none;
+            min-height: 44px;
+            display: flex;
+        }
+        .cmgr-detail-action-hub.is-inline-cta .cmgr-favorite-controls.is-compact .cmgr-favorite-toggle {
+            min-height: 44px;
+            padding: 0 12px;
+            border: 1px solid var(--cmgr-border);
+            border-radius: 12px;
+            background: var(--cmgr-control);
+        }
+        .cmgr-detail-action-hub.is-inline-cta .cmgr-favorite-controls.is-compact .cmgr-favorite-toggle:hover {
+            border-color: color-mix(in srgb, #f59e0b 52%, var(--cmgr-border));
+            background: color-mix(in srgb, #f59e0b 10%, var(--cmgr-control));
+        }
+        .cmgr-download-cta {
+            min-height: 44px !important;
+            width: 100%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            border-radius: 12px !important;
+            font-size: 13.5px !important;
+            font-weight: 820 !important;
+            letter-spacing: 0.01em;
+            box-shadow: 0 8px 22px color-mix(in srgb, var(--cmgr-accent) 26%, transparent);
+            transition: transform 0.15s ease, box-shadow 0.15s ease, filter 0.15s ease;
+        }
+        .cmgr-download-cta:hover:not(:disabled) {
+            transform: translateY(-1px);
+            box-shadow: 0 12px 26px color-mix(in srgb, var(--cmgr-accent) 34%, transparent);
+            filter: brightness(1.05);
+        }
+        .cmgr-download-cta-icon {
+            width: 22px;
+            height: 22px;
+            display: inline-grid;
+            place-items: center;
+            border-radius: 7px;
+            background: rgba(255, 255, 255, 0.16);
+            font-size: 13px;
+            line-height: 1;
+        }
+        .cmgr-detail-download-progress {
+            display: grid;
+            gap: 8px;
+            padding: 11px 12px;
+            border: 1px solid color-mix(in srgb, var(--cmgr-info) 38%, var(--cmgr-border));
+            border-radius: 12px;
+            background: color-mix(in srgb, var(--cmgr-info) 7%, var(--cmgr-control));
+        }
+        .cmgr-detail-download-progress-actions {
+            display: flex;
+            align-items: center;
+            justify-content: flex-end;
+            gap: 6px;
+        }
+        .cmgr-detail-installed-bar {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 10px;
+            padding: 10px 12px;
+            border: 1px solid color-mix(in srgb, var(--cmgr-success) 34%, var(--cmgr-border));
+            border-radius: 12px;
+            background: color-mix(in srgb, var(--cmgr-success) 7%, var(--cmgr-control));
+        }
+        .cmgr-detail-installed-badge {
+            min-width: 0;
+            flex: 1 1 140px;
+            display: flex;
+            align-items: center;
+            gap: 9px;
+        }
+        .cmgr-installed-check {
+            width: 26px;
+            height: 26px;
+            flex: 0 0 auto;
+            display: grid;
+            place-items: center;
+            border-radius: 8px;
+            background: color-mix(in srgb, var(--cmgr-success) 18%, transparent);
+            color: var(--cmgr-success);
+            font-size: 13px;
+            font-weight: 900;
+        }
+        .cmgr-detail-installed-badge > div {
+            min-width: 0;
+            display: grid;
+            gap: 2px;
+        }
+        .cmgr-detail-installed-badge b {
+            color: var(--cmgr-text);
+            font-size: 12px;
+            font-weight: 800;
+        }
+        .cmgr-detail-installed-badge span {
+            overflow: hidden;
+            color: var(--cmgr-muted);
+            font-size: 10px;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .cmgr-detail-installed-actions {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .cmgr-mini-btn {
+            min-height: 30px !important;
+            padding: 0 10px !important;
+            font-size: 11px !important;
+            border-radius: 8px !important;
+        }
+        .cmgr-mini-btn.is-danger:hover {
+            border-color: color-mix(in srgb, var(--cmgr-danger) 48%, var(--cmgr-border));
+            color: var(--cmgr-danger);
+        }
+        .cmgr-favorite-controls.is-compact {
+            margin: 0;
+            padding: 5px 8px;
+            min-height: 38px;
+        }
+        .cmgr-favorite-controls.is-compact .cmgr-favorite-toggle {
+            min-height: 32px;
+            min-width: 0;
+            padding: 4px 8px;
+        }
+        .cmgr-favorite-controls.is-compact .cmgr-favorite-toggle-star {
+            width: 24px;
+            height: 24px;
+            font-size: 14px;
+        }
+
+        /* 5. Version Pills & Trigger Words Header */
+        .cmgr-detail-field-block {
+            display: grid;
+            gap: 6px;
+            margin: 10px 0;
+        }
+        .cmgr-detail-field-block > .cmgr-label {
+            margin: 0;
+        }
+        .cmgr-version-pills {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+        .cmgr-version-pill {
+            min-height: 30px;
+            max-width: 100%;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 4px 10px;
+            border: 1px solid var(--cmgr-border);
+            border-radius: 9px;
+            background: var(--cmgr-control);
+            color: var(--cmgr-muted);
+            font-size: 11.5px;
+            font-weight: 740;
+            cursor: pointer;
+            transition: border-color 0.15s ease, background-color 0.15s ease, color 0.15s ease;
+        }
+        .cmgr-version-pill > span {
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .cmgr-version-pill > small {
+            padding: 2px 5px;
+            border-radius: 5px;
+            background: color-mix(in srgb, var(--cmgr-text) 8%, transparent);
+            color: var(--cmgr-muted);
+            font-size: 9.5px;
+            font-weight: 760;
+        }
+        .cmgr-version-pill:hover {
+            border-color: color-mix(in srgb, var(--cmgr-accent) 38%, var(--cmgr-border));
+            color: var(--cmgr-text);
+        }
+        .cmgr-version-pill.active {
+            border-color: color-mix(in srgb, var(--cmgr-accent) 58%, var(--cmgr-border));
+            background: color-mix(in srgb, var(--cmgr-accent) 14%, var(--cmgr-control));
+            color: var(--cmgr-text);
+        }
+        .cmgr-version-pill.active > small {
+            background: color-mix(in srgb, var(--cmgr-accent) 26%, transparent);
+            color: var(--cmgr-text);
+        }
+        .cmgr-section-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            margin: 14px 0 8px;
+        }
+        .cmgr-section-head > .cmgr-section-title {
+            margin: 0;
+        }
+        .cmgr-copy-all-btn {
+            height: 24px;
+            padding: 0 9px;
+            border: 1px solid color-mix(in srgb, var(--cmgr-accent) 28%, var(--cmgr-border));
+            border-radius: 999px;
+            background: color-mix(in srgb, var(--cmgr-accent) 8%, var(--cmgr-control));
+            color: var(--cmgr-text);
+            font-size: 10.5px;
+            font-weight: 740;
+            cursor: pointer;
+            transition: background-color 0.15s ease, border-color 0.15s ease;
+        }
+        .cmgr-copy-all-btn:hover {
+            border-color: color-mix(in srgb, var(--cmgr-accent) 52%, var(--cmgr-border));
+            background: color-mix(in srgb, var(--cmgr-accent) 16%, var(--cmgr-control));
+        }
+
+        /* 6. Collapsible Automatic Save Path Drawer */
+        .cmgr-path-box {
+            margin: 10px 0;
+            padding: 10px 12px;
+            display: grid;
+            gap: 8px;
+        }
+        .cmgr-path-summary-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            min-width: 0;
+        }
+        .cmgr-path-summary-main {
+            min-width: 0;
+            flex: 1 1 auto;
+            display: flex;
+            align-items: center;
+            gap: 7px;
+        }
+        .cmgr-path-folder-icon {
+            flex: 0 0 auto;
+            font-size: 13px;
+            line-height: 1;
+        }
+        .cmgr-path-summary-text {
+            min-width: 0;
+            overflow: hidden;
+            color: var(--cmgr-muted);
+            font-size: 11px;
+            font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .cmgr-path-toggle-btn {
+            flex: 0 0 auto;
+            height: 26px;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 0 9px;
+            border: 1px solid var(--cmgr-border);
+            border-radius: 8px;
+            background: var(--cmgr-control);
+            color: var(--cmgr-text);
+            font-size: 10.5px;
+            font-weight: 740;
+            cursor: pointer;
+            transition: border-color 0.15s ease, background-color 0.15s ease;
+        }
+        .cmgr-path-toggle-btn:hover {
+            border-color: color-mix(in srgb, var(--cmgr-accent) 40%, var(--cmgr-border));
+            background: color-mix(in srgb, var(--cmgr-accent) 8%, var(--cmgr-control));
+        }
+        .cmgr-path-toggle-btn > i {
+            font-style: normal;
+            font-size: 10px;
+            color: var(--cmgr-muted);
+        }
+        .cmgr-path-drawer {
+            display: grid;
+            gap: 10px;
+            padding-top: 8px;
+            border-top: 1px solid var(--cmgr-border);
+        }
+        .cmgr-path-conflict {
+            margin: 0 !important;
+            font-size: 10.5px;
         }
     `;
     if (!style.isConnected) {

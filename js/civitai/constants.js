@@ -1,12 +1,10 @@
 export const API = "/civitai-manager/api";
 export const SEARCH_CACHE_KEY = "cmgr-civitai-search-cache";
-export const SEARCH_CACHE_VERSION = "v7-base-query-fallback";
+export const SEARCH_CACHE_VERSION = "v8-slim-cards";
 export const SEARCH_CACHE_TTL = 24 * 60 * 60 * 1000;
-export const SEARCH_CACHE_LIMIT = 80;
-export const INITIAL_PREVIEW_LOADS = 8;
+export const SEARCH_CACHE_LIMIT = 16;
+export const INITIAL_PREVIEW_LOADS = 12;
 export const HIGH_PRIORITY_PREVIEW_LOADS = 4;
-export const DETAIL_PREVIEW_LIMIT = 12;
-export const TRANSPARENT_PIXEL = "data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==";
 
 export const TABS = ["Discover", "Library", "Favorites", "Downloads", "Settings"];
 

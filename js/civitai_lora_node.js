@@ -5,25 +5,44 @@ import {
     HIGH_PRIORITY_PREVIEW_LOADS,
     INITIAL_PREVIEW_LOADS,
     ROOT_LOCAL_FOLDER,
-    TRANSPARENT_PIXEL,
 } from "./civitai/constants.js";
-import { apiGet, apiPost, getSearchCache, setSearchCache } from "./civitai/api.js";
+import { apiGet, apiPost, fetchModelDetail, getSearchCache, peekModelDetail, setSearchCache } from "./civitai/api.js";
+import { animateCardsIn, bindCardMedia, loadMoreSkeletonCount, observeCardMedia, preconnectMediaHosts, renderCardMedia } from "./civitai/card_media.js";
+import { ACTIVE_DOWNLOAD_STATUSES, patchDownloadPage, patchDownloadProgress, renderDownloadPage, renderDownloadProgress, trackDownloadRates } from "./civitai/downloads.js";
 import {
     bindFavoriteFolderSidebar,
     bindSearchCombo,
     ensureNotificationHost,
+    renderActiveFilterChips,
     renderCollectionEmptyState,
     renderFavoriteCardMark,
     renderFavoriteControls,
+    syncFavoriteControls,
     renderFavoriteFolderSidebar,
-    renderFileActions,
     renderPromoLinks,
-    renderSearchCombo,
-    renderSearchToolbar,
-    renderToolbarSearchField,
     syncFavoriteCardMark,
     updateNotificationHost,
 } from "./civitai/components.js";
+import {
+    bindDetailInteractions,
+    formatBytes,
+    formatStatCount,
+    galleryItemsForModel,
+    galleryItemsForUrl,
+    isDetailDrawerOpen,
+    modelFacts,
+    modelStats,
+    renderDescriptionSkeleton,
+    renderDetailDismiss,
+    renderDetailFacts,
+    renderDetailGallery,
+    renderDetailSkeleton,
+    renderDetailTags,
+    renderMatchRow,
+    setDetailDrawer,
+    setDetailLoading,
+    swapDetail,
+} from "./civitai/detail.js";
 import {
     favoriteEntryForLocal,
     favoriteEntryForRemote,
@@ -40,10 +59,11 @@ import {
     isModelPreviewFiltered,
 } from "./civitai/media.js";
 import { injectStyles } from "./civitai/styles.js";
-import { ensureLoraDataWidget, syncLoraWidgets } from "./civitai/lora_widgets.js";
+import { injectSelectorStyles } from "./civitai/selector_styles.js";
+import { selectorIcon, renderSelectorCombo, renderSelectorSearch, renderSelectorToolbar, renderSelectorSort, renderSelectorStats, animateSelectorFolder, bindSelectorMenus } from "./civitai/selector_ui.js";
+import { ensureLoraDataWidget, paintStrengthRange, syncLoraWidgets } from "./civitai/lora_widgets.js";
 
 const NODE_NAME = "CivitaiMultiLoraLoader";
-const ACTIVE_DOWNLOAD_STATUSES = new Set(["pending", "downloading", "cancelling"]);
 const TERMINAL_DOWNLOAD_STATUSES = new Set(["completed", "failed", "cancelled"]);
 
 let overlay = null;
@@ -55,8 +75,12 @@ let searchController = null;
 let searchSequence = 0;
 let toastTimer = null;
 let renderedPopupTab = "";
-let previewObserver = null;
-let popupPreviewSetupFrame = 0;
+let lastRemoteSelectAt = 0;
+let remoteQueryTimer = 0;
+// Discover, Local and Favorites each keep their own detail selection.
+const SELECTION_FIELDS = ["selectedRemote", "selectedVersionId", "selectedFileName", "selectedAssetId"];
+const EMPTY_SELECTION = { selectedRemote: null, selectedVersionId: "", selectedFileName: "", selectedAssetId: "" };
+const tabSelections = {};
 let localMetadataBatch = {
     running: false,
     cancelRequested: false,
@@ -99,7 +123,7 @@ const popup = {
     selectedFavoriteKey: "",
     selectedFavoriteFolderId: "",
     favoriteFolderEditor: null,
-    selectedAppliedIndex: 0,
+    detailOpen: false,
     downloads: {},
     pendingApply: new Map(),
     scroll: {
@@ -112,6 +136,7 @@ const popup = {
     },
     error: "",
     toast: "",
+    toastAction: null,
 };
 
 app.registerExtension({
@@ -355,78 +380,109 @@ function addLoraToTargetNode(node, entry, notify = false) {
     }
     updateNodeLoras(node, next);
     if (popup.node === node && overlay?.classList.contains("show")) {
-        if (popup.tab === "applied") popup.selectedAppliedIndex = existingIndex >= 0 ? existingIndex : next.length - 1;
         if (!updateRemoteDownloadState()) renderPopup();
     }
 }
 
-function removeLoraFromNode(index) {
-    if (!popup.node) return;
-    const next = normalizeLoraList(popup.node._cmgrLoras).filter((_, itemIndex) => itemIndex !== index);
-    const selectedIndex = Number(popup.selectedAppliedIndex || 0);
-    popup.selectedAppliedIndex = selectedIndex > index
-        ? selectedIndex - 1
-        : Math.min(selectedIndex, Math.max(0, next.length - 1));
-    updateNodeLoras(popup.node, next);
-    renderPopup();
-}
-
-function updateLoraOrder(index, delta) {
-    if (!popup.node) return;
-    const next = normalizeLoraList(popup.node._cmgrLoras);
-    const target = index + delta;
-    if (target < 0 || target >= next.length) return;
-    [next[index], next[target]] = [next[target], next[index]];
-    const selectedIndex = Number(popup.selectedAppliedIndex || 0);
-    if (selectedIndex === index) popup.selectedAppliedIndex = target;
-    else if (selectedIndex === target) popup.selectedAppliedIndex = index;
-    updateNodeLoras(popup.node, next);
-    renderPopup();
-}
-
 function openPopup(node) {
+    popup.returnFocus = document.activeElement;
     popup.node = node;
     popup.error = "";
-    popup.selectedAppliedIndex = 0;
+    popup.detailOpen = false;
     createOverlay();
     overlay.classList.add("show");
     renderPopup();
+    overlay.querySelector(`[data-lora-tab="${popup.tab}"]`)?.focus({ preventScroll: true });
     void hydratePopup();
 }
 
 function createOverlay() {
     if (overlay) return;
+    injectSelectorStyles();
+    preconnectMediaHosts();
+    popup.filtersOpen = window.matchMedia("(min-width: 1180px)").matches;
     overlay = document.createElement("div");
-    overlay.className = "cmgr-overlay cmgr-lora-overlay";
+    overlay.className = "cmgr-overlay cmgr-lora-overlay cmgr-selector-overlay";
     overlay.innerHTML = `
-        <div class="cmgr-shell cmgr-lora-shell" role="dialog" aria-modal="true" aria-label="${escapeAttr(t("LoRA Manager"))}">
-            <div class="cmgr-topbar">
-                <div>
+        <div class="cmgr-shell cmgr-lora-shell cmgr-selector-shell" role="dialog" aria-modal="true" aria-label="${escapeAttr(t("LoRA Manager"))}">
+            <div class="cmgr-topbar cmgr-lora-topbar cmgr-selector-topbar">
+                <div class="cmgr-lora-heading cmgr-selector-heading">
+                    ${selectorIcon("layers")}
                     <div class="cmgr-title">${escapeHtml(t("LoRA Manager"))}</div>
-                    <div class="cmgr-subtitle">${escapeHtml(t("Search, download, apply, and manage LoRAs for this node."))}</div>
                 </div>
                 <div class="cmgr-topbar-actions">
-                    ${renderPromoLinks()}
-                    <button class="cmgr-icon-btn" data-action="close-lora-manager">${escapeHtml(t("Close"))}</button>
+                    <button class="cmgr-lora-filter-toggle cmgr-selector-filter-toggle" type="button" data-action="toggle-lora-filters" aria-label="${escapeAttr(t("Adjust filters"))}" aria-controls="cmgr-lora-filters">${selectorIcon("panel")}<span>${escapeHtml(t("Adjust filters"))}</span></button>
+                    <button class="cmgr-lora-close cmgr-selector-close" type="button" data-action="close-lora-manager" aria-label="${escapeAttr(t("Close"))}" title="${escapeAttr(t("Close"))} (Esc)">${selectorIcon("close")}</button>
                 </div>
             </div>
-            <div class="cmgr-layout cmgr-lora-layout">
-                <nav class="cmgr-nav cmgr-lora-nav"></nav>
-                <main class="cmgr-body cmgr-lora-body"></main>
+            <div class="cmgr-selector-workspace">
+                <nav class="cmgr-lora-tabs cmgr-selector-tabs" role="tablist" aria-orientation="vertical" aria-label="${escapeAttr(t("LoRA Manager"))}"></nav>
+                <div class="cmgr-layout cmgr-lora-layout cmgr-selector-layout">
+                    <button class="cmgr-lora-filter-backdrop cmgr-selector-filter-backdrop" type="button" aria-label="${escapeAttr(t("Close"))}"></button>
+                    <aside class="cmgr-nav cmgr-lora-nav cmgr-selector-nav" id="cmgr-lora-filters" aria-label="${escapeAttr(t("Adjust filters"))}"></aside>
+                    <main class="cmgr-body cmgr-lora-body cmgr-selector-body" id="cmgr-lora-content" role="tabpanel"></main>
+                </div>
             </div>
+            <footer class="cmgr-selector-footer">
+                <button class="cmgr-selector-node-status" type="button" data-action="view-applied-loras"></button>
+                <div>${renderPromoLinks()}<span class="cmgr-selector-escape"><kbd>Esc</kbd> ${escapeHtml(t("Close"))}</span></div>
+            </footer>
         </div>
     `;
     document.body.appendChild(overlay);
     popupBody = overlay.querySelector(".cmgr-lora-body");
     notificationHost = ensureNotificationHost(overlay.querySelector(".cmgr-lora-shell"));
     overlay.querySelector('[data-action="close-lora-manager"]').onclick = closePopup;
+    overlay.querySelector('[data-action="toggle-lora-filters"]').onclick = () => setLoraFiltersOpen(!popup.filtersOpen);
+    overlay.querySelector(".cmgr-lora-filter-backdrop").onclick = () => setLoraFiltersOpen(false);
+    overlay.querySelector('[data-action="view-applied-loras"]').onclick = () => switchTab("applied");
+    const handleKey = (event) => {
+        if (!overlay.classList.contains("show")) return;
+        event.stopPropagation();
+        if (event.key === "Escape" && !event.defaultPrevented) {
+            event.preventDefault();
+            const menu = overlay.querySelector(".cmgr-selector-tools[open]");
+            if (menu) {
+                menu.open = false;
+                menu.querySelector("summary").focus();
+            } else if (isDetailDrawerOpen(overlay)) {
+                popup.detailOpen = false;
+                setDetailDrawer(overlay, false);
+                overlay.querySelector(".cmgr-card.selected")?.focus({ preventScroll: true });
+            } else if (popup.filtersOpen && window.matchMedia("(max-width: 1179px)").matches) setLoraFiltersOpen(false);
+            else closePopup();
+        }
+        if (event.key !== "Tab") return;
+        const controls = [...overlay.querySelectorAll('button, summary, input, select, textarea, a[href], [tabindex="0"]')]
+            .filter((element) => !element.disabled && element.tabIndex >= 0 && element.getClientRects().length);
+        const target = event.shiftKey ? controls.at(-1) : controls[0];
+        if (!overlay.contains(document.activeElement) || document.activeElement === (event.shiftKey ? controls[0] : controls.at(-1))) {
+            event.preventDefault();
+            target?.focus();
+        }
+    };
+    overlay.addEventListener("keydown", handleKey);
+    document.addEventListener("keydown", handleKey);
     overlay.addEventListener("click", (event) => {
         if (event.target === overlay) closePopup();
     });
+    bindDetailInteractions(overlay, { onCloseDetail: () => { popup.detailOpen = false; } });
+    bindCardMedia(overlay);
 }
 
 function closePopup() {
+    overlay?.querySelectorAll("video").forEach((video) => video.pause());
     overlay?.classList.remove("show");
+    if (popup.returnFocus?.isConnected) popup.returnFocus.focus({ preventScroll: true });
+}
+
+function setLoraFiltersOpen(open) {
+    popup.filtersOpen = open;
+    overlay.querySelector(".cmgr-lora-layout").classList.toggle("filters-open", open);
+    overlay.querySelector('[data-action="toggle-lora-filters"]').setAttribute("aria-expanded", String(open));
+    if (!open && overlay.querySelector(".cmgr-lora-nav").contains(document.activeElement)) {
+        overlay.querySelector('[data-action="toggle-lora-filters"]').focus();
+    }
 }
 
 async function hydratePopup() {
@@ -519,10 +575,15 @@ function refreshFavoriteSurface() {
     rerenderNavPreservingScroll();
     syncVisibleFavoriteCardMarks();
     if (popup.tab === "discover") {
-        if (updateRemoteDetail()) return;
+        const favorite = remoteFavorite();
+        syncFavoriteControls(popupBody, Boolean(favorite), favorite?.folder_id);
+        return;
     }
     if (popup.tab === "local") {
-        if (updateLocalDetail()) return;
+        const asset = popup.libraryItems.find((item) => item.id === popup.selectedAssetId);
+        const favorite = localFavorite(asset);
+        syncFavoriteControls(popupBody, Boolean(favorite), favorite?.folder_id);
+        return;
     }
     renderPopup();
 }
@@ -639,74 +700,110 @@ function navCount(tab) {
 function renderNav() {
     const nav = overlay?.querySelector(".cmgr-lora-nav");
     if (!nav) return;
+    const openCombo = nav.querySelector(".cmgr-combo.open");
+    const comboState = openCombo ? {
+        id: openCombo.dataset.combo,
+        query: openCombo.querySelector("[data-combo-search]").value,
+        focused: openCombo.contains(document.activeElement),
+    } : null;
+    const tabs = overlay.querySelector(".cmgr-lora-tabs");
+    overlay.querySelector(".cmgr-selector-node-status").innerHTML = `${selectorIcon("layers")}<span>${escapeHtml(t("Applied to Node"))}</span><b>${navCount("applied")}</b>`;
     const items = [
         ["discover", "Discover"],
         ["local", "Local LoRAs"],
         ["favorites", "Favorites"],
-        ["applied", "Applied to Node"],
+        ["applied", "Applied"],
         ["downloads", "Downloads"],
     ];
+    if (!tabs.children.length) tabs.innerHTML = items.map(([id, label]) => `
+        <button class="cmgr-lora-tab cmgr-selector-tab ${popup.tab === id ? "active" : ""}" type="button" role="tab" id="cmgr-lora-tab-${id}" data-lora-tab="${id}" aria-controls="cmgr-lora-content" aria-selected="${popup.tab === id}" tabindex="${popup.tab === id ? 0 : -1}">
+            ${selectorIcon(id)}<span>${escapeHtml(t(label))}</span>
+            ${navCount(id) !== "" ? `<b>${navCount(id)}</b>` : ""}
+        </button>
+    `).join("");
+    tabs.querySelectorAll("[data-lora-tab]").forEach((button) => {
+        const active = button.dataset.loraTab === popup.tab;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", String(active));
+        button.tabIndex = active ? 0 : -1;
+        const badge = button.querySelector("b");
+        if (badge) badge.textContent = navCount(button.dataset.loraTab);
+    });
+    const hasFilters = ["discover", "local", "favorites"].includes(popup.tab);
+    overlay.querySelector(".cmgr-lora-layout").classList.toggle("has-filters", hasFilters);
+    overlay.querySelector('[data-action="toggle-lora-filters"]').hidden = !hasFilters;
+    popupBody.setAttribute("aria-labelledby", `cmgr-lora-tab-${popup.tab}`);
+    setLoraFiltersOpen(popup.filtersOpen);
     nav.innerHTML = `
-        <div class="cmgr-nav-group">
-            <div class="cmgr-nav-title">${escapeHtml(t("LoRA"))}</div>
-            ${items.map(([id, label]) => `
-                <button class="cmgr-nav-btn ${popup.tab === id ? "active" : ""}" data-lora-tab="${id}">
-                    <span>${escapeHtml(t(label))}</span>
-                    ${navCount(id) !== "" ? `<b>${navCount(id)}</b>` : ""}
-                </button>
-            `).join("")}
+        <div class="cmgr-lora-filter-heading cmgr-selector-filter-heading">
+            <h2>${escapeHtml(t(popup.tab === "favorites" ? "Favorites" : "Adjust filters"))}</h2>
+            ${["discover", "local"].includes(popup.tab) && (popup.selectedBaseModel || popup.tab === "discover" && (popup.selectedCategory || popup.selectedTag)) ? `<button class="cmgr-lora-reset cmgr-selector-reset" type="button" data-action="reset-lora-sidebar-filters">${escapeHtml(t("Reset filters"))}</button>` : ""}
         </div>
-        ${popup.tab === "local" ? renderLocalFolderSidebar() : ""}
-        ${popup.tab === "favorites" ? renderLoraFavoriteSidebar() : ""}
         ${["discover", "local"].includes(popup.tab) ? `
             <div class="cmgr-nav-group cmgr-category-group cmgr-lora-filter-group">
                 <div class="cmgr-nav-title">${escapeHtml(t("Base Model"))}</div>
                 <div class="cmgr-search-picker">
-                    ${renderSearchCombo({
+                    ${renderSelectorCombo({
                         id: "lora-base-model",
                         value: popup.selectedBaseModel,
                         items: loraBaseModelOptions(),
                         placeholder: t("Choose a base model"),
                         searchPlaceholder: t("Search base models..."),
                         emptyText: t("No base models found"),
+                        clearTitle: t("Clear base model"),
                     })}
-                    <button class="cmgr-clear-filter" data-clear-lora-base-model title="${escapeAttr(t("Clear base model"))}" ${popup.selectedBaseModel ? "" : "disabled"}>${escapeHtml(t("Clear"))}</button>
                 </div>
             </div>
         ` : ""}
         ${popup.tab === "discover" ? `
             <div class="cmgr-nav-group cmgr-category-group cmgr-lora-filter-group">
                 <div class="cmgr-nav-title">${escapeHtml(t("Filter by Category"))}</div>
-                <div class="cmgr-chip-grid cmgr-lora-category-grid">
-                    <button class="cmgr-filter-chip ${popup.selectedCategory ? "" : "active"}" data-lora-category="">${escapeHtml(t("All"))}</button>
-                    ${CIVITAI_CATEGORY_FILTERS.map((item) => `
-                        <button class="cmgr-filter-chip ${popup.selectedCategory === item.value ? "active" : ""}" data-lora-category="${escapeAttr(item.value)}">${escapeHtml(t(item.label))}</button>
-                    `).join("")}
+                <div class="cmgr-search-picker">
+                    ${renderSelectorCombo({
+                        id: "lora-category",
+                        value: popup.selectedCategory ? t(CIVITAI_CATEGORY_FILTERS.find((item) => item.value === popup.selectedCategory)?.label || popup.selectedCategory) : "",
+                        items: [t("All"), ...CIVITAI_CATEGORY_FILTERS.map((item) => t(item.label))],
+                        placeholder: t("All"),
+                        searchPlaceholder: t("Search"),
+                        emptyText: t("No options found"),
+                        clearTitle: t("Clear"),
+                    })}
                 </div>
             </div>
             <div class="cmgr-nav-group cmgr-category-group cmgr-lora-filter-group">
                 <div class="cmgr-nav-title">${escapeHtml(t("Search Tags"))}</div>
                 <div class="cmgr-search-picker">
-                    ${renderSearchCombo({
+                    ${renderSelectorCombo({
                         id: "lora-tag",
                         value: popup.selectedTag,
                         items: filterOptions(popup.taxonomy?.tags, popup.selectedTag),
                         placeholder: t("Choose a tag"),
                         searchPlaceholder: t("Search tags..."),
                         emptyText: t("No tags found"),
+                        clearTitle: t("Clear tag"),
                     })}
-                    <button class="cmgr-clear-filter" data-clear-lora-tag title="${escapeAttr(t("Clear tag"))}" ${popup.selectedTag ? "" : "disabled"}>${escapeHtml(t("Clear"))}</button>
                 </div>
             </div>
         ` : ""}
-        <div class="cmgr-lora-nav-summary">
-            <span>${escapeHtml(t("Execution order"))}</span>
-            <b>${escapeHtml(t("Top to bottom"))}</b>
-        </div>
+        ${popup.tab === "local" ? renderLocalFolderSidebar() : ""}
+        ${popup.tab === "favorites" ? renderLoraFavoriteSidebar() : ""}
     `;
-    nav.querySelectorAll("[data-lora-tab]").forEach((button) => {
-        button.onclick = () => switchTab(button.dataset.loraTab);
+    tabs.querySelectorAll("[data-lora-tab]").forEach((button, index, buttons) => {
+        button.onclick = () => {
+            switchTab(button.dataset.loraTab);
+            tabs.querySelector(`[data-lora-tab="${popup.tab}"]`)?.focus({ preventScroll: true });
+        };
+        button.onkeydown = (event) => {
+            if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+            event.preventDefault();
+            const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+                : (index + (["ArrowRight", "ArrowDown"].includes(event.key) ? 1 : -1) + buttons.length) % buttons.length;
+            buttons[next].click();
+            tabs.querySelector(`[data-lora-tab="${popup.tab}"]`)?.scrollIntoView({ block: "nearest", inline: "nearest" });
+        };
     });
+    const resetFilters = nav.querySelector('[data-action="reset-lora-sidebar-filters"]');
+    if (resetFilters) resetFilters.onclick = resetLoraFilters;
     bindLocalFolderControls(nav);
     const selectBaseModel = (value) => {
         if (popup.selectedBaseModel === value) return;
@@ -716,19 +813,18 @@ function renderNav() {
         else {
             popup.selectedAssetId = "";
             popup.scroll.local = 0;
+            rerenderNavPreservingScroll();
             if (!updateLocalFolderView()) renderPopup({ preserveScroll: false });
+            nav.querySelector('[data-combo="lora-base-model"] [data-combo-toggle]')?.focus({ preventScroll: true });
         }
     };
     bindSearchCombo(nav.querySelector('[data-combo="lora-base-model"]'), selectBaseModel);
-    const clearBaseModel = nav.querySelector("[data-clear-lora-base-model]");
-    if (clearBaseModel) clearBaseModel.onclick = () => selectBaseModel("");
-    nav.querySelectorAll("[data-lora-category]").forEach((button) => {
-        button.onclick = () => {
-            if (popup.selectedCategory === button.dataset.loraCategory) return;
-            popup.selectedCategory = button.dataset.loraCategory || "";
-            popup.selectedRemote = null;
-            void searchRemote(true);
-        };
+    bindSearchCombo(nav.querySelector('[data-combo="lora-category"]'), (value) => {
+        const category = CIVITAI_CATEGORY_FILTERS.find((item) => t(item.label) === value)?.value || "";
+        if (popup.selectedCategory === category) return;
+        popup.selectedCategory = category;
+        popup.selectedRemote = null;
+        void searchRemote(true);
     });
     const selectTag = (value) => {
         if (popup.selectedTag === value) return;
@@ -737,9 +833,20 @@ function renderNav() {
         void searchRemote(true);
     };
     bindSearchCombo(nav.querySelector('[data-combo="lora-tag"]'), selectTag);
-    const clearTag = nav.querySelector("[data-clear-lora-tag]");
-    if (clearTag) clearTag.onclick = () => selectTag("");
     if (popup.tab === "favorites") bindLoraFavoriteSidebar(nav);
+    if (comboState) {
+        const combo = [...nav.querySelectorAll(".cmgr-combo")].find((item) => item.dataset.combo === comboState.id);
+        if (combo) {
+            combo.querySelector("[data-combo-toggle]").click();
+            const input = combo.querySelector("[data-combo-search]");
+            input.value = comboState.query;
+            input.dispatchEvent(new Event("input", { bubbles: true }));
+            if (comboState.focused) requestAnimationFrame(() => {
+                input.focus({ preventScroll: true });
+                input.setSelectionRange(input.value.length, input.value.length);
+            });
+        }
+    }
 }
 
 function updateDownloadNavCount() {
@@ -752,6 +859,15 @@ function updateDownloadNavCount() {
     }
     badge.textContent = String(navCount("downloads"));
     return true;
+}
+
+function resetLoraFilters() {
+    popup.selectedBaseModel = "";
+    popup.selectedCategory = "";
+    popup.selectedTag = "";
+    popup.selectedRemote = null;
+    if (popup.tab === "discover") void searchRemote(true);
+    else renderPopup({ preserveScroll: false });
 }
 
 function loraFavoriteItems() {
@@ -853,7 +969,8 @@ function bindLocalFolderControls(root) {
     root?.querySelectorAll("[data-lora-folder-toggle]").forEach((button) => {
         button.onclick = (event) => {
             event.stopPropagation();
-            toggleLocalFolder(button.dataset.loraFolderToggle || "", button.classList.contains("expanded"));
+            const expanded = button.classList.contains("expanded");
+            animateSelectorFolder(button, () => toggleLocalFolder(button.dataset.loraFolderToggle || "", expanded));
         };
     });
 }
@@ -899,6 +1016,11 @@ function isLocalFolderExpanded(path) {
 }
 
 function switchTab(tab) {
+    if (tab !== popup.tab) {
+        tabSelections[popup.tab] = Object.fromEntries(SELECTION_FIELDS.map((field) => [field, popup[field]]));
+        Object.assign(popup, tabSelections[tab] || EMPTY_SELECTION);
+        popup.detailOpen = false;
+    }
     popup.tab = tab;
     popup.error = "";
     if (tab === "favorites") void loadFavorites(true);
@@ -910,7 +1032,7 @@ function switchTab(tab) {
 function popupScrollElement() {
     if (!popupBody) return null;
     if (popup.tab === "applied") return popupBody.querySelector(".cmgr-lora-applied-list");
-    if (popup.tab === "downloads") return popupBody.querySelector(".cmgr-lora-download-list");
+    if (popup.tab === "downloads") return popupBody.querySelector(".cmgr-download-list");
     return popupBody.querySelector(".cmgr-lora-results");
 }
 
@@ -920,7 +1042,7 @@ function rememberPopupScroll() {
     if (!renderedPopupTab || !popupBody) return;
     let element = null;
     if (renderedPopupTab === "applied") element = popupBody.querySelector(".cmgr-lora-applied-list");
-    else if (renderedPopupTab === "downloads") element = popupBody.querySelector(".cmgr-lora-download-list");
+    else if (renderedPopupTab === "downloads") element = popupBody.querySelector(".cmgr-download-list");
     else element = popupBody.querySelector(".cmgr-lora-results");
     if (element) popup.scroll[renderedPopupTab] = element.scrollTop;
 }
@@ -948,48 +1070,6 @@ function bindPopupScroll() {
         popup.scroll[popup.tab] = element.scrollTop;
         if (popup.tab === "discover") maybeAutoLoadMoreLoras(element);
     };
-}
-
-function setupPopupLazyPreviews() {
-    previewObserver?.disconnect();
-    previewObserver = null;
-    const pending = [...(popupBody?.querySelectorAll("img[data-cmgr-lora-src], video[data-cmgr-lora-src]") || [])];
-    if (!pending.length) return;
-
-    const loadMedia = (element) => {
-        const src = element.dataset.cmgrLoraSrc;
-        if (!src || element.dataset.cmgrLoaded === "1") return;
-        element.dataset.cmgrLoaded = "1";
-        element.src = src;
-        if (element.tagName === "VIDEO") {
-            element.load();
-            element.play?.().catch(() => {});
-        }
-    };
-
-    const scrollRoot = popupScrollElement();
-    if ("IntersectionObserver" in window) {
-        previewObserver = new IntersectionObserver((entries) => {
-            entries.forEach((entry) => {
-                if (!entry.isIntersecting) return;
-                previewObserver?.unobserve(entry.target);
-                loadMedia(entry.target);
-            });
-        }, { root: scrollRoot, rootMargin: "100% 0px" });
-        pending.forEach((element) => previewObserver.observe(element));
-    } else {
-        pending.forEach(loadMedia);
-    }
-}
-
-function schedulePopupLazyPreviews() {
-    if (popupPreviewSetupFrame) cancelAnimationFrame(popupPreviewSetupFrame);
-    popupPreviewSetupFrame = requestAnimationFrame(() => {
-        popupPreviewSetupFrame = requestAnimationFrame(() => {
-            popupPreviewSetupFrame = 0;
-            if (popupBody?.isConnected && overlay?.classList.contains("show")) setupPopupLazyPreviews();
-        });
-    });
 }
 
 function maybeAutoLoadMoreLoras(element) {
@@ -1054,7 +1134,7 @@ function renderPopup(options = {}) {
     updatePopupMessages();
     bindPopupEvents();
     bindPopupScroll();
-    schedulePopupLazyPreviews();
+    observeCardMedia(popupBody);
     restorePopupScroll();
     restorePopupFocus(focusedField);
 }
@@ -1063,6 +1143,16 @@ function updatePopupMessages() {
     return updateNotificationHost(notificationHost, {
         error: popup.error,
         toast: popup.toast,
+        toastAction: popup.toastAction && {
+            label: popup.toastAction.label,
+            onClick: () => {
+                const { onClick } = popup.toastAction;
+                popup.toast = "";
+                popup.toastAction = null;
+                updatePopupMessages();
+                onClick();
+            },
+        },
         onDismissError: () => {
             popup.error = "";
             updatePopupMessages();
@@ -1076,49 +1166,53 @@ function updateSelectedCard(selector, selectedId) {
     });
 }
 
-function updateRemoteDetail() {
-    if (popup.tab !== "discover") return false;
-    const detail = popupBody?.querySelector(".cmgr-lora-detail");
-    if (!detail) return false;
-    const modelId = String(popup.selectedRemote?.id || "");
-    const previousPreview = modelId && detail.dataset.remoteModelId === modelId
-        ? detail.querySelector(".cmgr-lora-detail-preview")
-        : null;
-    previousPreview?.remove();
-    updateSelectedCard("[data-remote-id]", popup.selectedRemote?.id);
-    detail.innerHTML = renderRemoteDetail();
-    const nextPreview = detail.querySelector(".cmgr-lora-detail-preview");
-    if (previousPreview && nextPreview && previousPreview.dataset.previewKey === nextPreview.dataset.previewKey) {
-        nextPreview.replaceWith(previousPreview);
-    }
-    if (modelId) detail.dataset.remoteModelId = modelId;
-    else delete detail.dataset.remoteModelId;
+function loraDetailAside(subject, html, className = "") {
+    return `<aside class="cmgr-detail cmgr-lora-detail ${className}" data-detail-subject="${escapeAttr(subject)}">${renderDetailDismiss()}${html}</aside>`;
+}
+
+function remoteDetailAside() {
+    return loraDetailAside(popup.selectedRemote ? `remote:${popup.selectedRemote.id}` : "", renderRemoteDetail());
+}
+
+function localDetailAside() {
+    const asset = popup.libraryItems.find((item) => String(item.id) === String(popup.selectedAssetId)) || null;
+    return loraDetailAside(asset ? `local:${asset.id}` : "", asset
+        ? renderLocalDetail(asset)
+        : renderEmptyDetail(t("Select a local LoRA"), t("Apply it to this node or manage its local file and Civitai metadata."), "library"));
+}
+
+function favoriteDetailAside() {
+    const item = selectedFavorite();
+    return loraDetailAside(item ? `favorite:${item.key}` : "", item
+        ? renderFavoriteDetail(item)
+        : renderEmptyDetail(t("Select a favorite"), t("Favorite details and available actions will stay here."), "favorites"));
+}
+
+function replaceLoraDetail(asideHtml) {
+    const existing = popupBody?.querySelector(".cmgr-split.has-detail > .cmgr-lora-detail");
+    if (!existing) return false;
+    const template = document.createElement("template");
+    template.innerHTML = asideHtml.trim();
+    swapDetail(existing, template.content.firstElementChild);
     bindPopupEvents();
     return true;
 }
 
+function updateRemoteDetail() {
+    if (popup.tab !== "discover") return false;
+    updateSelectedCard("[data-remote-id]", popup.selectedRemote?.id);
+    return replaceLoraDetail(remoteDetailAside());
+}
+
 function updateLocalDetail() {
     if (popup.tab !== "local") return false;
-    const detail = popupBody?.querySelector(".cmgr-lora-detail");
-    if (!detail) return false;
-    const asset = popup.libraryItems.find((item) => String(item.id) === String(popup.selectedAssetId)) || null;
-    const assetId = String(asset?.id || "");
-    const previousPreview = assetId && detail.dataset.localAssetId === assetId
-        ? detail.querySelector(".cmgr-lora-detail-preview")
-        : null;
-    previousPreview?.remove();
     updateSelectedCard("[data-local-id]", popup.selectedAssetId);
-    detail.innerHTML = asset
-        ? renderLocalDetail(asset)
-        : renderEmptyDetail(t("Select a local LoRA"), t("Apply it to this node or manage its local file and Civitai metadata."), "library");
-    const nextPreview = detail.querySelector(".cmgr-lora-detail-preview");
-    if (previousPreview && nextPreview && previousPreview.dataset.previewKey === nextPreview.dataset.previewKey) {
-        nextPreview.replaceWith(previousPreview);
-    }
-    if (assetId) detail.dataset.localAssetId = assetId;
-    else delete detail.dataset.localAssetId;
-    bindPopupEvents();
-    return true;
+    return replaceLoraDetail(localDetailAside());
+}
+
+function openDetailDrawer() {
+    popup.detailOpen = true;
+    setDetailDrawer(popupBody, true);
 }
 
 function updateSelectedLocalCard() {
@@ -1142,7 +1236,7 @@ function updateSelectedLocalCard() {
     }
     card.replaceWith(replacement);
     bindPopupEvents();
-    schedulePopupLazyPreviews();
+    observeCardMedia(popupBody);
     return true;
 }
 
@@ -1151,7 +1245,7 @@ function setRemoteLoadingMore(visible) {
     const results = popupBody?.querySelector(".cmgr-lora-results");
     if (!results) return false;
     results.querySelectorAll(".cmgr-load-more-skeleton").forEach((item) => item.remove());
-    if (visible) results.insertAdjacentHTML("beforeend", renderLoadingMoreSkeletons());
+    if (visible) results.insertAdjacentHTML("beforeend", renderLoadingMoreSkeletons(loadMoreSkeletonCount(results)));
     return true;
 }
 
@@ -1162,40 +1256,68 @@ function appendRemoteItems(items, startIndex) {
     results.querySelectorAll(".cmgr-load-more-skeleton").forEach((item) => item.remove());
     if (items.length) {
         results.insertAdjacentHTML("beforeend", items.map((model, index) => renderRemoteCard(model, startIndex + index)).join(""));
+        animateCardsIn([...results.querySelectorAll(":scope > .cmgr-card[data-remote-id]")].slice(startIndex));
         bindPopupEvents();
-        schedulePopupLazyPreviews();
+        observeCardMedia(popupBody);
     }
     maybeAutoLoadMoreLoras(results);
     return true;
 }
 
+function renderLoraActiveFilterBar() {
+    const chips = [];
+    if (popup.selectedBaseModel) {
+        chips.push({
+            key: "base_model",
+            label: t("Base Model"),
+            value: popup.selectedBaseModel,
+            clearAction: "clear-lora-filter-base",
+        });
+    }
+    if (popup.tab === "discover" && popup.selectedCategory) {
+        const categoryItem = CIVITAI_CATEGORY_FILTERS.find((item) => item.value === popup.selectedCategory);
+        chips.push({
+            key: "category",
+            label: t("Category"),
+            value: t(categoryItem?.label || popup.selectedCategory),
+            clearAction: "clear-lora-filter-category",
+        });
+    }
+    if (popup.tab === "discover" && popup.selectedTag) {
+        chips.push({
+            key: "tag",
+            label: t("Search Tags"),
+            value: popup.selectedTag,
+            clearAction: "clear-lora-filter-tag",
+        });
+    }
+    return renderActiveFilterChips(chips, "reset-lora-filters");
+}
+
 function renderDiscover() {
-    const toolbar = renderSearchToolbar({
+    const toolbar = renderSelectorToolbar({
         title: t("Discover LoRAs"),
-        subtitle: "Civitai",
-        className: "cmgr-lora-toolbar",
-        searchHtml: renderToolbarSearchField({
+        searchHtml: renderSelectorSearch({
             value: popup.discoverQuery,
             inputAttrs: 'data-field="remote-query"',
-            className: "cmgr-lora-search",
             placeholder: t("Search Civitai LoRAs..."),
             clearAction: "clear-lora-search",
+            loading: popup.remoteLoading,
         }),
         actionsHtml: `
-            <select class="cmgr-input cmgr-lora-sort" data-field="remote-sort">
-                ${["Highest Rated", "Most Downloaded", "Newest"].map((item) => `<option value="${item}" ${popup.sort === item ? "selected" : ""}>${escapeHtml(t(item))}</option>`).join("")}
-            </select>
-            <button class="cmgr-primary cmgr-search-submit" data-action="search-loras">${escapeHtml(t(popup.remoteLoading ? "Searching..." : "Search"))}</button>
+            ${renderSelectorSort(popup.sort)}
+            <button class="cmgr-selector-button is-icon" type="button" data-action="search-loras" title="${escapeAttr(t("Refresh"))}" aria-label="${escapeAttr(t("Refresh"))}">${selectorIcon("refresh")}</button>
         `,
+        filterBarHtml: renderLoraActiveFilterBar(),
     });
     return `
         <section class="cmgr-page cmgr-lora-page">
             ${toolbar}
-            <div class="cmgr-split has-detail cmgr-lora-split">
+            <div class="cmgr-split has-detail cmgr-lora-split ${popup.detailOpen ? "is-detail-open" : ""}">
                 <div class="cmgr-results cmgr-lora-results">
                     ${renderRemoteResults()}
                 </div>
-                <aside class="cmgr-detail cmgr-lora-detail">${renderRemoteDetail()}</aside>
+                ${remoteDetailAside()}
             </div>
         </section>
     `;
@@ -1212,11 +1334,11 @@ function renderRemoteResults() {
     });
     return `
         ${popup.remoteItems.map((model, index) => renderRemoteCard(model, index)).join("")}
-        ${popup.remoteLoading && !popup.remoteResetting ? renderLoadingMoreSkeletons() : ""}
+        ${popup.remoteLoading && !popup.remoteResetting ? renderLoadingMoreSkeletons(loadMoreSkeletonCount(popupBody?.querySelector(".cmgr-lora-results"))) : ""}
     `;
 }
 
-function renderSkeletons(count = 10) {
+function renderSkeletons(count = 30) {
     return Array.from({ length: count }, () => `
         <article class="cmgr-card cmgr-lora-card cmgr-skeleton-card">
             <div class="cmgr-skeleton-media"></div>
@@ -1225,7 +1347,7 @@ function renderSkeletons(count = 10) {
     `).join("");
 }
 
-function renderLoadingMoreSkeletons(count = 4) {
+function renderLoadingMoreSkeletons(count) {
     return Array.from({ length: count }, (_, index) => `
         <article
             class="cmgr-card cmgr-lora-card cmgr-skeleton-card cmgr-load-more-skeleton"
@@ -1250,6 +1372,11 @@ function filesFor(version) {
     return Array.isArray(version?.files) ? version.files : [];
 }
 
+function primaryFileName(version) {
+    const files = filesFor(version);
+    return String((files.find((item) => item.primary) || files[0])?.name || "");
+}
+
 function selectedFile() {
     const files = filesFor(selectedVersion());
     return files.find((item) => String(item.name || item.id) === String(popup.selectedFileName))
@@ -1272,59 +1399,8 @@ function remotePreviewMedia(model, version = versionsFor(model)[0], width = 450)
     return { url: "", type: "image", emptyText: t(messageKey) };
 }
 
-function renderPreview(media, label, rawUrl = "", options = {}) {
-    const descriptor = typeof media === "string" ? { url: media, type: "image" } : media || {};
-    if (!descriptor.url) return renderUnavailablePreview(descriptor.emptyText);
-    const content = descriptor.type === "video"
-        ? renderRemoteVideo(descriptor, label, options)
-        : renderRemoteImage(descriptor, label, options);
-    return rawUrl
-        ? `<a href="${escapeAttr(rawUrl)}" target="_blank" rel="noopener noreferrer" title="${escapeAttr(t("Open original image"))}">${content}</a>`
-        : content;
-}
-
-function renderRemoteImage(media, label, options = {}) {
-    const defer = options.defer === true;
-    const src = defer ? TRANSPARENT_PIXEL : media.url;
-    const lazyAttrs = defer ? `data-cmgr-lora-src="${escapeAttr(media.url)}" data-cmgr-loaded="0"` : "";
-    const priority = options.priority || "auto";
-    const stateClass = defer ? "is-pending" : options.instant ? "is-loaded" : "is-loading";
-    return `<img class="cmgr-preview-img ${options.className || ""} ${stateClass}" src="${escapeAttr(src)}" ${lazyAttrs} ${previewFallbackAttr(media.fallbackUrls || [])} alt="${escapeAttr(label || "LoRA")}" loading="${defer ? "lazy" : "eager"}" fetchpriority="${priority}" decoding="async" onload="if(!this.dataset.cmgrLoraSrc||this.dataset.cmgrLoaded==='1'){this.classList.remove('is-pending','is-loading');this.classList.add('is-loaded')}" onerror="let q=[];try{q=JSON.parse(this.dataset.fallbackSrcs||'[]')}catch(_){};const next=q.shift();this.dataset.fallbackSrcs=JSON.stringify(q);if(next){this.src=next;}else{this.replaceWith(Object.assign(document.createElement('div'),{className:'cmgr-no-preview',textContent:'No Preview'}))}" />`;
-}
-
-function renderRemoteVideo(media, label, options = {}) {
-    const poster = media.posterUrl
-        ? renderRemoteImage({ url: media.posterUrl, fallbackUrls: media.posterFallbackUrls || [] }, "", { ...options, className: "cmgr-video-poster" })
-        : "";
-    const defer = options.defer === true;
-    const src = defer ? "" : media.url;
-    const lazyAttrs = defer ? `data-cmgr-lora-src="${escapeAttr(media.url)}" data-cmgr-loaded="0"` : "";
-    const stateClass = defer ? "is-pending" : "is-loading";
-    const hasPoster = media.posterUrl ? 'data-has-poster="1"' : "";
-    return `${poster}<video class="cmgr-preview-img cmgr-preview-video ${stateClass}" src="${escapeAttr(src)}" ${lazyAttrs} ${previewFallbackAttr(media.fallbackUrls || [])} ${hasPoster} muted loop playsinline autoplay preload="${defer ? "none" : "metadata"}" aria-label="${escapeAttr(label || "LoRA preview video")}" onloadeddata="this.classList.remove('is-pending','is-loading');this.classList.add('is-loaded')" onerror="let q=[];try{q=JSON.parse(this.dataset.fallbackSrcs||'[]')}catch(_){};const next=q.shift();this.dataset.fallbackSrcs=JSON.stringify(q);if(next){this.src=next;this.load();this.play?.().catch(()=>{});}else if(this.dataset.hasPoster==='1'){this.remove();}else{this.replaceWith(Object.assign(document.createElement('div'),{className:'cmgr-no-preview',textContent:'No Preview'}))}"></video>`;
-}
-
-function previewFallbackAttr(urls) {
-    const unique = [...new Set((Array.isArray(urls) ? urls : []).map((url) => String(url || "").trim()).filter(Boolean))];
-    return unique.length ? `data-fallback-srcs="${escapeAttr(JSON.stringify(unique))}"` : "";
-}
-
-function renderDetailPreviewMedia(media, label, rawUrl = "") {
-    const descriptor = typeof media === "string" ? { url: media, type: "image" } : media || {};
-    if (!descriptor.url) return renderUnavailablePreview(descriptor.emptyText);
-    const backgroundUrl = descriptor.type === "video" && descriptor.posterUrl ? descriptor.posterUrl : descriptor.url;
-    return `
-        <img class="cmgr-detail-preview-bg" src="${escapeAttr(backgroundUrl)}" alt="" aria-hidden="true" decoding="async" />
-        <div class="cmgr-detail-preview-overlay" aria-hidden="true"></div>
-        ${renderPreview(descriptor, label, "", { instant: true, priority: "high" })}
-        ${rawUrl ? `<a class="cmgr-detail-preview-open-original" href="${escapeAttr(rawUrl)}" target="_blank" rel="noopener noreferrer" title="${escapeAttr(t("Open original image"))}" aria-label="${escapeAttr(t("Open original image"))}"></a>` : ""}
-    `;
-}
-
-function renderUnavailablePreview(text) {
-    const label = String(text || t("No Preview"));
-    const filteredClass = label === t("Preview hidden by content settings") ? " cmgr-filtered-preview" : "";
-    return `<div class="cmgr-no-preview${filteredClass}">${escapeHtml(label)}</div>`;
+function cardMediaOptions(index) {
+    return { eager: index < INITIAL_PREVIEW_LOADS, priority: index < HIGH_PRIORITY_PREVIEW_LOADS ? "high" : "auto" };
 }
 
 function renderRemoteCard(model, index = 0) {
@@ -1333,20 +1409,23 @@ function renderRemoteCard(model, index = 0) {
     const selected = String(popup.selectedRemote?.id || "") === String(model.id || "");
     const installed = findLocalForRemote(model, version);
     const favorite = remoteFavorite(model);
-    const preview = media.url
-        ? `<span class="cmgr-media-skeleton" aria-hidden="true"></span>${renderPreview(media, model.name, "", {
-            defer: true,
-            priority: index < HIGH_PRIORITY_PREVIEW_LOADS ? "high" : "auto",
-        })}`
-        : renderUnavailablePreview(media.emptyText);
+    const creator = model.creator?.username ? `@${model.creator.username}` : "";
+    const stats = modelStats(model, version);
+    const firstFile = filesFor(version).find((item) => item.primary) || filesFor(version)[0] || {};
+    const sizeText = firstFile.sizeKB ? formatBytes(firstFile.sizeKB * 1024) : "";
+    const preview = renderCardMedia(media, cardMediaOptions(index));
     return `
-        <article class="cmgr-card cmgr-lora-card ${selected ? "selected" : ""}" data-remote-id="${escapeAttr(model.id)}">
+        <article class="cmgr-card cmgr-lora-card ${selected ? "selected" : ""}" data-remote-id="${escapeAttr(model.id)}" tabindex="0">
             ${renderFavoriteCardMark(Boolean(favorite))}
+            <div class="cmgr-card-top-badges">
+                ${version.baseModel ? `<div class="cmgr-card-badge">${escapeHtml(version.baseModel)}</div>` : ""}
+                <div class="cmgr-card-status-slot">${installed ? `<span class="cmgr-card-status is-installed">✓ ${escapeHtml(t("Installed"))}</span>` : ""}</div>
+            </div>
             <div class="cmgr-thumb">${preview}</div>
-            ${version.baseModel ? `<div class="cmgr-card-badge">${escapeHtml(version.baseModel)}</div>` : ""}
             <div class="cmgr-card-body">
+                ${creator ? `<div class="cmgr-card-creator">${escapeHtml(creator)}</div>` : ""}
                 <div class="cmgr-card-title">${escapeHtml(model.name || "Untitled")}</div>
-                <div class="cmgr-card-tags">${installed ? `<span class="installed">${escapeHtml(t("Installed"))}</span>` : ""}</div>
+                ${renderSelectorStats(formatStatCount(stats.downloadCount), formatStatCount(stats.likeCount), sizeText)}
             </div>
         </article>
     `;
@@ -1354,56 +1433,78 @@ function renderRemoteCard(model, index = 0) {
 
 function renderRemoteDetail() {
     const model = popup.selectedRemote;
-    if (!model) return renderEmptyDetail(t("Select a LoRA"), t("Choose a LoRA to view versions, trigger words, and apply it to this node."), "discover");
+    if (!model) {
+        return popup.remoteLoading
+            ? renderDetailSkeleton()
+            : renderEmptyDetail(t("Select a LoRA"), t("Choose a LoRA to view versions, trigger words, and apply it to this node."), "discover");
+    }
+    const versions = versionsFor(model);
     const version = selectedVersion() || {};
     const files = filesFor(version);
     const file = selectedFile();
-    const media = remotePreviewMedia(model, version);
-    const raw = media.rawUrl || rawPreview(model, version);
     const favorite = remoteFavorite(model);
-    const words = Array.isArray(version.trainedWords) ? version.trainedWords : [];
+    const pending = pendingForRemote(model, version);
+    const words = (Array.isArray(version.trainedWords) ? version.trainedWords : [])
+        .map((word) => String(word || "").trim())
+        .filter(Boolean);
     const stats = modelStats(model, version);
     const modelUrl = `https://civitai.red/models/${encodeURIComponent(model.id || "")}${version.id ? `?modelVersionId=${encodeURIComponent(version.id)}` : ""}`;
     return `
         <div class="cmgr-detail-scroll">
-            <div class="cmgr-detail-preview cmgr-lora-detail-preview" data-preview-key="${escapeAttr(`${media.type || "image"}:${media.url || ""}`)}">${renderDetailPreviewMedia(media, model.name, raw)}</div>
+            ${renderDetailGallery(galleryItemsForModel(model, version), model.name || "", remotePreviewMedia(model, version).emptyText)}
             <div class="cmgr-detail-head">
                 <div>
-                    <a class="cmgr-detail-title-link" href="${escapeAttr(modelUrl)}" target="_blank" rel="noopener noreferrer"><h2>${escapeHtml(model.name || "Untitled")}</h2><span class="cmgr-external-icon" aria-hidden="true">↗</span></a>
-                    <p>${escapeHtml(model.creator?.username || t("Unknown creator"))} · LoRA · ${escapeHtml(version.baseModel || "Other")}</p>
+                    <a class="cmgr-detail-title-link" href="${escapeAttr(modelUrl)}" target="_blank" rel="noopener noreferrer" title="${escapeAttr(t("Open model page"))}"><h2>${escapeHtml(model.name || "Untitled")}</h2><span class="cmgr-external-icon" aria-hidden="true">↗</span></a>
+                    <p>${escapeHtml(model.creator?.username || t("Unknown creator"))}</p>
+                    <div class="cmgr-detail-meta">
+                        ${renderDetailFacts(modelFacts(model, version, file || {}))}
+                        ${renderSelectorStats(formatStatCount(stats.downloadCount), formatStatCount(stats.likeCount))}
+                    </div>
                 </div>
             </div>
-            <div class="cmgr-detail-stat-row">
-                <span><b>↓ ${escapeHtml(formatStatCount(stats.downloadCount))}</b><small>${escapeHtml(t("Downloads"))}</small></span>
-                <span><b>♥ ${escapeHtml(formatStatCount(stats.likeCount))}</b><small>${escapeHtml(t("Likes"))}</small></span>
-                <span><b>${escapeHtml(version.baseModel || "Other")}</b><small>${escapeHtml(t("Base Model"))}</small></span>
-            </div>
-            ${renderFavoriteControls({
-                favorite: Boolean(favorite),
-                folders: popup.favoriteFolders,
-                folderId: favorite?.folder_id || "",
-                toggleAction: "favorite-remote-lora",
-                folderAction: "assign-remote-favorite-folder",
-            })}
-            <label class="cmgr-label">${escapeHtml(t("Version"))}</label>
-            <select class="cmgr-input cmgr-full" data-field="remote-version">
-                ${versionsFor(model).map((item) => `<option value="${escapeAttr(item.id)}" ${String(item.id) === String(version.id) ? "selected" : ""}>${escapeHtml(`${item.name || item.id} · ${item.baseModel || "Other"}`)}</option>`).join("")}
-            </select>
-            <label class="cmgr-label">${escapeHtml(t("File"))}</label>
-            <select class="cmgr-input cmgr-full" data-field="remote-file">
-                ${files.map((item) => `<option value="${escapeAttr(item.name || item.id)}" ${String(item.name || item.id) === String(file?.name || file?.id || "") ? "selected" : ""}>${escapeHtml(`${item.name || String(item.id)}${item.sizeKB ? ` · ${formatBytes(item.sizeKB * 1024)}` : ""}`)}</option>`).join("")}
-            </select>
-            <div class="cmgr-info-list cmgr-lora-file-info">
-                <div><span>${escapeHtml(t("Type"))}</span><b>LoRA</b></div>
-                <div><span>${escapeHtml(t("Version"))}</span><b>${escapeHtml(version.name || version.id || "—")}</b></div>
-                <div><span>${escapeHtml(t("File"))}</span><b>${escapeHtml(file?.name || "—")}</b></div>
-                <div><span>${escapeHtml(t("Size"))}</span><b>${escapeHtml(file?.sizeKB ? formatBytes(file.sizeKB * 1024) : "—")}</b></div>
-            </div>
-            <div class="cmgr-section-title">${escapeHtml(t("Trigger Words"))}</div>
-            <div class="cmgr-trained">${words.length ? words.slice(0, 16).map((word) => `<button data-copy="${escapeAttr(word)}">${escapeHtml(word)}</button>`).join("") : `<span>${escapeHtml(t("No trained words listed."))}</span>`}</div>
-            <div data-remote-download-state>${renderRemoteDownloadState(model, version, file)}</div>
-            <div class="cmgr-section-title">${escapeHtml(t("Description"))}</div>
-            <div class="cmgr-description">${sanitizeDescriptionHtml(model.description || version.description || "")}</div>
+            <section class="cmgr-detail-download-card">
+                ${versions.length > 1 ? `
+                    <div class="cmgr-detail-field-block">
+                        <label class="cmgr-label">${selectorIcon("layers")}${escapeHtml(t("Version"))}</label>
+                        <select class="cmgr-input cmgr-full" data-field="remote-version">
+                            ${versions.map((item) => `<option value="${escapeAttr(item.id)}" ${String(item.id) === String(version.id) ? "selected" : ""}>${escapeHtml(`${item.name || item.id} · ${item.baseModel || "Other"}`)}</option>`).join("")}
+                        </select>
+                    </div>
+                ` : `<input type="hidden" data-field="remote-version" value="${escapeAttr(version.id || "")}" />`}
+                ${files.length > 1 ? `
+                    <div class="cmgr-detail-field-block">
+                        <label class="cmgr-label">${selectorIcon("file")}${escapeHtml(t("File"))}</label>
+                        <select class="cmgr-input cmgr-full" data-field="remote-file">
+                            ${files.map((item) => `<option value="${escapeAttr(item.name || item.id)}" ${String(item.name || item.id) === String(file?.name || file?.id || "") ? "selected" : ""}>${escapeHtml(`${item.name || String(item.id)}${item.sizeKB ? ` · ${formatBytes(item.sizeKB * 1024)}` : ""}`)}</option>`).join("")}
+                        </select>
+                    </div>
+                ` : ""}
+                <div class="cmgr-detail-action-hub ${pending ? "" : "is-inline-cta"}">
+                    <div data-remote-download-state>${renderRemoteDownloadState(model, version, file)}</div>
+                    ${renderFavoriteControls({
+                        favorite: Boolean(favorite),
+                        folders: popup.favoriteFolders,
+                        folderId: favorite?.folder_id || "",
+                        toggleAction: "favorite-remote-lora",
+                        folderAction: "assign-remote-favorite-folder",
+                        compact: true,
+                    })}
+                </div>
+            </section>
+            ${words.length ? `
+                <section class="cmgr-selector-triggers" aria-label="${escapeAttr(t("Trigger Words"))}">
+                <div class="cmgr-section-head">
+                    <div class="cmgr-section-title">${selectorIcon("tag")}${escapeHtml(t("Trigger Words"))}</div>
+                    ${words.length > 1 ? `<button class="cmgr-copy-all-btn" type="button" data-copy="${escapeAttr(words.join(", "))}">${escapeHtml(t("Copy All ({count})", { count: words.length }))}</button>` : ""}
+                </div>
+                <div class="cmgr-trained">${words.slice(0, 16).map((word) => `<button type="button" data-copy="${escapeAttr(word)}">${escapeHtml(word)}</button>`).join("")}</div>
+                </section>
+            ` : ""}
+            ${renderDetailTags(model.tags, popup.tab === "discover")}
+            <details class="cmgr-selector-section" data-section="description" open>
+                <summary>${selectorIcon("file")}<span>${escapeHtml(t("Description"))}</span></summary>
+                <div class="cmgr-selector-section-body"><div class="cmgr-description">${"description" in model ? sanitizeDescriptionHtml(model.description || version.description || "") : renderDescriptionSkeleton()}</div></div>
+            </details>
         </div>
     `;
 }
@@ -1411,12 +1512,20 @@ function renderRemoteDetail() {
 function renderRemoteDownloadState(model = popup.selectedRemote, version = selectedVersion(), file = selectedFile()) {
     const local = findLocalForRemote(model, version);
     const pending = pendingForRemote(model, version);
+    const sizeText = file?.sizeKB ? formatBytes(file.sizeKB * 1024) : "";
+    const downloadLabel = pending
+        ? t("Downloading...")
+        : !file
+            ? t("No downloadable file")
+            : sizeText
+                ? t("Download & Apply ({size})", { size: sizeText })
+                : t("Download and Apply");
     return `
-        ${pending ? renderPendingDownload(pending.job) : ""}
+        ${pending ? renderDownloadProgress(pending.job) : ""}
         <div class="cmgr-lora-detail-actions">
             ${local
-                ? `<button class="cmgr-primary cmgr-full" data-action="apply-installed">${escapeHtml(t(isAppliedAsset(local) ? "Applied" : "Apply to Node"))}</button>`
-                : `<button class="cmgr-primary cmgr-full" data-action="download-apply" ${pending || !file ? "disabled" : ""}>${escapeHtml(t(pending ? "Downloading..." : file ? "Download and Apply" : "No downloadable file"))}</button>`}
+                ? `<button class="cmgr-primary cmgr-download-cta cmgr-full" type="button" data-action="apply-installed">${escapeHtml(t(isAppliedAsset(local) ? "Applied" : "Apply to Node"))}</button>`
+                : `<button class="cmgr-primary cmgr-download-cta cmgr-full" type="button" data-action="download-apply" title="${escapeAttr(downloadLabel)}" ${pending || !file ? "disabled" : ""}><span class="cmgr-download-cta-copy"><span>${escapeHtml(pending ? t("Downloading...") : !file ? t("No downloadable file") : t("Download and Apply"))}</span>${!pending && file && sizeText ? `<small>${escapeHtml(sizeText)}</small>` : ""}</span></button>`}
         </div>
     `;
 }
@@ -1425,7 +1534,9 @@ function updateRemoteDownloadState() {
     if (popup.tab !== "discover" || !popup.selectedRemote) return false;
     const host = popupBody?.querySelector("[data-remote-download-state]");
     if (!host) return false;
+    if (patchDownloadProgress(host, pendingForRemote(popup.selectedRemote, selectedVersion())?.job)) return true;
     host.innerHTML = renderRemoteDownloadState();
+    host.parentElement.classList.toggle("is-inline-cta", !pendingForRemote(popup.selectedRemote, selectedVersion()));
     bindRemoteDownloadEvents(host);
     return true;
 }
@@ -1439,26 +1550,23 @@ function filteredLoraFavorites() {
 }
 
 function renderFavorites() {
-    const item = selectedFavorite();
-    const toolbar = renderSearchToolbar({
+    const toolbar = renderSelectorToolbar({
         title: t("Favorites"),
-        subtitle: "LoRA",
-        className: "cmgr-lora-toolbar cmgr-favorites-toolbar",
-        searchHtml: renderToolbarSearchField({
+        className: "cmgr-lora-favorites-toolbar",
+        searchHtml: renderSelectorSearch({
             value: popup.favoriteQuery,
             inputAttrs: 'data-field="favorite-query"',
-            className: "cmgr-lora-search",
             placeholder: t("Search favorites..."),
             clearAction: "clear-lora-favorite-search",
         }),
-        actionsHtml: `<span class="cmgr-favorite-total">${filteredLoraFavorites().length}</span>`,
+        actionsHtml: `<span class="cmgr-selector-total">${filteredLoraFavorites().length}</span>`,
     });
     return `
         <section class="cmgr-page cmgr-lora-page cmgr-lora-favorites-page">
             ${toolbar}
-            <div class="cmgr-split has-detail cmgr-lora-split">
+            <div class="cmgr-split has-detail cmgr-lora-split ${popup.detailOpen ? "is-detail-open" : ""}">
                 <div class="cmgr-results cmgr-lora-results">${renderFavoriteResults()}</div>
-                <aside class="cmgr-detail cmgr-lora-detail">${item ? renderFavoriteDetail(item) : renderEmptyDetail(t("Select a favorite"), t("Favorite details and available actions will stay here."), "favorites")}</aside>
+                ${favoriteDetailAside()}
             </div>
         </section>
     `;
@@ -1485,15 +1593,10 @@ function renderFavoriteResults() {
 function renderFavoriteCard(item, index = 0) {
     const model = favoriteModel(item);
     const local = localAssetForFavorite(item, popup.libraryItems);
-    const media = model ? remotePreviewMedia(model, versionsFor(model)[0]) : createPreviewMedia(item.preview_url || local?.thumb_url || "", 450);
-    const preview = media.url
-        ? `<span class="cmgr-media-skeleton" aria-hidden="true"></span>${renderPreview(media, item.name, "", {
-            defer: true,
-            priority: index < HIGH_PRIORITY_PREVIEW_LOADS ? "high" : "auto",
-        })}`
-        : renderUnavailablePreview(media.emptyText);
+    const media = model ? remotePreviewMedia(model, versionsFor(model)[0]) : createPreviewMedia(item.preview_url || (local?.has_preview ? local.thumb_url : ""), 450);
+    const preview = renderCardMedia(media, cardMediaOptions(index));
     return `
-        <article class="cmgr-card cmgr-lora-card cmgr-favorite-card ${popup.selectedFavoriteKey === item.key ? "selected" : ""}" data-favorite-key="${escapeAttr(item.key)}">
+        <article class="cmgr-card cmgr-lora-card cmgr-favorite-card ${popup.selectedFavoriteKey === item.key ? "selected" : ""}" data-favorite-key="${escapeAttr(item.key)}" tabindex="0">
             <div class="cmgr-thumb">${preview}</div>
             <div class="cmgr-card-badge">${escapeHtml(item.base_model || "LoRA")}</div>
             <div class="cmgr-card-body">
@@ -1511,7 +1614,7 @@ function renderFavoriteDetail(item) {
     if (local) return renderLocalDetail(local);
     return `
         <div class="cmgr-detail-scroll">
-            <div class="cmgr-detail-preview cmgr-lora-detail-preview" data-preview-key="${escapeAttr(`image:${item.preview_url || ""}`)}">${renderDetailPreviewMedia(item.preview_url || "", item.name)}</div>
+            ${renderDetailGallery(galleryItemsForUrl(item.preview_url || ""), item.name || "")}
             <div class="cmgr-detail-head"><div><h2>${escapeHtml(item.name || "Untitled")}</h2><p>LoRA · ${escapeHtml(item.creator || t("Unknown creator"))}</p></div></div>
             ${renderFavoriteControls({
                 favorite: true,
@@ -1526,44 +1629,39 @@ function renderFavoriteDetail(item) {
 
 function updateFavoriteDetail() {
     if (popup.tab !== "favorites") return false;
-    const detail = popupBody?.querySelector(".cmgr-lora-detail");
-    if (!detail) return false;
-    popupBody.querySelectorAll("[data-favorite-key]").forEach((card) => {
+    popupBody?.querySelectorAll("[data-favorite-key]").forEach((card) => {
         card.classList.toggle("selected", card.dataset.favoriteKey === popup.selectedFavoriteKey);
     });
-    const item = selectedFavorite();
-    const previousPreview = item && detail.dataset.favoriteKey === item.key
-        ? detail.querySelector(".cmgr-lora-detail-preview")
-        : null;
-    previousPreview?.remove();
-    detail.innerHTML = item
-        ? renderFavoriteDetail(item)
-        : renderEmptyDetail(t("Select a favorite"), t("Favorite details and available actions will stay here."), "favorites");
-    const nextPreview = detail.querySelector(".cmgr-lora-detail-preview");
-    if (previousPreview && nextPreview && previousPreview.dataset.previewKey === nextPreview.dataset.previewKey) {
-        nextPreview.replaceWith(previousPreview);
-    }
-    if (item) detail.dataset.favoriteKey = item.key;
-    else delete detail.dataset.favoriteKey;
-    bindPopupEvents();
-    return true;
+    return replaceLoraDetail(favoriteDetailAside());
 }
 
-function selectFavoriteItem(item) {
+async function selectFavoriteItem(item) {
     popup.selectedFavoriteKey = item.key;
     const model = favoriteModel(item);
-    if (model) {
-        popup.selectedRemote = model;
-        const version = versionsFor(model)[0] || {};
+    const showRemote = (remote) => {
+        const version = versionsFor(remote)[0] || {};
+        popup.selectedRemote = remote;
         popup.selectedVersionId = String(version.id || "");
-        popup.selectedFileName = String(filesFor(version).find((file) => file.primary)?.name || filesFor(version)[0]?.name || "");
+        popup.selectedFileName = primaryFileName(version);
         popup.selectedAssetId = "";
-    } else {
+        if (!updateFavoriteDetail()) renderPopup();
+    };
+    if (!model) {
         const local = localAssetForFavorite(item, popup.libraryItems);
         popup.selectedRemote = null;
         popup.selectedAssetId = local?.id || "";
+        if (!updateFavoriteDetail()) renderPopup();
+        return;
     }
-    if (!updateFavoriteDetail()) renderPopup();
+    const prefetched = peekModelDetail(model.id);
+    showRemote(prefetched || model);
+    if (prefetched) return;
+    // The saved snapshot can be a trimmed search card; show the live record.
+    setDetailLoading(popupBody, true);
+    const full = await fetchModelDetail(model.id).catch(() => null);
+    if (popup.tab !== "favorites" || popup.selectedFavoriteKey !== item.key) return;
+    setDetailLoading(popupBody, false);
+    if (full) showRemote(full);
 }
 
 function renderEmptyDetail(title, description, kind = "model") {
@@ -1596,7 +1694,7 @@ async function searchRemote(reset = true) {
         searchSequence += 1;
         if (!popup.remoteItems.length) {
             popup.nextCursor = "";
-            popup.selectedRemote = null;
+            setDiscoverSelection(null);
         }
     }
     const params = new URLSearchParams({
@@ -1616,14 +1714,14 @@ async function searchRemote(reset = true) {
         popup.remoteResetting = false;
         const applied = applyRemoteSearch(cached, reset);
         if (!reset && appendRemoteItems(applied.items, applied.startIndex)) return;
-        renderPopup({ preserveScroll: !reset });
+        showRemoteResults(reset);
         return;
     }
 
     if (reset) {
         popup.remoteItems = [];
         popup.nextCursor = "";
-        popup.selectedRemote = null;
+        setDiscoverSelection(null);
         popup.scroll.discover = 0;
     }
     const controller = new AbortController();
@@ -1632,7 +1730,7 @@ async function searchRemote(reset = true) {
     popup.remoteLoading = true;
     popup.remoteResetting = reset;
     popup.error = "";
-    if (reset || !setRemoteLoadingMore(true)) renderPopup({ preserveScroll: !reset });
+    if (popup.tab === "discover" && (reset || !setRemoteLoadingMore(true))) renderPopup({ preserveScroll: !reset });
     let applied = null;
     try {
         const data = await apiGet(path, { signal: controller.signal });
@@ -1655,7 +1753,25 @@ async function searchRemote(reset = true) {
         updatePopupMessages();
         return;
     }
-    renderPopup({ preserveScroll: false });
+    showRemoteResults(true);
+}
+
+// A search can finish after the user moved to another tab; only Discover is redrawn.
+function showRemoteResults(reset) {
+    if (popup.tab !== "discover") {
+        rerenderNavPreservingScroll();
+        return;
+    }
+    renderPopup({ preserveScroll: !reset });
+    if (reset) animateCardsIn(popupBody.querySelectorAll(".cmgr-lora-results > .cmgr-card[data-remote-id]"));
+    if (reset && popup.selectedRemote) void selectRemote(popup.selectedRemote);
+}
+
+function setDiscoverSelection(model) {
+    const version = versionsFor(model)[0] || {};
+    const selection = { selectedRemote: model, selectedVersionId: String(version.id || ""), selectedFileName: primaryFileName(version) };
+    if (popup.tab === "discover") Object.assign(popup, selection);
+    else tabSelections.discover = { ...EMPTY_SELECTION, ...tabSelections.discover, ...selection };
 }
 
 function applyRemoteSearch(data, reset) {
@@ -1663,28 +1779,32 @@ function applyRemoteSearch(data, reset) {
     const startIndex = reset ? 0 : popup.remoteItems.length;
     popup.remoteItems = reset ? items : [...popup.remoteItems, ...items];
     popup.contentFilterActive = data?.content_filter_active === true;
-    if (reset) popup.selectedRemote = null;
+    if (reset) setDiscoverSelection(items[0] || null);
     popup.nextCursor = data?.metadata?.nextCursor || "";
     return { items, startIndex };
 }
 
 async function selectRemote(model) {
-    popup.selectedRemote = model;
-    const version = versionsFor(model)[0] || {};
-    popup.selectedVersionId = String(version.id || "");
-    popup.selectedFileName = String(filesFor(version).find((item) => item.primary)?.name || filesFor(version)[0]?.name || "");
+    const isCurrent = () => popup.tab === "discover" && String(popup.selectedRemote?.id || "") === String(model.id || "");
+    const prefetched = peekModelDetail(model.id);
+    setDiscoverSelection(prefetched || model);
     if (!updateRemoteDetail()) renderPopup();
-    try {
-        const data = await apiGet(`/model-detail?id=${encodeURIComponent(model.id)}`);
-        if (String(popup.selectedRemote?.id || "") !== String(model.id || "") || !data?.model) return;
-        popup.selectedRemote = data.model;
-        const detailVersion = versionsFor(data.model).find((item) => String(item.id) === popup.selectedVersionId) || versionsFor(data.model)[0] || {};
-        popup.selectedVersionId = String(detailVersion.id || "");
-        popup.selectedFileName = String(filesFor(detailVersion).find((item) => item.primary)?.name || filesFor(detailVersion)[0]?.name || "");
-        if (!updateRemoteDetail()) renderPopup();
-    } catch (_) {
-        // Search data is sufficient when the detail request is unavailable.
-    }
+    // Arrow-key browsing selects in quick succession; only fetch where it settles.
+    const rapid = performance.now() - lastRemoteSelectAt < 350;
+    lastRemoteSelectAt = performance.now();
+    if (prefetched) return;
+    setDetailLoading(popupBody, true);
+    if (rapid) await new Promise((resolve) => setTimeout(resolve, 250));
+    if (!isCurrent()) return;
+    const full = await fetchModelDetail(model.id).catch(() => null);
+    if (!isCurrent()) return;
+    setDetailLoading(popupBody, false);
+    if (!full) return;
+    const detailVersion = versionsFor(full).find((item) => String(item.id) === popup.selectedVersionId) || versionsFor(full)[0] || {};
+    popup.selectedRemote = full;
+    popup.selectedVersionId = String(detailVersion.id || "");
+    popup.selectedFileName = primaryFileName(detailVersion);
+    if (!updateRemoteDetail()) renderPopup();
 }
 
 function findLocalForRemote(model, version) {
@@ -1743,39 +1863,44 @@ async function downloadAndApply() {
 }
 
 function renderLocal() {
-    const selected = popup.libraryItems.find((item) => item.id === popup.selectedAssetId) || null;
-    const toolbar = renderSearchToolbar({
+    const toolbar = renderSelectorToolbar({
         title: t("Local LoRAs"),
-        className: "cmgr-lora-toolbar cmgr-lora-local-toolbar cmgr-local-search-toolbar",
+        className: "cmgr-lora-local-toolbar",
         headingHtml: `
             <div class="cmgr-lora-local-heading">
                 <h2>${escapeHtml(t("Local LoRAs"))}</h2>
                 <div class="cmgr-lora-folder-context" data-lora-folder-context>${renderLocalFolderBreadcrumb()}</div>
             </div>
         `,
-        searchHtml: renderToolbarSearchField({
+        searchHtml: renderSelectorSearch({
             value: popup.localQuery,
             inputAttrs: 'data-field="local-query"',
-            className: "cmgr-lora-search",
             placeholder: t("Filter local LoRAs..."),
             clearAction: "clear-lora-local-search",
         }),
         actionsHtml: `
             ${localMetadataBatch.running
-                ? `<button class="cmgr-secondary" data-action="cancel-match-local-loras">${escapeHtml(t("Stop matching"))}</button>`
-                : `<button class="cmgr-secondary" data-action="match-missing-local-loras">${escapeHtml(t("Match missing Civitai info"))}</button>`}
-            <button class="cmgr-secondary cmgr-search-submit" data-action="refresh-local-loras" ${localMetadataBatch.running ? "disabled" : ""}>${escapeHtml(t(popup.libraryLoading ? "Scanning..." : "Refresh"))}</button>
+                ? `<button class="cmgr-selector-button" data-action="cancel-match-local-loras">${escapeHtml(t("Stop matching"))}</button>`
+                : ""}
+            <button class="cmgr-selector-button" type="button" data-action="refresh-local-loras" ${localMetadataBatch.running ? "disabled" : ""}>${selectorIcon("refresh")}<span>${escapeHtml(t(popup.libraryLoading ? "Scanning..." : "Refresh"))}</span></button>
+            <details class="cmgr-selector-tools">
+                <summary class="is-icon" aria-label="${escapeAttr(t("Actions"))}" title="${escapeAttr(t("Actions"))}" aria-haspopup="menu">${selectorIcon("more")}</summary>
+                <div class="cmgr-selector-menu" role="menu" aria-label="${escapeAttr(t("Actions"))}">
+                    <button type="button" role="menuitem" data-action="match-missing-local-loras" ${localMetadataBatch.running ? "disabled" : ""}>${selectorIcon("match")}<span>${escapeHtml(t("Match missing Civitai info"))}</span></button>
+                </div>
+            </details>
         `,
+        filterBarHtml: renderLoraActiveFilterBar(),
     });
     return `
         <section class="cmgr-page cmgr-lora-page">
             ${toolbar}
             ${renderLocalMetadataBatchStatus()}
-            <div class="cmgr-split has-detail cmgr-lora-split">
+            <div class="cmgr-split has-detail cmgr-lora-split ${popup.detailOpen ? "is-detail-open" : ""}">
                 <div class="cmgr-results cmgr-lora-results">
                     ${renderLocalResults()}
                 </div>
-                <aside class="cmgr-detail cmgr-lora-detail">${selected ? renderLocalDetail(selected) : renderEmptyDetail(t("Select a local LoRA"), t("Apply it to this node or manage its local file and Civitai metadata."), "library")}</aside>
+                ${localDetailAside()}
             </div>
         </section>
     `;
@@ -1826,13 +1951,9 @@ function updateLocalFolderView(options = {}) {
     context.innerHTML = renderLocalFolderBreadcrumb();
     results.innerHTML = renderLocalResults();
     results.scrollTop = scrollTop;
-    if (preserveSelection) updateLocalDetail();
-    else {
-        detail.innerHTML = renderEmptyDetail(t("Select a local LoRA"), t("Apply it to this node or manage its local file and Civitai metadata."), "library");
-        delete detail.dataset.localAssetId;
-    }
-    bindPopupEvents();
-    schedulePopupLazyPreviews();
+    if (!preserveSelection) popup.selectedAssetId = "";
+    updateLocalDetail();
+    observeCardMedia(popupBody);
     return true;
 }
 
@@ -1851,9 +1972,9 @@ function filteredLocalItems() {
 function renderLocalCard(asset, index = 0) {
     const favorite = localFavorite(asset);
     return `
-        <article class="cmgr-card cmgr-lora-card asset ${popup.selectedAssetId === asset.id ? "selected" : ""}" data-local-id="${escapeAttr(asset.id)}" data-preview-key="${escapeAttr(asset.thumb_url || "")}">
+        <article class="cmgr-card cmgr-lora-card asset ${popup.selectedAssetId === asset.id ? "selected" : ""}" data-local-id="${escapeAttr(asset.id)}" data-preview-key="${escapeAttr(asset.thumb_url || "")}" tabindex="0">
             ${renderFavoriteCardMark(Boolean(favorite))}
-            <div class="cmgr-thumb">${renderPreview(asset.thumb_url, asset.name, "", { defer: index >= INITIAL_PREVIEW_LOADS, priority: index < HIGH_PRIORITY_PREVIEW_LOADS ? "high" : "auto" })}</div>
+            <div class="cmgr-thumb">${renderCardMedia(asset.has_preview ? asset.thumb_url : "", cardMediaOptions(index))}</div>
             ${asset.base_model ? `<div class="cmgr-card-badge">${escapeHtml(asset.base_model)}</div>` : ""}
             <div class="cmgr-card-body">
                 <div class="cmgr-card-title">${escapeHtml(asset.name || asset.filename)}</div>
@@ -1923,44 +2044,56 @@ function splitLocalPath(value) {
 }
 
 function renderLocalDetail(asset) {
-    const matched = Boolean(asset.model_id || asset.metadata_match_status === "matched");
     const favorite = localFavorite(asset);
     const civitaiUrl = asset.civitai_url || (asset.model_id ? `https://civitai.red/models/${encodeURIComponent(asset.model_id)}${asset.version_id ? `?modelVersionId=${encodeURIComponent(asset.version_id)}` : ""}` : "");
+    const words = normalizedTriggerWords(asset);
+    const title = escapeHtml(asset.name || asset.filename);
     return `
         <div class="cmgr-detail-scroll">
-            <div class="cmgr-detail-preview cmgr-lora-detail-preview" data-preview-key="${escapeAttr(asset.thumb_url || "")}">${renderDetailPreviewMedia(asset.thumb_url, asset.name)}</div>
+            ${renderDetailGallery(galleryItemsForUrl(asset.has_preview ? asset.thumb_url : ""), asset.name || asset.filename)}
             <div class="cmgr-detail-head"><div>
-                ${civitaiUrl ? `<a class="cmgr-detail-title-link" href="${escapeAttr(civitaiUrl)}" target="_blank" rel="noopener noreferrer"><h2>${escapeHtml(asset.name || asset.filename)}</h2><span class="cmgr-external-icon" aria-hidden="true">↗</span></a>` : `<h2>${escapeHtml(asset.name || asset.filename)}</h2>`}
-                <p>${escapeHtml(asset.creator || t("Unknown creator"))} · ${escapeHtml(asset.base_model || "Other")} · ${formatBytes(asset.size)}</p>
+                ${civitaiUrl
+                    ? `<a class="cmgr-detail-title-link" href="${escapeAttr(civitaiUrl)}" target="_blank" rel="noopener noreferrer" title="${escapeAttr(t("Open model page"))}"><h2>${title}</h2><span class="cmgr-external-icon" aria-hidden="true">↗</span></a>`
+                    : `<h2>${title}</h2>`}
+                <p>${escapeHtml([asset.creator, asset.version_name].filter(Boolean).join(" · ") || t("Local file"))}</p>
+                <div class="cmgr-detail-meta">${renderDetailFacts([asset.base_model !== "Other" ? asset.base_model : "", formatBytes(asset.size)])}</div>
             </div></div>
-            <div class="cmgr-detail-match-row ${matched ? "is-matched" : ""}">
-                <div><b>${escapeHtml(t(matched ? "Civitai matched" : "Civitai not matched"))}</b><span>${escapeHtml(matched ? `${asset.version_name || asset.version_id || ""}` : t("Use the model file hash to find its Civitai page and metadata."))}</span></div>
-                <button class="cmgr-primary" data-action="match-local">${escapeHtml(t(matched ? "Refresh Civitai info" : "Match Civitai info"))}</button>
-            </div>
-            <div class="cmgr-info-list cmgr-lora-file-info">
-                <div><span>${escapeHtml(t("File"))}</span><b>${escapeHtml(asset.filename || "")}</b></div>
-                <div><span>${escapeHtml(t("Relative Path"))}</span><b>${escapeHtml(asset.relative_path || asset.filename)}</b></div>
-                <div><span>${escapeHtml(t("Size"))}</span><b>${escapeHtml(formatBytes(asset.size))}</b></div>
-                <div><span>${escapeHtml(t("Version"))}</span><b>${escapeHtml(asset.version_name || asset.version_id || "—")}</b></div>
-                <div><span>${escapeHtml(t("Absolute Path"))}</span><b>${escapeHtml(asset.absolute_path || "")}</b></div>
-            </div>
-            <div class="cmgr-section-title">${escapeHtml(t("Trigger Words"))}</div>
-            <div class="cmgr-trained">${asset.trained_words?.length ? asset.trained_words.slice(0, 16).map((word) => `<button data-copy="${escapeAttr(word)}">${escapeHtml(word)}</button>`).join("") : `<span>${escapeHtml(t("No trained words cached."))}</span>`}</div>
-            <div class="cmgr-lora-detail-actions">
-                <button class="cmgr-primary cmgr-full" data-action="apply-local">${escapeHtml(t(isAppliedAsset(asset) ? "Applied" : "Apply to Node"))}</button>
-                ${renderFavoriteControls({
-                    favorite: Boolean(favorite),
-                    folders: popup.favoriteFolders,
-                    folderId: favorite?.folder_id || "",
-                    toggleAction: "favorite-local",
-                    folderAction: "assign-local-favorite-folder",
-                })}
-                ${renderFileActions({
-                    favorite: Boolean(favorite),
-                    showFavorite: false,
-                    actions: { favorite: "favorite-local", open: "open-local-folder", delete: "delete-local" },
-                })}
-            </div>
+            <section class="cmgr-detail-download-card">
+                <div class="cmgr-detail-action-hub is-inline-cta">
+                    <button class="cmgr-primary cmgr-download-cta" type="button" data-action="apply-local">${escapeHtml(t(isAppliedAsset(asset) ? "Applied" : "Apply to Node"))}</button>
+                    ${renderFavoriteControls({
+                        favorite: Boolean(favorite),
+                        folders: popup.favoriteFolders,
+                        folderId: favorite?.folder_id || "",
+                        toggleAction: "favorite-local",
+                        folderAction: "assign-local-favorite-folder",
+                        compact: true,
+                    })}
+                </div>
+                ${renderMatchRow(localAssetHasCivitaiMatch(asset), asset, "match-local", localMetadataBatch.running)}
+            </section>
+            <section class="cmgr-selector-triggers" aria-label="${escapeAttr(t("Trigger Words"))}">
+                <div class="cmgr-section-head">
+                    <div class="cmgr-section-title">${selectorIcon("tag")}${escapeHtml(t("Trigger Words"))}</div>
+                    ${words.length > 1 ? `<button class="cmgr-copy-all-btn" type="button" data-copy="${escapeAttr(words.join(", "))}">${escapeHtml(t("Copy All ({count})", { count: words.length }))}</button>` : ""}
+                </div>
+                <div class="cmgr-trained">${words.length ? words.slice(0, 16).map((word) => `<button type="button" data-copy="${escapeAttr(word)}">${escapeHtml(word)}</button>`).join("") : `<span>${escapeHtml(t("No trained words cached."))}</span>`}</div>
+            </section>
+            ${renderDetailTags(asset.tags, false)}
+            <details class="cmgr-selector-section" data-section="file" open>
+                <summary>${selectorIcon("file")}<span>${escapeHtml(t("File"))}</span></summary>
+                <div class="cmgr-selector-section-body">
+                    <div class="cmgr-info-list cmgr-lora-file-info">
+                        <div><span>${escapeHtml(t("File"))}</span><b>${escapeHtml(asset.filename || "")}</b></div>
+                        <div><span>${escapeHtml(t("Relative Path"))}</span><b>${escapeHtml(asset.relative_path || asset.filename)}</b></div>
+                        <div><span>${escapeHtml(t("Absolute Path"))}</span><b>${escapeHtml(asset.absolute_path || "")}</b></div>
+                    </div>
+                    <div class="cmgr-detail-file-actions">
+                        <button class="cmgr-secondary cmgr-detail-local-cta" type="button" data-action="open-local-folder">${selectorIcon("local")}<span>${escapeHtml(t("Open Folder"))}</span></button>
+                        <button class="cmgr-danger" type="button" data-action="delete-local">${escapeHtml(t("Delete"))}</button>
+                    </div>
+                </div>
+            </details>
         </div>
     `;
 }
@@ -2154,6 +2287,7 @@ function updateLocalLibraryLoadingState() {
 async function manageSelectedAsset(action) {
     const asset = popup.libraryItems.find((item) => item.id === popup.selectedAssetId);
     if (!asset) return;
+    if (action === "favorite") { await toggleLocalFavorite(asset); return; }
     popup.error = "";
     let deleted = false;
     const matchButton = popupBody?.querySelector('[data-action="match-local"]');
@@ -2171,10 +2305,6 @@ async function manageSelectedAsset(action) {
             const data = await apiPost("/asset/metadata", assetPayload(asset));
             await loadLibrary(true, false);
             showToast(t(data.matched ? "Civitai metadata and preview updated" : "No Civitai match found; SHA256 saved"));
-        } else if (action === "favorite") {
-            const existing = localFavorite(asset);
-            await setFavoriteItem(existing || favoriteItemForLocal(asset, "lora"), !existing);
-            showToast(t(existing ? "Removed favorite" : "Marked favorite"));
         } else if (action === "open") {
             await apiPost("/asset/open-folder", assetPayload(asset));
             showToast(t("Folder opened"));
@@ -2205,188 +2335,311 @@ async function manageSelectedAsset(action) {
     renderPopup();
 }
 
-function renderApplied() {
-    const loras = normalizeLoraList(popup.node?._cmgrLoras);
-    const selectedIndex = loras.length
-        ? Math.min(Math.max(0, Number(popup.selectedAppliedIndex || 0)), loras.length - 1)
-        : -1;
-    popup.selectedAppliedIndex = Math.max(0, selectedIndex);
-    const selected = selectedIndex >= 0 ? loras[selectedIndex] : null;
-    return `
-        <section class="cmgr-page cmgr-lora-page cmgr-lora-applied-page">
-            <div class="cmgr-toolbar cmgr-lora-toolbar cmgr-lora-applied-toolbar">
-                <div class="cmgr-lora-applied-toolbar-heading">
-                    <h2>${escapeHtml(t("Applied to Node"))}</h2>
-                    ${loras.length ? `<span>${escapeHtml(t("{count} LoRAs applied", { count: loras.length }))}</span>` : ""}
-                </div>
-                <span class="cmgr-lora-toolbar-note">${escapeHtml(t("LoRAs run from top to bottom."))}</span>
-                ${loras.length ? `<button class="cmgr-danger" data-action="clear-applied">${escapeHtml(t("Remove All"))}</button>` : ""}
-            </div>
-            <div class="cmgr-split has-detail cmgr-lora-split cmgr-lora-applied-split">
-                <div class="cmgr-lora-applied-list">
-                    ${loras.length ? `<div class="cmgr-lora-applied-stack">${loras.map(renderAppliedItem).join("")}</div>` : renderCollectionEmptyState({
-                        kind: "applied",
-                        kicker: t("Applied to Node"),
-                        title: t("Nothing applied to this node yet"),
-                        description: t("Choose a local LoRA or download one from Discover, then apply it to this node."),
-                        hints: [t("Browse LoRAs"), t("Tune strengths"), t("Reorder anytime")],
-                    })}
-                </div>
-                <aside class="cmgr-detail cmgr-lora-detail cmgr-lora-applied-detail">
-                    ${selected ? renderAppliedDetail(selected, selectedIndex, loras.length) : renderEmptyDetail(
-                        t("Select an applied LoRA"),
-                        t("Click a flow card to inspect its information and manage its execution order."),
-                        "applied",
-                    )}
-                </aside>
-            </div>
-        </section>
-    `;
+const GRIP_ICON = '<svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><circle cx="9" cy="6" r="1.5"/><circle cx="15" cy="6" r="1.5"/><circle cx="9" cy="12" r="1.5"/><circle cx="15" cy="12" r="1.5"/><circle cx="9" cy="18" r="1.5"/><circle cx="15" cy="18" r="1.5"/></svg>';
+
+function prefersReducedMotion() {
+    return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
 
-function renderAppliedItem(entry, index) {
-    const strength = Number(entry.strength_model);
-    const safeStrength = Number.isFinite(strength) ? Math.min(4, Math.max(-4, strength)) : 1;
-    const strengthPercent = ((safeStrength + 4) / 8) * 100;
-    const displayName = entry.display_name || shortLoraName(entry, 60);
-    const selected = Number(popup.selectedAppliedIndex || 0) === index;
-    return `
-        <article class="cmgr-lora-applied-item ${entry.enabled ? "" : "is-disabled"} ${selected ? "selected" : ""}" data-applied-index="${index}" tabindex="0" aria-selected="${selected ? "true" : "false"}">
-            <div class="cmgr-lora-applied-order" title="${escapeAttr(t("Execution order"))}">
-                <span>${escapeHtml(t("Order"))}</span>
-                <b>${String(index + 1).padStart(2, "0")}</b>
-            </div>
-            <div class="cmgr-lora-applied-preview-wrap">
-                <div class="cmgr-lora-applied-preview">${renderPreview(entry.preview_url, displayName)}</div>
-                <span class="cmgr-lora-applied-state-dot" title="${escapeAttr(t(entry.enabled ? "Enabled" : "Disabled"))}" aria-label="${escapeAttr(t(entry.enabled ? "Enabled" : "Disabled"))}"></span>
-            </div>
-            <div class="cmgr-lora-applied-main">
-                <div class="cmgr-lora-applied-head">
-                    <div class="cmgr-lora-applied-identity">
-                        <b title="${escapeAttr(displayName)}">${escapeHtml(displayName)}</b>
-                        <span title="${escapeAttr(entry.name)}">${escapeHtml(entry.name)}</span>
-                        ${entry.base_model ? `<small>${escapeHtml(entry.base_model)}</small>` : ""}
-                    </div>
-                    <label class="cmgr-lora-switch" title="${escapeAttr(t(entry.enabled ? "Disable LoRA" : "Enable LoRA"))}">
-                        <input type="checkbox" data-applied-enabled="${index}" ${entry.enabled ? "checked" : ""} />
-                        <span class="cmgr-lora-switch-track" aria-hidden="true"><i></i></span>
-                        <b>${escapeHtml(t(entry.enabled ? "Enabled" : "Disabled"))}</b>
-                    </label>
-                </div>
-                <label class="cmgr-lora-strength">
-                    <span class="cmgr-lora-strength-head"><b>${escapeHtml(t("Model Strength"))}</b><output>${safeStrength.toFixed(2)}</output></span>
-                    <input class="cmgr-lora-strength-slider" style="--cmgr-strength-percent:${strengthPercent}%" type="range" min="-4" max="4" step="0.05" value="${escapeAttr(safeStrength)}" data-applied-strength="${index}" />
-                    <span class="cmgr-lora-strength-scale" aria-hidden="true"><i>-4</i><i>0</i><i>+4</i></span>
-                </label>
-            </div>
-        </article>
-    `;
+function appliedLoras() {
+    return normalizeLoraList(popup.node?._cmgrLoras);
 }
 
-function renderAppliedDetail(entry, index, total) {
-    const local = popup.libraryItems.find((asset) => loraKey(entryFromAsset(asset)) === loraKey(entry)) || null;
-    const displayName = entry.display_name || shortLoraName(entry, 80);
-    const previewUrl = entry.preview_url || local?.thumb_url || "";
-    const baseModel = entry.base_model || local?.base_model || "—";
-    const words = normalizedTriggerWords(entry).length
-        ? normalizedTriggerWords(entry)
-        : normalizedTriggerWords(local || {});
-    const civitaiUrl = entry.civitai_url || local?.civitai_url || "";
-    return `
-        <div class="cmgr-detail-scroll">
-            <div class="cmgr-detail-preview cmgr-lora-detail-preview" data-preview-key="${escapeAttr(previewUrl)}">${renderDetailPreviewMedia(previewUrl, displayName)}</div>
-            <div class="cmgr-detail-head cmgr-lora-applied-detail-head"><div>
-                ${civitaiUrl
-                    ? `<a class="cmgr-detail-title-link" href="${escapeAttr(civitaiUrl)}" target="_blank" rel="noopener noreferrer"><h2>${escapeHtml(displayName)}</h2><span class="cmgr-external-icon" aria-hidden="true">↗</span></a>`
-                    : `<h2>${escapeHtml(displayName)}</h2>`}
-                <p>${escapeHtml(t("Applied LoRA"))} · ${escapeHtml(baseModel)}</p>
-            </div></div>
-            <div class="cmgr-lora-applied-detail-status ${entry.enabled ? "is-enabled" : "is-disabled"}">
-                <span aria-hidden="true"></span>
-                <div><b>${escapeHtml(t(entry.enabled ? "Enabled" : "Disabled"))}</b><small>${escapeHtml(t("Execution position {current} of {total}", { current: index + 1, total }))}</small></div>
-            </div>
-            <div class="cmgr-info-list cmgr-lora-file-info cmgr-lora-applied-info">
-                <div><span>${escapeHtml(t("File"))}</span><b>${escapeHtml(entry.name || "—")}</b></div>
-                <div><span>${escapeHtml(t("Base Model"))}</span><b>${escapeHtml(baseModel)}</b></div>
-                <div><span>${escapeHtml(t("Model Strength"))}</span><b>${Number(entry.strength_model || 0).toFixed(2)}</b></div>
-                <div><span>${escapeHtml(t("Execution order"))}</span><b>${index + 1} / ${total}</b></div>
-                ${local?.relative_path ? `<div><span>${escapeHtml(t("Relative Path"))}</span><b>${escapeHtml(local.relative_path)}</b></div>` : ""}
-                ${local?.size ? `<div><span>${escapeHtml(t("Size"))}</span><b>${escapeHtml(formatBytes(local.size))}</b></div>` : ""}
-            </div>
-            <div class="cmgr-section-title">${escapeHtml(t("Trigger Words"))}</div>
-            <div class="cmgr-trained">${words.length ? words.slice(0, 16).map((word) => `<button data-copy="${escapeAttr(word)}">${escapeHtml(word)}</button>`).join("") : `<span>${escapeHtml(t("No trained words cached."))}</span>`}</div>
-            <section class="cmgr-lora-applied-detail-actions" aria-label="${escapeAttr(t("Order and actions"))}">
-                <div class="cmgr-section-title">${escapeHtml(t("Order and actions"))}</div>
-                <div class="cmgr-lora-applied-detail-reorder">
-                    <button class="cmgr-secondary" data-action="move-applied-up" data-index="${index}" ${index === 0 ? "disabled" : ""}><span aria-hidden="true">↑</span>${escapeHtml(t("Move Up"))}</button>
-                    <button class="cmgr-secondary" data-action="move-applied-down" data-index="${index}" ${index === total - 1 ? "disabled" : ""}><span aria-hidden="true">↓</span>${escapeHtml(t("Move Down"))}</button>
-                </div>
-                <button class="cmgr-danger cmgr-full cmgr-lora-applied-detail-remove" data-action="remove-applied" data-index="${index}"><span aria-hidden="true">×</span>${escapeHtml(t("Remove from node"))}</button>
-            </section>
-        </div>
-    `;
-}
-
-function renderDownloads() {
-    const jobs = loraDownloads();
-    const activeCount = jobs.filter((job) => ACTIVE_DOWNLOAD_STATUSES.has(job.status)).length;
-    const finishedJobs = jobs.filter((job) => TERMINAL_DOWNLOAD_STATUSES.has(job.status));
-    return `
-        <section class="cmgr-page cmgr-lora-page">
-            <div class="cmgr-toolbar cmgr-lora-toolbar cmgr-download-toolbar cmgr-lora-download-toolbar">
-                <div class="cmgr-download-toolbar-heading">
-                    <h2>${escapeHtml(t("LoRA Downloads"))}</h2>
-                    <span data-lora-download-summary>${renderDownloadSummary(activeCount, finishedJobs.length)}</span>
-                </div>
-                <div class="cmgr-download-toolbar-actions" data-lora-download-actions>
-                    ${renderDownloadToolbarActions(finishedJobs.length)}
-                </div>
-            </div>
-            <div class="cmgr-lora-download-list">
-                ${renderLoraDownloadJobs(jobs)}
-            </div>
-        </section>
-    `;
-}
-
-function renderDownloadSummary(activeCount, finishedCount) {
-    return escapeHtml(t("{active} active · {finished} finished", {
-        active: activeCount,
-        finished: finishedCount,
-    }));
-}
-
-function renderDownloadToolbarActions(finishedCount) {
-    return `
-        ${finishedCount ? `<button class="cmgr-secondary" data-action="clear-lora-downloads">${escapeHtml(t("Clear finished"))}</button>` : ""}
-        <button class="cmgr-secondary" data-action="refresh-lora-downloads">${escapeHtml(t("Refresh"))}</button>
-    `;
-}
-
-function renderLoraDownloadJobs(jobs = loraDownloads()) {
-    return jobs.length ? jobs.map(renderDownloadJob).join("") : renderCollectionEmptyState({
-        kind: "downloads",
-        kicker: t("Downloads"),
-        title: t("No download tasks yet"),
-        description: t("Downloads you queue from Discover will appear here with their progress and status."),
-        hints: [t("Live progress"), t("Retry failed tasks")],
+// Rows are keyed by LoRA plus occurrence so legacy duplicates stay distinct.
+function appliedRowKeys(loras) {
+    const seen = new Map();
+    return loras.map((entry) => {
+        const key = loraKey(entry);
+        seen.set(key, (seen.get(key) || 0) + 1);
+        return `${key}#${seen.get(key)}`;
     });
 }
 
+function appliedAsset(entry) {
+    return popup.libraryItems.find((asset) => loraKey(entryFromAsset(asset)) === loraKey(entry)) || null;
+}
+
+function appliedTriggerWords(entry) {
+    const words = normalizedTriggerWords(entry);
+    return words.length ? words : normalizedTriggerWords(appliedAsset(entry) || {});
+}
+
+function renderAppliedSummary(loras) {
+    return escapeHtml(t("{count} LoRAs · {enabled} enabled", { count: loras.length, enabled: loras.filter((entry) => entry.enabled).length }));
+}
+
+function renderAppliedToolbarActions(loras) {
+    if (!loras.length) return "";
+    const allEnabled = loras.every((entry) => entry.enabled);
+    return `
+        <span class="cmgr-applied-note">${escapeHtml(t("LoRAs run from top to bottom."))}</span>
+        <button class="cmgr-secondary" type="button" data-applied-action="toggle-all">${escapeHtml(t(allEnabled ? "Disable all" : "Enable all"))}</button>
+        <button class="cmgr-danger" type="button" data-applied-action="clear">${escapeHtml(t("Remove All"))}</button>
+    `;
+}
+
+function renderAppliedRows(loras) {
+    if (!loras.length) {
+        return renderCollectionEmptyState({
+            kind: "applied",
+            kicker: t("Applied to Node"),
+            title: t("Nothing applied to this node yet"),
+            description: t("Choose a local LoRA or download one from Discover, then apply it to this node."),
+            hints: [t("Browse LoRAs"), t("Tune strengths"), t("Reorder anytime")],
+        });
+    }
+    const keys = appliedRowKeys(loras);
+    return `<ol class="cmgr-applied-rows" aria-label="${escapeAttr(t("Execution order"))}">${loras.map((entry, index) => renderAppliedRow(entry, index, keys[index])).join("")}</ol>`;
+}
+
+function renderAppliedRow(entry, index, key) {
+    const name = entry.display_name || shortLoraName(entry, 80);
+    const local = appliedAsset(entry);
+    const words = appliedTriggerWords(entry);
+    const strength = Number(entry.strength_model);
+    const preview = local && !local.has_preview ? "" : entry.preview_url || local?.thumb_url || "";
+    const missing = popup.libraryItems.length && !popup.libraryLoading && !local;
+    return `
+        <li class="cmgr-applied-row ${entry.enabled ? "" : "is-disabled"}" data-applied-index="${index}" data-applied-key="${escapeAttr(key)}">
+            <button class="cmgr-applied-handle" type="button" data-applied-handle aria-label="${escapeAttr(t("Reorder {name}", { name }))}" title="${escapeAttr(t("Drag, or press ↑/↓ to reorder"))}">${GRIP_ICON}</button>
+            <span class="cmgr-applied-order">${String(index + 1).padStart(2, "0")}</span>
+            <div class="cmgr-applied-thumb">${renderCardMedia(preview, { eager: true })}</div>
+            <div class="cmgr-applied-info">
+                <button class="cmgr-applied-name" type="button" data-applied-action="locate" ${local ? "" : "disabled"} title="${escapeAttr(local ? t("Show in Local LoRAs") : entry.name)}">${escapeHtml(name)}</button>
+                <span class="cmgr-applied-meta">
+                    ${entry.base_model ? `<i>${escapeHtml(entry.base_model)}</i>` : ""}
+                    ${missing ? `<i class="is-warning">${escapeHtml(t("File missing"))}</i>` : ""}
+                    <span title="${escapeAttr(entry.name)}">${escapeHtml(entry.name)}</span>
+                </span>
+            </div>
+            <div class="cmgr-applied-strength">
+                <input type="range" min="${Math.min(-4, strength)}" max="${Math.max(4, strength)}" step="0.05" value="${escapeAttr(strength)}" data-applied-range aria-label="${escapeAttr(`${t("Strength")}: ${name}`)}" title="${escapeAttr(t("Double-click to reset to 1.00"))}" />
+                <input class="cmgr-input" type="number" step="0.05" value="${strength.toFixed(2)}" data-applied-number aria-label="${escapeAttr(`${t("Strength")}: ${name}`)}" />
+            </div>
+            <button class="cmgr-applied-words" type="button" data-applied-action="copy-words" ${words.length ? "" : "disabled"} title="${escapeAttr(words.length ? words.join(", ") : t("No trained words cached."))}" aria-label="${escapeAttr(t("Copy trigger words"))}">${selectorIcon("tag")}<b>${words.length}</b></button>
+            <button class="cmgr-applied-toggle ${entry.enabled ? "is-on" : ""}" type="button" data-applied-action="toggle" aria-pressed="${entry.enabled}" aria-label="${escapeAttr(`${t("Enabled")}: ${name}`)}" title="${escapeAttr(t(entry.enabled ? "Disable LoRA" : "Enable LoRA"))}">
+                <i aria-hidden="true"></i><span>${escapeHtml(t(entry.enabled ? "Enabled" : "Disabled"))}</span>
+            </button>
+            <button class="cmgr-applied-remove" type="button" data-applied-action="remove" aria-label="${escapeAttr(`${t("Remove from node")}: ${name}`)}" title="${escapeAttr(t("Remove from node"))}">${selectorIcon("close")}</button>
+        </li>
+    `;
+}
+
+function renderApplied() {
+    const loras = appliedLoras();
+    return `
+        <section class="cmgr-page cmgr-lora-page cmgr-applied-page">
+            <div class="cmgr-toolbar cmgr-selector-utility-toolbar cmgr-applied-toolbar">
+                <div class="cmgr-dl-heading"><h2>${escapeHtml(t("Applied to Node"))}</h2><span data-applied-summary>${renderAppliedSummary(loras)}</span></div>
+                <div class="cmgr-applied-toolbar-actions" data-applied-toolbar>${renderAppliedToolbarActions(loras)}</div>
+            </div>
+            <div class="cmgr-lora-applied-list">${renderAppliedRows(loras)}</div>
+        </section>
+    `;
+}
+
+function paintAppliedRanges(root) {
+    root.querySelectorAll("[data-applied-range]").forEach((range) => paintStrengthRange(range, Number(range.value)));
+}
+
+/**
+ * Write the new list to the node, then redraw the rows and slide every row
+ * from where it was to where it now sits (FLIP), keeping keyboard focus.
+ */
+function commitApplied(mutate) {
+    const list = popupBody?.querySelector(".cmgr-lora-applied-list");
+    const before = new Map();
+    list?.querySelectorAll("[data-applied-key]").forEach((row) => before.set(row.dataset.appliedKey, row.getBoundingClientRect().top));
+    const focusedRow = document.activeElement?.closest?.("[data-applied-key]");
+    const control = focusedRow ? [...document.activeElement.attributes].find((attribute) => attribute.name.startsWith("data-applied-")) : null;
+    const focusKey = focusedRow?.dataset.appliedKey;
+    const next = appliedLoras();
+    mutate(next);
+    updateNodeLoras(popup.node, next);
+    rerenderNavPreservingScroll();
+    if (popup.tab !== "applied" || !list) return;
+    popupBody.querySelector("[data-applied-summary]").innerHTML = renderAppliedSummary(next);
+    popupBody.querySelector("[data-applied-toolbar]").innerHTML = renderAppliedToolbarActions(next);
+    list.innerHTML = renderAppliedRows(next);
+    paintAppliedRanges(list);
+    observeCardMedia(list);
+    list.querySelectorAll("[data-applied-key]").forEach((row) => {
+        const top = before.get(row.dataset.appliedKey);
+        const delta = top === undefined ? 0 : top - row.getBoundingClientRect().top;
+        if (delta && !prefersReducedMotion()) row.animate([{ transform: `translateY(${delta}px)` }, { transform: "none" }], { duration: 220, easing: "cubic-bezier(.2,.7,.2,1)" });
+    });
+    const controlSelector = control ? `[${control.name}="${CSS.escape(control.value)}"]` : "[data-applied-handle]";
+    if (focusKey) list.querySelector(`[data-applied-key="${CSS.escape(focusKey)}"] ${controlSelector}`)?.focus({ preventScroll: true });
+}
+
+function moveApplied(from, to) {
+    if (from === to) return;
+    commitApplied((list) => {
+        const [entry] = list.splice(from, 1);
+        list.splice(to, 0, entry);
+    });
+}
+
+function removeApplied(index, row) {
+    const previous = appliedLoras();
+    const name = shortLoraName(previous[index], 60);
+    const finish = () => {
+        commitApplied((list) => list.splice(index, 1));
+        showToast(t("Removed {name}", { name }), { label: t("Undo"), onClick: () => restoreApplied(previous) });
+    };
+    if (!row || prefersReducedMotion()) {
+        finish();
+        return;
+    }
+    row.style.pointerEvents = "none";
+    row.animate([{ opacity: 1, transform: "none" }, { opacity: 0, transform: "translateX(16px)" }], { duration: 160, easing: "ease-in", fill: "forwards" }).finished.then(finish, finish);
+}
+
+function restoreApplied(previous) {
+    commitApplied((list) => list.splice(0, list.length, ...previous));
+    showToast(t("Restored"));
+}
+
+function locateApplied(entry) {
+    const asset = appliedAsset(entry);
+    if (!asset) return;
+    switchTab("local");
+    popup.selectedAssetId = asset.id;
+    if (!updateLocalDetail()) renderPopup();
+    popupBody.querySelector(`[data-local-id="${CSS.escape(asset.id)}"]`)?.scrollIntoView({ block: "center" });
+}
+
+function startAppliedDrag(event, handle) {
+    const row = handle.closest(".cmgr-applied-row");
+    const rows = [...row.parentElement.children];
+    if (rows.length < 2) return;
+    event.preventDefault();
+    const from = rows.indexOf(row);
+    const tops = rows.map((item) => item.getBoundingClientRect().top);
+    const step = tops[1] - tops[0];
+    const startY = event.clientY;
+    let to = from;
+    row.classList.add("is-dragging");
+    const move = (moveEvent) => {
+        const offset = moveEvent.clientY - startY;
+        to = Math.max(0, Math.min(rows.length - 1, from + Math.round(offset / step)));
+        row.style.transform = `translateY(${offset}px)`;
+        rows.forEach((item, index) => {
+            if (item === row) return;
+            const shift = from < to && index > from && index <= to ? -step : from > to && index >= to && index < from ? step : 0;
+            item.style.transform = shift ? `translateY(${shift}px)` : "";
+        });
+    };
+    const end = () => {
+        document.removeEventListener("pointermove", move);
+        document.removeEventListener("pointerup", end);
+        document.removeEventListener("pointercancel", end);
+        row.classList.remove("is-dragging");
+        if (to === from) {
+            rows.forEach((item) => { item.style.transform = ""; });
+            return;
+        }
+        moveApplied(from, to);
+    };
+    document.addEventListener("pointermove", move);
+    document.addEventListener("pointerup", end);
+    document.addEventListener("pointercancel", end);
+}
+
+function bindAppliedPage(root) {
+    const page = root?.querySelector(".cmgr-applied-page");
+    if (!page) return;
+    paintAppliedRanges(page);
+    const rowIndex = (element) => Number(element.closest("[data-applied-index]")?.dataset.appliedIndex);
+    const commitStrength = (input) => {
+        const index = rowIndex(input);
+        const value = Number(input.value);
+        if (!Number.isFinite(value)) return;
+        commitApplied((list) => { list[index].strength_model = value; });
+    };
+    page.onclick = (event) => {
+        const button = event.target.closest("[data-applied-action]");
+        if (!button) return;
+        const loras = appliedLoras();
+        const index = rowIndex(button);
+        const action = button.dataset.appliedAction;
+        if (action === "remove") removeApplied(index, button.closest(".cmgr-applied-row"));
+        else if (action === "toggle") commitApplied((list) => { list[index].enabled = !list[index].enabled; });
+        else if (action === "locate") locateApplied(loras[index]);
+        else if (action === "copy-words") {
+            const words = appliedTriggerWords(loras[index]);
+            writeClipboardText(words.join(", "))
+                .then(() => showToast(t("Copied {count} trigger words.", { count: words.length })))
+                .catch(() => showToast(t("Could not copy the trigger words.")));
+        }
+        else if (action === "toggle-all") {
+            const enable = !loras.every((entry) => entry.enabled);
+            commitApplied((list) => list.forEach((entry) => { entry.enabled = enable; }));
+        } else if (action === "clear") {
+            commitApplied((list) => list.splice(0, list.length));
+            showToast(t("Removed all LoRAs"), { label: t("Undo"), onClick: () => restoreApplied(loras) });
+        }
+    };
+    page.oninput = (event) => {
+        const range = event.target.closest("[data-applied-range]");
+        if (!range) return;
+        paintStrengthRange(range, Number(range.value));
+        range.closest(".cmgr-applied-strength").querySelector("[data-applied-number]").value = Number(range.value).toFixed(2);
+    };
+    page.onchange = (event) => {
+        if (event.target.matches("[data-applied-range], [data-applied-number]")) commitStrength(event.target);
+    };
+    page.ondblclick = (event) => {
+        const range = event.target.closest("[data-applied-range]");
+        if (!range) return;
+        range.value = "1";
+        commitStrength(range);
+    };
+    page.onkeydown = (event) => {
+        if (event.target.matches("[data-applied-number]") && event.key === "Enter") {
+            event.preventDefault();
+            commitStrength(event.target);
+            return;
+        }
+        if (!event.target.matches("[data-applied-handle]") || !["ArrowUp", "ArrowDown"].includes(event.key)) return;
+        event.preventDefault();
+        const index = rowIndex(event.target);
+        const target = index + (event.key === "ArrowUp" ? -1 : 1);
+        if (target >= 0 && target < appliedLoras().length) moveApplied(index, target);
+    };
+    page.onpointerdown = (event) => {
+        const handle = event.target.closest("[data-applied-handle]");
+        if (handle && event.button === 0) startAppliedDrag(event, handle);
+    };
+}
+
+function downloadPageOptions() {
+    return { title: t("LoRA Downloads"), jobs: loraDownloads(), actionsFor: loraDownloadActions };
+}
+
+function renderDownloads() {
+    return renderDownloadPage(downloadPageOptions());
+}
+
 function updateDownloadView() {
-    if (popup.tab !== "downloads") return false;
-    const list = popupBody?.querySelector(".cmgr-lora-download-list");
-    if (!list) return false;
-    const jobs = loraDownloads();
-    const activeCount = jobs.filter((job) => ACTIVE_DOWNLOAD_STATUSES.has(job.status)).length;
-    const finishedCount = jobs.filter((job) => TERMINAL_DOWNLOAD_STATUSES.has(job.status)).length;
-    const summary = popupBody.querySelector("[data-lora-download-summary]");
-    const actions = popupBody.querySelector("[data-lora-download-actions]");
-    if (summary) summary.innerHTML = renderDownloadSummary(activeCount, finishedCount);
-    if (actions) actions.innerHTML = renderDownloadToolbarActions(finishedCount);
-    list.innerHTML = renderLoraDownloadJobs(jobs);
-    bindLoraDownloadEvents(popupBody);
-    return true;
+    return popup.tab === "downloads" && patchDownloadPage(popupBody, downloadPageOptions());
+}
+
+function downloadedLora(job) {
+    const target = String(job.target_path || "").replaceAll("\\", "/").toLocaleLowerCase();
+    return popup.libraryItems.find((item) => String(item.absolute_path || "").replaceAll("\\", "/").toLocaleLowerCase() === target)
+        || popup.libraryItems.find((item) => job.version_id && String(item.version_id || "") === String(job.version_id))
+        || popup.libraryItems.find((item) => job.relative_path && String(item.relative_path || "").toLocaleLowerCase() === String(job.relative_path).toLocaleLowerCase())
+        || null;
+}
+
+function loraDownloadActions(job) {
+    const taskButton = (action, label, className = "cmgr-secondary") => `<button class="${className}" type="button" data-action="${action}" data-task-id="${escapeAttr(job.id)}">${escapeHtml(t(label))}</button>`;
+    if (ACTIVE_DOWNLOAD_STATUSES.has(job.status)) return job.status === "cancelling" ? "" : taskButton("cancel-download", "Cancel");
+    return `
+        ${["failed", "cancelled"].includes(job.status) ? taskButton("retry-download", "Retry", "cmgr-primary") : ""}
+        <button class="cmgr-dl-remove" type="button" data-action="remove-download" data-task-id="${escapeAttr(job.id)}" title="${escapeAttr(t("Remove record"))}" aria-label="${escapeAttr(t("Remove record"))}">${selectorIcon("close")}</button>
+    `;
 }
 
 function loraDownloads() {
@@ -2395,64 +2648,13 @@ function loraDownloads() {
         .sort((left, right) => Number(right.created_at || 0) - Number(left.created_at || 0));
 }
 
-function downloadPercent(job) {
-    if (job.status === "completed") return 100;
-    const total = Number(job.total || 0);
-    return total > 0 ? Math.min(100, Math.round((Number(job.progress || 0) / total) * 100)) : 0;
-}
-
-function renderPendingDownload(job) {
-    return `
-        <div class="cmgr-lora-pending">
-            <div><b>${escapeHtml(t(downloadStatusLabel(job.status)))}</b><span>${downloadPercent(job)}%</span></div>
-            <div class="cmgr-progress"><div style="width:${downloadPercent(job)}%"></div><span>${downloadPercent(job)}%</span></div>
-        </div>
-    `;
-}
-
-function renderDownloadJob(job) {
-    const pct = downloadPercent(job);
-    const active = ACTIVE_DOWNLOAD_STATUSES.has(job.status);
-    const path = String(job.relative_path || job.target_path || "");
-    return `
-        <article class="cmgr-download cmgr-lora-download-item is-${escapeAttr(job.status || "pending")}">
-            <div class="cmgr-download-head">
-                <div class="cmgr-download-title">
-                    <span class="cmgr-download-kind">LoRA</span>
-                    <strong title="${escapeAttr(job.filename || job.relative_path || "LoRA")}">${escapeHtml(job.filename || job.relative_path || "LoRA")}</strong>
-                </div>
-                <b class="cmgr-download-status ${escapeAttr(job.status || "pending")}"><i aria-hidden="true"></i>${escapeHtml(t(downloadStatusLabel(job.status)))}</b>
-            </div>
-            ${path ? `<div class="cmgr-download-path" title="${escapeAttr(job.target_path || path)}">${escapeHtml(path)}</div>` : ""}
-            <div class="cmgr-progress${Number(job.total || 0) > 0 ? "" : active ? " indeterminate" : ""}"><div style="width:${pct}%"></div></div>
-            <div class="cmgr-download-meta"><strong>${Number(job.total || 0) > 0 ? `${pct}%` : active ? escapeHtml(t("Waiting for size...")) : `${pct}%`}</strong><span>${formatBytes(job.progress)}${job.total ? ` / ${formatBytes(job.total)}` : ""}</span></div>
-            ${job.error ? `<div class="cmgr-warning">${escapeHtml(job.error)}</div>` : ""}
-            <div class="cmgr-download-actions">
-                ${active ? `<button class="cmgr-secondary" data-action="cancel-lora-download" data-task-id="${escapeAttr(job.id)}">${escapeHtml(t("Cancel"))}</button>` : ""}
-                ${["failed", "cancelled"].includes(job.status) ? `<button class="cmgr-primary" data-action="retry-lora-download" data-task-id="${escapeAttr(job.id)}">${escapeHtml(t("Retry Download"))}</button>` : ""}
-                ${active ? "" : `<button class="cmgr-download-remove" data-action="remove-lora-download" data-task-id="${escapeAttr(job.id)}" title="${escapeAttr(t("Remove record"))}" aria-label="${escapeAttr(t("Remove record"))}"><span aria-hidden="true"></span></button>`}
-            </div>
-        </article>
-    `;
-}
-
-function downloadStatusLabel(status) {
-    return ({
-        pending: "Pending",
-        downloading: "Downloading",
-        cancelling: "Cancelling",
-        completed: "Completed",
-        failed: "Failed",
-        cancelled: "Cancelled",
-    })[status] || status || "Pending";
-}
-
 async function loadDownloads(shouldRender = true) {
     try {
         popup.downloads = await apiGet("/download-status");
     } catch (_) {
         popup.downloads = popup.downloads || {};
     }
+    trackDownloadRates(Object.values(popup.downloads));
     if (hasActiveDownloads()) startDownloadPolling();
     updateDownloadNavCount();
     if (shouldRender && overlay?.classList.contains("show") && !updateDownloadView() && !updateRemoteDownloadState()) {
@@ -2470,6 +2672,7 @@ async function pollDownloads() {
     pollBusy = true;
     try {
         popup.downloads = await apiGet("/download-status");
+        trackDownloadRates(Object.values(popup.downloads));
         for (const [taskId, pending] of [...popup.pendingApply.entries()]) {
             const job = popup.downloads[taskId];
             if (!job || !TERMINAL_DOWNLOAD_STATUSES.has(job.status)) continue;
@@ -2504,10 +2707,7 @@ async function pollDownloads() {
 
 async function finishPendingApply(job, pending) {
     await loadLibrary(true, false);
-    const normalizedTarget = String(job.target_path || "").replaceAll("\\", "/").toLocaleLowerCase();
-    const asset = popup.libraryItems.find((item) => String(item.absolute_path || "").replaceAll("\\", "/").toLocaleLowerCase() === normalizedTarget)
-        || popup.libraryItems.find((item) => String(item.model_id || "") === String(pending.modelId) && String(item.version_id || "") === String(pending.versionId))
-        || popup.libraryItems.find((item) => String(item.relative_path || "").toLocaleLowerCase() === String(job.relative_path || "").toLocaleLowerCase());
+    const asset = downloadedLora(job);
     if (!asset) {
         popup.error = t("Download completed, but the LoRA was not found in the refreshed local library.");
         return;
@@ -2585,23 +2785,59 @@ function bindPopupEvents() {
     bindLocalFolderControls(popupBody);
     popupBody?.querySelectorAll("[data-favorite-key]").forEach((card) => {
         card.onclick = () => {
+            openDetailDrawer();
             if (card.dataset.favoriteKey === popup.selectedFavoriteKey) return;
             const item = popup.favoriteItems.find((entry) => entry.key === card.dataset.favoriteKey);
             if (item) selectFavoriteItem(item);
         };
     });
     popupBody?.querySelectorAll("[data-remote-id]").forEach((card) => {
+        const favBtn = card.querySelector("[data-card-favorite]");
+        if (favBtn) {
+            favBtn.onclick = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const model = popup.remoteItems.find((item) => String(item.id) === String(card.dataset.remoteId));
+                if (model) void toggleRemoteFavorite(model);
+            };
+        }
         card.onclick = () => {
+            openDetailDrawer();
+            if (String(popup.selectedRemote?.id || "") === String(card.dataset.remoteId || "")) return;
             const model = popup.remoteItems.find((item) => String(item.id) === String(card.dataset.remoteId));
             if (model) void selectRemote(model);
         };
     });
-    popupBody?.querySelectorAll("[data-local-id]").forEach((card) => {
-        card.onclick = () => {
-            popup.selectedAssetId = card.dataset.localId;
-            if (!updateLocalDetail()) renderPopup();
+    popupBody?.querySelectorAll("[data-detail-tag]").forEach((button) => {
+        button.onclick = () => {
+            popup.selectedTag = button.dataset.detailTag;
+            popup.detailOpen = false;
+            void searchRemote(true);
         };
     });
+    bindLocalCards(popupBody);
+
+    const clearFilterBase = popupBody?.querySelector('[data-action="clear-lora-filter-base"]');
+    if (clearFilterBase) clearFilterBase.onclick = () => {
+        popup.selectedBaseModel = "";
+        popup.selectedRemote = null;
+        if (popup.tab === "discover") void searchRemote(true);
+        else renderPopup({ preserveScroll: false });
+    };
+    const clearFilterCategory = popupBody?.querySelector('[data-action="clear-lora-filter-category"]');
+    if (clearFilterCategory) clearFilterCategory.onclick = () => {
+        popup.selectedCategory = "";
+        popup.selectedRemote = null;
+        void searchRemote(true);
+    };
+    const clearFilterTag = popupBody?.querySelector('[data-action="clear-lora-filter-tag"]');
+    if (clearFilterTag) clearFilterTag.onclick = () => {
+        popup.selectedTag = "";
+        popup.selectedRemote = null;
+        void searchRemote(true);
+    };
+    const resetFilters = popupBody?.querySelector('[data-action="reset-lora-filters"]');
+    if (resetFilters) resetFilters.onclick = resetLoraFilters;
 
     const remoteQuery = popupBody?.querySelector('[data-field="remote-query"]');
     const clearSearch = popupBody?.querySelector('[data-action="clear-lora-search"]');
@@ -2609,11 +2845,22 @@ function bindPopupEvents() {
         remoteQuery.oninput = () => {
             popup.discoverQuery = remoteQuery.value;
             if (clearSearch) clearSearch.hidden = !popup.discoverQuery;
+            clearTimeout(remoteQueryTimer);
+            remoteQueryTimer = setTimeout(() => void searchRemote(true), 300);
         };
-        remoteQuery.onkeydown = (event) => { if (event.key === "Enter") void searchRemote(true); };
+        remoteQuery.onkeydown = (event) => {
+            if (event.key !== "Enter") return;
+            clearTimeout(remoteQueryTimer);
+            void searchRemote(true);
+        };
     }
-    const remoteSort = popupBody?.querySelector('[data-field="remote-sort"]');
-    if (remoteSort) remoteSort.onchange = () => { popup.sort = remoteSort.value; void searchRemote(true); };
+    popupBody?.querySelectorAll('[data-selector-sort]').forEach((button) => {
+        button.onclick = () => {
+            popup.sort = button.dataset.selectorSort;
+            void searchRemote(true);
+        };
+    });
+    bindSelectorMenus(popupBody);
     const search = popupBody?.querySelector('[data-action="search-loras"]');
     if (search) search.onclick = () => void searchRemote(true);
     if (clearSearch) clearSearch.onclick = () => {
@@ -2630,7 +2877,7 @@ function bindPopupEvents() {
         if (!results) return;
         results.innerHTML = renderFavoriteResults();
         bindPopupEvents();
-        schedulePopupLazyPreviews();
+        observeCardMedia(popupBody);
     };
     if (favoriteQuery) favoriteQuery.oninput = () => {
         popup.favoriteQuery = favoriteQuery.value;
@@ -2647,15 +2894,20 @@ function bindPopupEvents() {
         updateFavoriteResults();
     };
 
-    const version = popupBody?.querySelector('[data-field="remote-version"]');
-    if (version) version.onchange = () => {
-        popup.selectedVersionId = version.value;
+    const switchRemoteVersion = (nextVersionId) => {
+        if (!nextVersionId || String(popup.selectedVersionId) === String(nextVersionId)) return;
+        popup.selectedVersionId = String(nextVersionId);
         const nextVersion = selectedVersion();
-        popup.selectedFileName = String(filesFor(nextVersion).find((item) => item.primary)?.name || filesFor(nextVersion)[0]?.name || "");
+        popup.selectedFileName = primaryFileName(nextVersion);
         if (!updateRemoteDetail() && !updateFavoriteDetail()) renderPopup();
     };
+    const version = popupBody?.querySelector('[data-field="remote-version"]');
+    if (version) version.onchange = () => switchRemoteVersion(version.value);
     const file = popupBody?.querySelector('[data-field="remote-file"]');
-    if (file) file.onchange = () => { popup.selectedFileName = file.value; };
+    if (file) file.onchange = () => {
+        popup.selectedFileName = file.value;
+        updateRemoteDownloadState();
+    };
     bindRemoteDownloadEvents(popupBody);
     const favoriteRemote = popupBody?.querySelector('[data-action="favorite-remote-lora"]');
     if (favoriteRemote) favoriteRemote.onclick = () => void toggleRemoteFavorite();
@@ -2676,6 +2928,8 @@ function bindPopupEvents() {
         button.onclick = async () => {
             try {
                 await navigator.clipboard.writeText(button.dataset.copy || "");
+                button.classList.add("is-copied");
+                setTimeout(() => button.classList.remove("is-copied"), 1400);
                 showToast(t("Copied"));
             } catch (_) {
                 showToast(t("Copy failed"));
@@ -2687,13 +2941,8 @@ function bindPopupEvents() {
         const results = popupBody?.querySelector(".cmgr-lora-results");
         if (!results) return;
         results.innerHTML = renderLocalResults();
-        results.querySelectorAll("[data-local-id]").forEach((card) => {
-            card.onclick = () => {
-                popup.selectedAssetId = card.dataset.localId;
-                if (!updateLocalDetail()) renderPopup();
-            };
-        });
-        schedulePopupLazyPreviews();
+        bindLocalCards(results);
+        observeCardMedia(popupBody);
     };
     const localQuery = popupBody?.querySelector('[data-field="local-query"]');
     const clearLocalQuery = popupBody?.querySelector('[data-action="clear-lora-local-search"]');
@@ -2734,60 +2983,28 @@ function bindPopupEvents() {
         localFavoriteFolder.onchange = () => void assignFavoriteFolder(localFavorite(asset), localFavoriteFolder.value);
     }
 
-    popupBody?.querySelectorAll(".cmgr-lora-applied-item[data-applied-index]").forEach((card) => {
-        const select = (event) => {
-            if (event?.target?.closest?.("button, input, label, a")) return;
-            const index = Number(card.dataset.appliedIndex);
-            if (!Number.isInteger(index) || index === popup.selectedAppliedIndex) return;
-            popup.selectedAppliedIndex = index;
-            renderPopup();
-        };
-        card.onclick = select;
-        card.onkeydown = (event) => {
-            if (!["Enter", " "].includes(event.key)) return;
-            event.preventDefault();
-            select(event);
-        };
-    });
-
-    popupBody?.querySelectorAll("[data-applied-enabled]").forEach((input) => {
-        input.onchange = () => {
-            const index = Number(input.dataset.appliedEnabled);
-            const next = normalizeLoraList(popup.node?._cmgrLoras);
-            if (!next[index]) return;
-            next[index].enabled = input.checked;
-            updateNodeLoras(popup.node, next);
-            renderPopup();
-        };
-    });
-    popupBody?.querySelectorAll("[data-applied-strength]").forEach((input) => {
-        input.oninput = () => {
-            const index = Number(input.dataset.appliedStrength);
-            const next = normalizeLoraList(popup.node?._cmgrLoras);
-            if (!next[index]) return;
-            next[index].strength_model = Number(input.value);
-            updateNodeLoras(popup.node, next);
-            input.style.setProperty("--cmgr-strength-percent", `${((Number(input.value) + 4) / 8) * 100}%`);
-            const output = input.closest(".cmgr-lora-strength")?.querySelector("output");
-            if (output) output.value = Number(input.value).toFixed(2);
-        };
-        input.onchange = () => {
-            syncNodeWidgets(popup.node, popup.node?._cmgrLoras || []);
-            if (popup.tab === "applied") renderPopup();
-        };
-    });
-    popupBody?.querySelectorAll('[data-action="move-applied-up"]').forEach((button) => { button.onclick = () => updateLoraOrder(Number(button.dataset.index), -1); });
-    popupBody?.querySelectorAll('[data-action="move-applied-down"]').forEach((button) => { button.onclick = () => updateLoraOrder(Number(button.dataset.index), 1); });
-    popupBody?.querySelectorAll('[data-action="remove-applied"]').forEach((button) => { button.onclick = () => removeLoraFromNode(Number(button.dataset.index)); });
-    const clearApplied = popupBody?.querySelector('[data-action="clear-applied"]');
-    if (clearApplied) clearApplied.onclick = () => {
-        if (!confirm(t("Remove all LoRAs from this node?"))) return;
-        popup.selectedAppliedIndex = 0;
-        updateNodeLoras(popup.node, []);
-        renderPopup();
-    };
-
+    bindAppliedPage(popupBody);
     bindLoraDownloadEvents(popupBody);
+}
+
+function bindLocalCards(root) {
+    root?.querySelectorAll("[data-local-id]").forEach((card) => {
+        const favBtn = card.querySelector("[data-card-favorite]");
+        if (favBtn) {
+            favBtn.onclick = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const asset = popup.libraryItems.find((item) => String(item.id) === String(card.dataset.localId));
+                if (asset) void toggleLocalFavorite(asset);
+            };
+        }
+        card.onclick = () => {
+            openDetailDrawer();
+            if (String(popup.selectedAssetId || "") === String(card.dataset.localId || "")) return;
+            popup.selectedAssetId = card.dataset.localId;
+            if (!updateLocalDetail()) renderPopup();
+        };
+    });
 }
 
 function bindRemoteDownloadEvents(root) {
@@ -2801,59 +3018,32 @@ function bindRemoteDownloadEvents(root) {
 }
 
 function bindLoraDownloadEvents(root) {
-    const refreshDownloads = root?.querySelector('[data-action="refresh-lora-downloads"]');
-    if (refreshDownloads) refreshDownloads.onclick = () => void loadDownloads(true);
-    const clearDownloads = root?.querySelector('[data-action="clear-lora-downloads"]');
-    if (clearDownloads) clearDownloads.onclick = () => void clearFinishedDownloadRecords();
-    root?.querySelectorAll('[data-action="cancel-lora-download"]').forEach((button) => { button.onclick = () => void cancelDownload(button.dataset.taskId); });
-    root?.querySelectorAll('[data-action="retry-lora-download"]').forEach((button) => { button.onclick = () => void retryDownload(button.dataset.taskId); });
-    root?.querySelectorAll('[data-action="remove-lora-download"]').forEach((button) => { button.onclick = () => void removeDownloadRecord(button.dataset.taskId); });
-}
-
-function showToast(message) {
-    popup.toast = message;
-    if (toastTimer) clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => {
-        popup.toast = "";
-        if (overlay?.classList.contains("show") && !updatePopupMessages()) renderPopup();
-    }, 2600);
-    if (overlay?.classList.contains("show") && !updatePopupMessages()) renderPopup();
-}
-
-function formatBytes(value) {
-    const size = Number(value || 0);
-    if (!size) return "0 B";
-    const units = ["B", "KB", "MB", "GB"];
-    const index = Math.min(units.length - 1, Math.floor(Math.log(size) / Math.log(1024)));
-    return `${(size / (1024 ** index)).toFixed(index ? 1 : 0)} ${units[index]}`;
-}
-
-function readStatValue(source, keys) {
-    if (!source || typeof source !== "object") return 0;
-    for (const key of keys) {
-        const value = Number(source[key]);
-        if (Number.isFinite(value) && value > 0) return value;
-    }
-    return 0;
-}
-
-function modelStats(model, version = {}) {
-    const downloadKeys = ["downloadCount", "downloads", "download_count"];
-    const likeKeys = ["thumbsUpCount", "likeCount", "likes", "favoriteCount", "favorites", "collectedCount"];
-    const modelStatsValue = model?.stats || model?.metrics || {};
-    const versionStatsValue = version?.stats || version?.metrics || {};
-    return {
-        downloadCount: readStatValue(modelStatsValue, downloadKeys) || readStatValue(versionStatsValue, downloadKeys) || readStatValue(model, downloadKeys),
-        likeCount: readStatValue(modelStatsValue, likeKeys) || readStatValue(versionStatsValue, likeKeys) || readStatValue(model, likeKeys),
+    const page = root?.querySelector(".cmgr-dl-page");
+    if (!page) return;
+    // Rows are patched in place while polling, so actions are delegated.
+    page.onclick = (event) => {
+        const button = event.target.closest("[data-action]");
+        const taskId = button?.dataset.taskId || "";
+        const actions = {
+            "cancel-download": () => cancelDownload(taskId),
+            "retry-download": () => retryDownload(taskId),
+            "remove-download": () => removeDownloadRecord(taskId),
+            "clear-downloads": () => clearFinishedDownloadRecords(),
+        };
+        void actions[button?.dataset.action]?.();
     };
 }
 
-function formatStatCount(value) {
-    const number = Number(value || 0);
-    if (!Number.isFinite(number) || number <= 0) return "0";
-    if (number >= 1_000_000) return `${(number / 1_000_000).toFixed(number >= 10_000_000 ? 0 : 1)}m`;
-    if (number >= 1_000) return `${(number / 1_000).toFixed(number >= 10_000 ? 0 : 1)}k`;
-    return String(Math.round(number));
+function showToast(message, action = null) {
+    popup.toast = message;
+    popup.toastAction = action;
+    if (toastTimer) clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => {
+        popup.toast = "";
+        popup.toastAction = null;
+        if (overlay?.classList.contains("show") && !updatePopupMessages()) renderPopup();
+    }, action ? 6000 : 2600);
+    if (overlay?.classList.contains("show") && !updatePopupMessages()) renderPopup();
 }
 
 function sanitizeDescriptionHtml(html) {

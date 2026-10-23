@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import importlib.util
 import json
 import os
 import sys
 import tempfile
+import threading
 import time
 import types
 import unittest
 import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
 
@@ -114,6 +117,101 @@ class RemoteImageVariantTests(unittest.TestCase):
         )
         self.assertEqual(manager._civitai_media_cache_url(external, 450), external)
         self.assertEqual(manager._civitai_media_cache_url(video, 450), video)
+
+
+class KeepAliveFetchTests(unittest.TestCase):
+    def setUp(self):
+        self.ports = []
+        self.drop_after_first = False
+        test = self
+
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
+
+            def do_GET(self):
+                test.ports.append(self.client_address[1])
+                body = gzip.compress(json.dumps({"path": self.path}).encode("utf-8"))
+                self.send_response(200)
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                # Simulate a server that silently drops idle keep-alive connections.
+                self.close_connection = test.drop_after_first
+
+            def log_message(self, *_args):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.base = f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def tearDown(self):
+        self.server.shutdown()
+        self.server.server_close()
+
+    def test_reuses_connection_and_decodes_gzip(self):
+        first = manager._fetch(f"{self.base}/a?x=1", {}, 5)
+        second = manager._fetch(f"{self.base}/b", {}, 5)
+
+        self.assertEqual(json.loads(first[2]), {"path": "/a?x=1"})
+        self.assertEqual(json.loads(second[2]), {"path": "/b"})
+        self.assertEqual(len(set(self.ports)), 1)
+
+    def test_retries_once_when_kept_connection_was_dropped(self):
+        self.drop_after_first = True
+        manager._fetch(f"{self.base}/a", {}, 5)
+        status, _reason, body = manager._fetch(f"{self.base}/b", {}, 5)
+
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body), {"path": "/b"})
+        self.assertEqual(len(set(self.ports)), 2)
+
+
+class SearchCardTests(unittest.TestCase):
+    def test_search_card_keeps_card_fields_and_drops_heavy_ones(self):
+        image = {"url": "https://image.civitai.com/x/a.jpeg", "type": "image", "hash": "h", "meta": {"prompt": "p"}}
+        model = {
+            "id": 1,
+            "name": "Model",
+            "type": "LORA",
+            "description": "<p>long</p>",
+            "creator": {"username": "me", "image": "avatar"},
+            "modelVersions": [
+                {"id": 10, "baseModel": "SDXL 1.0", "description": "v", "images": [image] * 20, "files": [{"name": "a.safetensors", "sizeKB": 1, "pickleScanMessage": "ok"}]},
+                {"id": 11, "baseModel": "Pony", "images": [image] * 5, "files": []},
+            ],
+        }
+
+        card = manager._search_card(model)
+
+        self.assertNotIn("description", card)
+        self.assertEqual(card["creator"], {"username": "me"})
+        self.assertEqual(len(card["modelVersions"][0]["images"]), manager.SEARCH_PRIMARY_IMAGE_LIMIT)
+        self.assertEqual(len(card["modelVersions"][1]["images"]), 1)
+        self.assertEqual(card["modelVersions"][0]["images"][0], {"url": image["url"], "type": "image"})
+        self.assertEqual(card["modelVersions"][0]["files"], [{"name": "a.safetensors", "sizeKB": 1}])
+        self.assertNotIn("description", card["modelVersions"][0])
+
+
+class ModelDetailCacheTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        manager._MODEL_DETAIL_CACHE.clear()
+
+    def tearDown(self):
+        manager._MODEL_DETAIL_CACHE.clear()
+
+    async def test_repeated_detail_requests_hit_the_cache(self):
+        with (
+            mock.patch.object(manager, "load_config", return_value={"civitai_api_key": ""}),
+            mock.patch.object(manager, "_read_json_url", return_value={"id": 5, "name": "Model"}) as read,
+        ):
+            first = await manager.model_detail_api(_QueryRequest({"id": "5"}))
+            second = await manager.model_detail_api(_QueryRequest({"id": "5"}))
+
+        self.assertEqual(first.body["model"]["name"], "Model")
+        self.assertEqual(second.body, first.body)
+        self.assertEqual(read.call_count, 1)
 
 
 class SearchResultCacheTests(unittest.TestCase):
@@ -529,7 +627,7 @@ class ConfigApiAsyncTests(unittest.IsolatedAsyncioTestCase):
 class DownloadRedirectTests(unittest.TestCase):
     def _redirect(self, target_url):
         request = urllib.request.Request(
-            "https://civitai.com/api/download/models/123",
+            "https://civitai.red/api/download/models/123",
             headers={
                 "Authorization": "Bearer secret",
                 "Cookie": "session=secret",
@@ -554,7 +652,7 @@ class DownloadRedirectTests(unittest.TestCase):
         self.assertEqual(redirected.get_header("User-agent"), "CivitaiManager/test")
 
     def test_same_host_redirect_keeps_credentials(self):
-        redirected = self._redirect("https://civitai.com/api/download/models/123?fileId=456")
+        redirected = self._redirect("https://civitai.red/api/download/models/123?fileId=456")
 
         self.assertEqual(redirected.get_header("Authorization"), "Bearer secret")
         self.assertEqual(redirected.get_header("Cookie"), "session=secret")
@@ -562,8 +660,16 @@ class DownloadRedirectTests(unittest.TestCase):
     def test_fallback_download_url_uses_download_endpoint_without_v1(self):
         self.assertEqual(
             manager._download_url_for({"id": 123}, {}),
-            "https://civitai.com/api/download/models/123",
+            "https://civitai.red/api/download/models/123",
         )
+
+    def test_civitai_com_download_urls_are_rewritten_to_red(self):
+        self.assertEqual(
+            manager._download_url_for({}, {"downloadUrl": "https://civitai.com/api/download/models/5?type=Model"}),
+            "https://civitai.red/api/download/models/5?type=Model",
+        )
+        self.assertFalse(manager._validate_civitai_https("https://civitai.com/api/download/models/5"))
+        self.assertTrue(manager._validate_civitai_https("https://civitai.red/api/download/models/5"))
 
 
 class DownloadJobTests(unittest.TestCase):
@@ -719,6 +825,30 @@ class DownloadApiAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status, 429)
         self.assertEqual(len(manager._DOWNLOAD_STORE.snapshot()), manager.DOWNLOAD_MAX_ACTIVE_JOBS)
+
+    async def test_legacy_civitai_com_payload_is_queued_on_red(self):
+        resolution = {
+            "root_kind": "loras",
+            "absolute_path": "model.safetensors",
+            "relative_path": "Other/Other/model.safetensors",
+            "filename": "model.safetensors",
+            "download_url": "",
+        }
+        with (
+            mock.patch.object(manager, "_ensure_download_workers"),
+            mock.patch.object(manager, "resolve_download_path", return_value=resolution),
+            mock.patch.object(manager._DOWNLOAD_QUEUE, "put_nowait") as put,
+        ):
+            task_id, _ = manager._enqueue_download_request({
+                "kind": "lora",
+                "download_url": "https://civitai.com/api/download/models/1",
+            })
+
+        self.assertEqual(put.call_args.args[0][1], "https://civitai.red/api/download/models/1")
+        self.assertEqual(
+            manager._DOWNLOAD_STORE.jobs[task_id]["retry_payload"]["download_url"],
+            "https://civitai.red/api/download/models/1",
+        )
 
     async def test_status_endpoint_prunes_expired_history(self):
         manager._DOWNLOAD_STORE.retention_seconds = 100

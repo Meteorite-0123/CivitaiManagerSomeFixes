@@ -53,11 +53,28 @@ export function ensureNotificationHost(shell) {
     return host;
 }
 
+// Notices animate in when inserted; rewriting an unchanged notice on every
+// render or poll would replay that animation and make it flicker.
+const renderedNotices = new WeakMap();
+
 export function updateNotificationHost(host, options = {}) {
     if (!host) return false;
     const error = String(options.error || "").trim();
     const toast = String(options.toast || "").trim();
-    host.innerHTML = `
+    const signature = JSON.stringify([error, toast, options.toastAction?.label || "", typeof options.onDismissError === "function"]);
+    if (renderedNotices.get(host) !== signature) {
+        renderedNotices.set(host, signature);
+        host.innerHTML = renderNotices(error, toast, options);
+    }
+    const dismiss = host.querySelector(".cmgr-notice-dismiss");
+    if (dismiss) dismiss.onclick = options.onDismissError;
+    const action = host.querySelector(".cmgr-notice-action");
+    if (action) action.onclick = options.toastAction.onClick;
+    return true;
+}
+
+function renderNotices(error, toast, options) {
+    return `
         ${error ? `
             <div class="cmgr-notice cmgr-error" role="alert">
                 <i class="cmgr-notice-icon" aria-hidden="true">!</i>
@@ -67,14 +84,12 @@ export function updateNotificationHost(host, options = {}) {
         ` : ""}
         ${toast ? `
             <div class="cmgr-notice cmgr-toast" role="status">
-                <i class="cmgr-notice-icon" aria-hidden="true">i</i>
+                <i class="cmgr-notice-icon" aria-hidden="true">✓</i>
                 <span>${escapeHtml(toast)}</span>
+                ${options.toastAction ? `<button class="cmgr-notice-action" type="button">${escapeHtml(options.toastAction.label)}</button>` : ""}
             </div>
         ` : ""}
     `;
-    const dismiss = host.querySelector(".cmgr-notice-dismiss");
-    if (dismiss) dismiss.onclick = options.onDismissError;
-    return true;
 }
 
 export function renderToolbarSearchField(options = {}) {
@@ -82,10 +97,12 @@ export function renderToolbarSearchField(options = {}) {
     const inputAttrs = options.inputAttrs ? ` ${String(options.inputAttrs).trim()}` : "";
     const inputClass = String(options.className || "").replace(/[^a-z0-9_-]+/gi, " ").trim();
     const clearAction = String(options.clearAction || "clear-search");
+    const loading = options.loading === true;
     return `
-        <div class="cmgr-search-wrap">
+        <div class="cmgr-search-wrap ${loading ? "is-loading" : ""}">
             <span class="cmgr-search-mark" aria-hidden="true"></span>
             <input class="cmgr-input cmgr-search${inputClass ? ` ${escapeAttr(inputClass)}` : ""}"${inputAttrs} value="${escapeAttr(value)}" placeholder="${escapeAttr(options.placeholder || t("Search"))}" autocomplete="off" />
+            <span class="cmgr-search-spinner" aria-hidden="true" ${loading ? "" : "hidden"}></span>
             <button class="cmgr-search-clear" type="button" data-action="${escapeAttr(clearAction)}" title="${escapeAttr(t("Clear search"))}" aria-label="${escapeAttr(t("Clear search"))}" ${value ? "" : "hidden"}>×</button>
         </div>
     `;
@@ -96,8 +113,9 @@ export function renderSearchToolbar(options = {}) {
     const subtitle = String(options.subtitle || "");
     const headingHtml = options.headingHtml == null ? "" : String(options.headingHtml);
     const className = String(options.className || "").replace(/[^a-z0-9_-]+/gi, " ").trim();
+    const filterBarHtml = String(options.filterBarHtml || "").trim();
     return `
-        <div class="cmgr-toolbar cmgr-search-toolbar${className ? ` ${escapeAttr(className)}` : ""}">
+        <div class="cmgr-toolbar cmgr-search-toolbar${className ? ` ${escapeAttr(className)}` : ""}${filterBarHtml ? " has-filter-bar" : ""}">
             <div class="cmgr-search-toolbar-main">
                 <div class="cmgr-search-toolbar-heading" title="${escapeAttr([title, subtitle].filter(Boolean).join(" · "))}">
                     ${headingHtml || `
@@ -108,6 +126,28 @@ export function renderSearchToolbar(options = {}) {
                 ${String(options.searchHtml || "")}
             </div>
             <div class="cmgr-search-toolbar-actions">${String(options.actionsHtml || "")}</div>
+            ${filterBarHtml ? `<div class="cmgr-search-toolbar-filters">${filterBarHtml}</div>` : ""}
+        </div>
+    `;
+}
+
+export function renderActiveFilterChips(chips = [], clearAllAction = "reset-all-filters") {
+    const valid = (Array.isArray(chips) ? chips : []).filter((chip) => chip && chip.value);
+    if (!valid.length) return "";
+    return `
+        <div class="cmgr-active-filters" role="region" aria-label="${escapeAttr(t("Adjust filters"))}">
+            <div class="cmgr-active-filter-list">
+                ${valid.map((chip) => `
+                    <button class="cmgr-active-filter-chip" type="button" data-action="${escapeAttr(chip.clearAction || "")}" data-clear-filter="${escapeAttr(chip.key)}" title="${escapeAttr(`${chip.label}: ${chip.value}`)}">
+                        <small>${escapeHtml(chip.label)}:</small>
+                        <b>${escapeHtml(chip.value)}</b>
+                        <i aria-hidden="true">×</i>
+                    </button>
+                `).join("")}
+            </div>
+            ${valid.length > 1 ? `
+                <button class="cmgr-reset-filters-btn" type="button" data-action="${escapeAttr(clearAllAction)}">${escapeHtml(t("Reset filters"))}</button>
+            ` : ""}
         </div>
     `;
 }
@@ -120,12 +160,14 @@ export function renderSearchCombo(options = {}) {
         .filter(Boolean);
     const uniqueItems = Array.from(new Set(items));
     const display = value || options.placeholder || "Choose...";
+    const clearAttr = options.clearAttr ? ` ${String(options.clearAttr).trim()}` : "";
     return `
-        <div class="cmgr-combo" data-combo="${escapeAttr(id)}">
+        <div class="cmgr-combo ${value ? "has-value" : ""}" data-combo="${escapeAttr(id)}">
             <button class="cmgr-combo-control" type="button" data-combo-toggle aria-haspopup="listbox" aria-expanded="false" title="${escapeAttr(display)}">
                 <span class="cmgr-combo-value ${value ? "" : "placeholder"}">${escapeHtml(display)}</span>
                 <span class="cmgr-combo-arrow" aria-hidden="true">⌄</span>
             </button>
+            <button class="cmgr-combo-clear" type="button" data-combo-clear${clearAttr} title="${escapeAttr(options.clearTitle || t("Clear"))}" aria-label="${escapeAttr(options.clearTitle || t("Clear"))}" ${value ? "" : "hidden"}>×</button>
             <div class="cmgr-combo-popover" data-combo-popover>
                 <input class="cmgr-combo-search" data-combo-search value="" placeholder="${escapeAttr(options.searchPlaceholder || "Search...")}" autocomplete="off" />
                 <div class="cmgr-combo-list" data-combo-list role="listbox">
@@ -144,6 +186,7 @@ export function renderSearchCombo(options = {}) {
 export function bindSearchCombo(combo, applyValue) {
     if (!combo || typeof applyValue !== "function") return;
     const toggle = combo.querySelector("[data-combo-toggle]");
+    const clearBtn = combo.querySelector("[data-combo-clear]");
     const searchInput = combo.querySelector("[data-combo-search]");
     const options = Array.from(combo.querySelectorAll("[data-combo-option]"));
     const empty = combo.querySelector("[data-combo-empty]");
@@ -217,6 +260,13 @@ export function bindSearchCombo(combo, applyValue) {
         event.stopPropagation();
         setOpen(!combo.classList.contains("open"));
     };
+    if (clearBtn) {
+        clearBtn.onclick = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            choose("");
+        };
+    }
     searchInput.oninput = () => filterOptions(searchInput.value);
     searchInput.onkeydown = (event) => {
         if (event.key === "Escape") {
@@ -255,30 +305,6 @@ export function bindSearchCombo(combo, applyValue) {
     });
 }
 
-export function renderFileActions(options = {}) {
-    const actions = options.actions || {};
-    const favorite = options.favorite === true;
-    return `
-        <section class="cmgr-file-actions" aria-label="${escapeAttr(t("File Actions"))}">
-            <div class="cmgr-section-title cmgr-file-actions-title">${escapeHtml(t("File Actions"))}</div>
-            <div class="cmgr-file-action-grid">
-                ${options.showFavorite === false ? "" : `<button class="cmgr-file-action ${favorite ? "is-active" : ""}" data-action="${escapeAttr(actions.favorite || "favorite-asset")}">
-                    <i class="cmgr-file-action-icon is-favorite" aria-hidden="true">★</i>
-                    <span><b>${escapeHtml(t(favorite ? "Unfavorite" : "Favorite"))}</b><small>${escapeHtml(t(favorite ? "Remove from favorites" : "Keep this asset easy to find"))}</small></span>
-                </button>`}
-                <button class="cmgr-file-action" data-action="${escapeAttr(actions.open || "open-folder")}">
-                    <i class="cmgr-file-action-icon is-folder" aria-hidden="true"></i>
-                    <span><b>${escapeHtml(t("Open Folder"))}</b><small>${escapeHtml(t("Show in File Explorer"))}</small></span>
-                </button>
-            </div>
-            <div class="cmgr-file-danger-row">
-                <span><b>${escapeHtml(t("Delete local file"))}</b><small>${escapeHtml(t("Also removes companion metadata"))}</small></span>
-                <button class="cmgr-danger" data-action="${escapeAttr(actions.delete || "delete-asset")}">${escapeHtml(t("Delete"))}</button>
-            </div>
-        </section>
-    `;
-}
-
 export function renderCollectionEmptyState(options = {}) {
     const kind = String(options.kind || "default").replace(/[^a-z0-9_-]+/gi, "-");
     const hints = (Array.isArray(options.hints) ? options.hints : [])
@@ -305,49 +331,102 @@ export function renderCollectionEmptyState(options = {}) {
     `;
 }
 
+function renderFavoriteStar() {
+    return '<svg class="cmgr-favorite-star" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 3 2.8 5.7 6.2.9-4.5 4.4 1.1 6.2-5.6-2.9-5.6 2.9 1.1-6.2L3 9.6l6.2-.9L12 3Z"/></svg>';
+}
+
 export function renderFavoriteControls(options = {}) {
     const favorite = options.favorite === true;
     const folders = Array.isArray(options.folders) ? options.folders : [];
     const folderId = String(options.folderId || "");
     const toggleAction = String(options.toggleAction || "toggle-favorite");
     const folderAction = String(options.folderAction || "assign-favorite-folder");
+    const compact = options.compact === true;
     return `
-        <section class="cmgr-favorite-controls ${favorite ? "is-active" : ""}" aria-label="${escapeAttr(t("Favorite"))}">
-            <button class="cmgr-favorite-toggle ${favorite ? "is-active" : ""}" data-action="${escapeAttr(toggleAction)}" type="button" title="${escapeAttr(t(favorite ? "Unfavorite" : "Favorite"))}">
-                <span class="cmgr-favorite-toggle-star" aria-hidden="true">${favorite ? "★" : "☆"}</span>
+        <section class="cmgr-favorite-controls ${favorite ? "is-active" : ""} ${compact ? "is-compact" : ""}" aria-label="${escapeAttr(t("Favorite"))}">
+            <button class="cmgr-favorite-toggle ${favorite ? "is-active" : ""}" data-action="${escapeAttr(toggleAction)}" type="button" aria-pressed="${favorite}" title="${escapeAttr(t(favorite ? "Click to remove from favorites" : "Save for later without downloading"))}">
+                <span class="cmgr-favorite-toggle-star" aria-hidden="true">${renderFavoriteStar()}</span>
                 <span class="cmgr-favorite-toggle-copy">
                     <b>${escapeHtml(t(favorite ? "Favorited" : "Favorite"))}</b>
-                    <small>${escapeHtml(t(favorite ? "Click to remove from favorites" : "Save for later without downloading"))}</small>
+                    ${compact ? "" : `<small>${escapeHtml(t(favorite ? "Click to remove from favorites" : "Save for later without downloading"))}</small>`}
                 </span>
             </button>
-            ${favorite ? `
-                <label class="cmgr-favorite-folder-select">
+            <button class="cmgr-favorite-organize" data-favorite-organize-toggle type="button" aria-label="${escapeAttr(t("Favorite Folder"))}" aria-expanded="false" title="${escapeAttr(t(favorite ? "Favorite Folder" : "Favorite to organize"))}" ${favorite ? "" : "disabled"}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7V5a1 1 0 0 1 1-1h5l2 3h9a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V7Z"/></svg>
+            </button>
+            <div class="cmgr-favorite-popover" hidden>
+                <label class="cmgr-favorite-folder-select" title="${escapeAttr(t("Favorite Folder"))}">
                     <span>${escapeHtml(t("Favorite Folder"))}</span>
                     <select class="cmgr-input" data-action="${escapeAttr(folderAction)}">
                         <option value="" ${folderId ? "" : "selected"}>${escapeHtml(t("No folder"))}</option>
                         ${folders.map((folder) => `<option value="${escapeAttr(folder.id)}" ${folderId === String(folder.id) ? "selected" : ""}>${escapeHtml(folder.name)}</option>`).join("")}
                     </select>
                 </label>
-            ` : `<span class="cmgr-favorite-hint">${escapeHtml(t("Remote models can be favorited before downloading."))}</span>`}
+            </div>
         </section>
     `;
 }
 
-export function renderFavoriteCardMark(favorite) {
-    return favorite
-        ? `<span class="cmgr-card-favorite-mark" title="${escapeAttr(t("Favorited"))}" aria-label="${escapeAttr(t("Favorited"))}"><span aria-hidden="true">★</span>${escapeHtml(t("Favorite"))}</span>`
-        : "";
+export function renderFavoriteCardMark(favorite, interactive = true) {
+    if (!interactive) {
+        return favorite
+            ? `<span class="cmgr-card-favorite-mark is-active" title="${escapeAttr(t("Favorited"))}" aria-label="${escapeAttr(t("Favorited"))}"><span aria-hidden="true">${renderFavoriteStar()}</span></span>`
+            : "";
+    }
+    return `
+        <button
+            class="cmgr-card-favorite-mark cmgr-card-favorite-btn ${favorite ? "is-active" : ""}"
+            type="button"
+            data-card-favorite
+            title="${escapeAttr(t(favorite ? "Unfavorite" : "Favorite"))}"
+            aria-label="${escapeAttr(t(favorite ? "Unfavorite" : "Favorite"))}"
+            aria-pressed="${favorite ? "true" : "false"}"
+        >
+            <span aria-hidden="true">${renderFavoriteStar()}</span>
+        </button>
+    `;
 }
 
 export function syncFavoriteCardMark(card, favorite) {
     if (!card) return false;
     const current = [...card.children].find((child) => child.classList?.contains("cmgr-card-favorite-mark"));
+    if (current && current.classList.contains("cmgr-card-favorite-btn")) {
+        current.classList.toggle("is-active", Boolean(favorite));
+        current.title = t(favorite ? "Unfavorite" : "Favorite");
+        current.setAttribute("aria-label", t(favorite ? "Unfavorite" : "Favorite"));
+        current.setAttribute("aria-pressed", favorite ? "true" : "false");
+        return true;
+    }
     if (!favorite) {
         current?.remove();
         return true;
     }
     if (!current) card.insertAdjacentHTML("afterbegin", renderFavoriteCardMark(true));
     return true;
+}
+
+export function syncFavoriteControls(root, favorite, folderId = "") {
+    root?.querySelectorAll(".cmgr-favorite-controls").forEach((section) => {
+        const toggle = section.querySelector(".cmgr-favorite-toggle");
+        const organize = section.querySelector("[data-favorite-organize-toggle]");
+        if (!toggle || !organize) return;
+        section.classList.toggle("is-active", favorite);
+        toggle.classList.toggle("is-active", favorite);
+        toggle.setAttribute("aria-pressed", String(favorite));
+        toggle.title = t(favorite ? "Click to remove from favorites" : "Save for later without downloading");
+        toggle.querySelector("b").textContent = t(favorite ? "Favorited" : "Favorite");
+        const hint = toggle.querySelector("small");
+        if (hint) hint.textContent = toggle.title;
+        organize.disabled = !favorite;
+        organize.title = t(favorite ? "Favorite Folder" : "Favorite to organize");
+        const select = section.querySelector("select");
+        if (select) select.value = folderId || "";
+        if (!favorite) {
+            section.classList.remove("is-organizing");
+            section.querySelector(".cmgr-favorite-popover").hidden = true;
+            organize.setAttribute("aria-expanded", "false");
+        }
+    });
 }
 
 export function renderFavoriteFolderSidebar(options = {}) {

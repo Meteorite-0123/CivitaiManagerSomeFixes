@@ -1,6 +1,6 @@
 [project]
 name = "CivitaiManager"
-version = "1.0.4"
+version = "1.1.0"
 description = "Browse, download, and organize Civitai assets inside ComfyUI."
 readme = "README.md"
 requires-python = ">=3.10"

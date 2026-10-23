@@ -158,7 +158,7 @@ function createLoraRow(node, handlers) {
     return row;
 }
 
-function updateRange(range, value) {
+export function paintStrengthRange(range, value) {
     const min = Number(range.min);
     const max = Number(range.max);
     const span = max - min || 1;
@@ -270,7 +270,7 @@ export function syncLoraWidgets(node, entries, handlers, { restoring = false } =
         row.range.max = String(Math.max(4, strength));
         row.range.value = String(strength);
         row.range.disabled = !enabled;
-        updateRange(row.range, strength);
+        paintStrengthRange(row.range, strength);
         if (document.activeElement !== row.strength) row.strength.value = formatStrength(strength);
         row.strength.disabled = !enabled;
         return row;

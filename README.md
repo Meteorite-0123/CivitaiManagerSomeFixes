@@ -4,7 +4,7 @@
 
 ### 在 ComfyUI 内完成 Civitai 模型的发现、下载、整理与使用
 
-[![Version](https://img.shields.io/badge/version-1.0.4-4f8cff?style=flat-square)](https://github.com/nregret/CivitaiManager)
+[![Version](https://img.shields.io/badge/version-1.1.0-4f8cff?style=flat-square)](https://github.com/nregret/CivitaiManager)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-CivitaiManager-8b5cf6?style=flat-square)](https://registry.comfy.org/zh/publishers/nnegret/nodes/CivitaiManager)
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.10-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![ComfyUI](https://img.shields.io/badge/ComfyUI-Custom_Node-111827?style=flat-square)](https://github.com/comfyanonymous/ComfyUI)
@@ -31,7 +31,8 @@
 
 - 覆盖 Checkpoint、UNet、LoRA 与 Workflow。
 - 支持关键词、基础模型、分类、标签和排序组合筛选。
-- 支持多版本、多文件和多预览图切换。
+- 支持多版本、多文件和多预览图切换；点击预览图可在管理器内查看大图。
+- 卡片支持方向键浏览；窗口较窄时详情以侧滑抽屉展开，`Esc` 收起。
 - 可在下载前确认资源类型、基础模型、分类和文件名。
 
 <p align="center">

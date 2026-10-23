@@ -30,6 +30,35 @@ export async function apiPost(path, body) {
     return data;
 }
 
+const MODEL_DETAIL_TTL = 5 * 60 * 1000;
+const MODEL_DETAIL_LIMIT = 60;
+const modelDetails = new Map();
+
+// Hover prefetch and both popups share these requests, so a click on a card
+// that was hovered renders the full detail without waiting.
+export function fetchModelDetail(id) {
+    const key = String(id || "");
+    const cached = modelDetails.get(key);
+    if (cached && Date.now() - cached.time < MODEL_DETAIL_TTL) return cached.request;
+    const entry = { time: Date.now(), model: null };
+    entry.request = apiGet(`/model-detail?id=${encodeURIComponent(key)}`).then((data) => {
+        entry.model = data.model || null;
+        return entry.model;
+    }, (error) => {
+        modelDetails.delete(key);
+        throw error;
+    });
+    modelDetails.delete(key);
+    modelDetails.set(key, entry);
+    if (modelDetails.size > MODEL_DETAIL_LIMIT) modelDetails.delete(modelDetails.keys().next().value);
+    return entry.request;
+}
+
+export function peekModelDetail(id) {
+    const entry = modelDetails.get(String(id || ""));
+    return entry && Date.now() - entry.time < MODEL_DETAIL_TTL ? entry.model : null;
+}
+
 function searchCacheKey(path) {
     return `${SEARCH_CACHE_VERSION}:${path}`;
 }
@@ -48,23 +77,24 @@ export function getSearchCache(path) {
 }
 
 export function setSearchCache(path, data) {
+    let cache = {};
     try {
-        const raw = localStorage.getItem(SEARCH_CACHE_KEY);
-        const cache = raw ? JSON.parse(raw) : {};
-        cache[searchCacheKey(path)] = { data, timestamp: Date.now() };
-        const keys = Object.keys(cache);
-        if (keys.length > SEARCH_CACHE_LIMIT) {
-            keys.sort((a, b) => Number(cache[a]?.timestamp || 0) - Number(cache[b]?.timestamp || 0));
-            for (const key of keys.slice(0, keys.length - SEARCH_CACHE_LIMIT)) {
-                delete cache[key];
-            }
-        }
-        localStorage.setItem(SEARCH_CACHE_KEY, JSON.stringify(cache));
-    } catch (err) {
-        if (err?.name === "QuotaExceededError") {
-            try {
-                localStorage.removeItem(SEARCH_CACHE_KEY);
-            } catch (_) {}
+        cache = JSON.parse(localStorage.getItem(SEARCH_CACHE_KEY) || "{}") || {};
+    } catch (_) {}
+    const key = searchCacheKey(path);
+    const entries = Object.entries(cache)
+        .filter(([entryKey]) => entryKey !== key && entryKey.startsWith(`${SEARCH_CACHE_VERSION}:`))
+        .sort((left, right) => Number(right[1]?.timestamp || 0) - Number(left[1]?.timestamp || 0));
+    // Taxonomy is merged from every live response, so storing it only costs quota.
+    entries.unshift([key, { data: { ...data, taxonomy: undefined }, timestamp: Date.now() }]);
+    let kept = entries.slice(0, SEARCH_CACHE_LIMIT);
+    while (kept.length) {
+        try {
+            localStorage.setItem(SEARCH_CACHE_KEY, JSON.stringify(Object.fromEntries(kept)));
+            return;
+        } catch (error) {
+            if (error?.name !== "QuotaExceededError") return;
+            kept = kept.slice(0, -1);
         }
     }
 }

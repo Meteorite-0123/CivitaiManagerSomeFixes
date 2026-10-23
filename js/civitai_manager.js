@@ -3,32 +3,51 @@ import {
     API,
     ASSET_KINDS,
     CIVITAI_CATEGORY_FILTERS,
-    DETAIL_PREVIEW_LIMIT,
     HIGH_PRIORITY_PREVIEW_LOADS,
     INITIAL_PREVIEW_LOADS,
     ROOT_KINDS,
     ROOT_LOCAL_FOLDER,
     TABS,
-    TRANSPARENT_PIXEL,
 } from "./civitai/constants.js";
-import { apiGet, apiPost, clearSearchCache, getSearchCache, setSearchCache } from "./civitai/api.js";
+import { apiGet, apiPost, clearSearchCache, fetchModelDetail, getSearchCache, peekModelDetail, setSearchCache } from "./civitai/api.js";
+import { animateCardsIn, bindCardMedia, loadMoreSkeletonCount, observeCardMedia, preconnectMediaHosts, renderCardMedia } from "./civitai/card_media.js";
+import { ACTIVE_DOWNLOAD_STATUSES, patchDownloadPage, patchDownloadProgress, renderDownloadPage, renderDownloadProgress, trackDownloadRates } from "./civitai/downloads.js";
 import {
     bindFavoriteFolderSidebar,
     bindSearchCombo,
     ensureNotificationHost,
+    renderActiveFilterChips,
     renderCollectionEmptyState,
     renderFavoriteCardMark,
     renderFavoriteControls,
+    syncFavoriteControls,
     renderFavoriteFolderSidebar,
-    renderFileActions,
     renderPromoLinks,
-    renderSearchCombo,
-    renderSearchToolbar,
-    renderToolbarSearchField,
     syncFavoriteCardMark,
     updateNotificationHost,
 } from "./civitai/components.js";
 import {
+    bindDetailInteractions,
+    formatBytes,
+    formatStatCount,
+    galleryItemsForModel,
+    galleryItemsForUrl,
+    isDetailDrawerOpen,
+    modelFacts,
+    modelStats,
+    renderDescriptionSkeleton,
+    renderDetailDismiss,
+    renderDetailFacts,
+    renderDetailGallery,
+    renderDetailSkeleton,
+    renderDetailTags,
+    renderMatchRow,
+    setDetailDrawer,
+    setDetailLoading,
+    swapDetail,
+} from "./civitai/detail.js";
+import {
+    assetKindForRoot,
     favoriteEntryForLocal,
     favoriteEntryForRemote,
     favoriteItemForLocal,
@@ -42,10 +61,11 @@ import {
     createPreviewMedia,
     findModelPreviewSource,
     isModelPreviewFiltered,
-    looksLikeVideoUrl,
 } from "./civitai/media.js";
 import { state } from "./civitai/state.js";
 import { injectStyles } from "./civitai/styles.js";
+import { injectSelectorStyles } from "./civitai/selector_styles.js";
+import { selectorIcon, renderSelectorCombo, renderSelectorSearch, renderSelectorToolbar, renderSelectorSort, renderSelectorStats, animateSelectorFolder, bindSelectorMenus } from "./civitai/selector_ui.js";
 
 let overlay = null;
 let bodyEl = null;
@@ -53,8 +73,6 @@ let navEl = null;
 let notificationHost = null;
 let pollTimer = null;
 let toastTimer = null;
-let previewObserver = null;
-let previewSetupFrame = 0;
 let searchRequestSeq = 0;
 let searchAbortController = null;
 let downloadsPollingFast = false;
@@ -64,10 +82,17 @@ let themeColorProbe = null;
 let responsiveSearchTimer = null;
 let pendingResponsiveSearch = false;
 let lastResponsiveSearchKey = "";
-let comboOutsideBound = false;
 let lastDownloadNavCount = -1;
 let sidebarEntryClickBound = false;
+let filtersOpen = false;
+let returnFocus = null;
+let lastModelSelectAt = 0;
+// Last markup written by download polling, so unchanged surfaces are left alone.
+const liveMarkup = new WeakMap();
 const SIDEBAR_TAB_ID = "civitai-manager";
+// Discover, Library and Favorites each keep their own detail selection.
+const SELECTION_FIELDS = ["selectedModel", "selectedVersionId", "selectedFileName", "pathOverrides", "resolution", "selectedAssetId"];
+const tabSelections = {};
 let libraryMetadataBatch = {
     running: false,
     cancelRequested: false,
@@ -77,18 +102,6 @@ let libraryMetadataBatch = {
     notFound: 0,
     failed: 0,
     current: "",
-};
-
-if (!window.__cmgrLoadedImageUrls) {
-    window.__cmgrLoadedImageUrls = new Set();
-}
-window.__cmgrMarkImageLoaded = (url) => {
-    if (!url || String(url).startsWith("data:")) return;
-    window.__cmgrLoadedImageUrls.add(url);
-    if (window.__cmgrLoadedImageUrls.size > 2000) {
-        const first = window.__cmgrLoadedImageUrls.values().next().value;
-        window.__cmgrLoadedImageUrls.delete(first);
-    }
 };
 
 app.registerExtension({
@@ -159,6 +172,37 @@ function themeColorLuminance(value) {
             : ((srgb + 0.055) / 1.055) ** 2.4;
     });
     return (0.2126 * red) + (0.7152 * green) + (0.0722 * blue);
+}
+
+function themeColorHsl(value) {
+    const rgb = resolveThemeRgb(value);
+    if (!rgb) return null;
+    const [red, green, blue] = rgb.map((channel) => Math.max(0, Math.min(255, channel)) / 255);
+    const max = Math.max(red, green, blue);
+    const chroma = max - Math.min(red, green, blue);
+    if (!chroma) return { hue: 0, saturation: 0, chroma };
+    const lightness = max - chroma / 2;
+    const sector = max === red ? ((green - blue) / chroma + 6) % 6 : max === green ? (blue - red) / chroma + 2 : (red - green) / chroma + 4;
+    return { hue: sector * 60, saturation: chroma / (1 - Math.abs(2 * lightness - 1)), chroma };
+}
+
+// Palettes have no accent token, so the most saturated palette color carries
+// the theme hue; neutral palettes fall back to ComfyUI's primary blue. The
+// lightness is fixed per theme so text and filled buttons stay readable.
+function themeAccent(style, isLightTheme) {
+    let source = null;
+    for (const name of ["--border-color", "--interface-panel-selected-surface", "--comfy-menu-secondary-bg", "--content-hover-bg", "--content-bg"]) {
+        const hsl = themeColorHsl(style.getPropertyValue(name).trim());
+        if (hsl && hsl.chroma >= 0.12 && (!source || hsl.chroma > source.chroma)) source = hsl;
+    }
+    source ||= themeColorHsl(readCssColor(style, ["--primary-background", "--p-primary-color"]));
+    if (!source) return {};
+    const hue = Math.round(source.hue);
+    const saturation = Math.round(Math.min(Math.max(source.saturation, 0.35), 0.6) * 100);
+    return {
+        text: `hsl(${hue} ${saturation}% ${isLightTheme ? 38 : 70}%)`,
+        fill: `hsl(${hue} ${saturation}% ${isLightTheme ? 42 : 44}%)`,
+    };
 }
 
 function firstVisibleElement(selectors) {
@@ -268,7 +312,10 @@ function syncThemeVariables() {
     const readableMutedColor = panelLuminance === null
         ? mutedColor
         : (isLightTheme ? "#52525b" : "#b8bec7");
+    const accent = themeAccent(rootStyle, isLightTheme);
 
+    setRootVariable("--cmgr-sampled-accent", accent.text);
+    setRootVariable("--cmgr-sampled-primary", accent.fill);
     setRootVariable("--cmgr-sampled-panel-bg", panelBg);
     setRootVariable("--cmgr-sampled-card-bg", cardBg);
     setRootVariable("--cmgr-sampled-control-bg", controlBg);
@@ -381,43 +428,129 @@ function createFallbackLeftButton() {
 }
 
 function openOverlay() {
+    returnFocus = document.activeElement;
     if (overlay) {
         overlay.classList.add("show");
         render();
         return;
     }
+    injectSelectorStyles();
+    preconnectMediaHosts();
+    filtersOpen = window.matchMedia("(min-width: 1180px)").matches;
     overlay = document.createElement("div");
-    overlay.className = "cmgr-overlay show";
+    overlay.className = "cmgr-overlay cmgr-selector-overlay show";
     overlay.innerHTML = `
-        <div class="cmgr-shell" role="dialog" aria-label="${escapeAttr(t("CivitaiManager"))}">
-            <div class="cmgr-topbar">
-                <div>
+        <div class="cmgr-shell cmgr-selector-shell" role="dialog" aria-modal="true" aria-label="${escapeAttr(t("CivitaiManager"))}">
+            <div class="cmgr-topbar cmgr-selector-topbar">
+                <div class="cmgr-selector-heading">
+                    ${selectorIcon("layers")}
                     <div class="cmgr-title">${escapeHtml(t("CivitaiManager"))}</div>
-                    <div class="cmgr-subtitle">${escapeHtml(t("Browse, download, and organize Checkpoints, UNet, LoRA, and Workflows from Civitai."))}</div>
                 </div>
                 <div class="cmgr-topbar-actions">
-                    ${renderPromoLinks()}
-                    <button class="cmgr-icon-btn" data-action="close" title="${escapeAttr(t("Close"))}">${escapeHtml(t("Cancel"))}</button>
+                    <button class="cmgr-selector-filter-toggle" type="button" data-action="toggle-manager-filters" aria-label="${escapeAttr(t("Adjust filters"))}" aria-controls="cmgr-manager-filters">${selectorIcon("panel")}<span>${escapeHtml(t("Adjust filters"))}</span></button>
+                    <button class="cmgr-selector-close" type="button" data-action="close" aria-label="${escapeAttr(t("Close"))}" title="${escapeAttr(t("Close"))} (Esc)">${selectorIcon("close")}</button>
                 </div>
             </div>
-            <div class="cmgr-layout">
-                <nav class="cmgr-nav"></nav>
-                <main class="cmgr-body"></main>
+            <div class="cmgr-selector-workspace">
+                <nav class="cmgr-selector-tabs" role="tablist" aria-orientation="vertical" aria-label="${escapeAttr(t("Views"))}"></nav>
+                <div class="cmgr-layout cmgr-selector-layout">
+                    <button class="cmgr-selector-filter-backdrop" type="button" aria-label="${escapeAttr(t("Close"))}"></button>
+                    <aside class="cmgr-nav cmgr-selector-nav" id="cmgr-manager-filters" aria-label="${escapeAttr(t("Adjust filters"))}"></aside>
+                    <main class="cmgr-body cmgr-selector-body" id="cmgr-manager-content" role="tabpanel"></main>
+                </div>
             </div>
+            <footer class="cmgr-selector-footer">
+                <button class="cmgr-selector-node-status" type="button" data-action="view-library"></button>
+                <div>${renderPromoLinks()}<span class="cmgr-selector-escape"><kbd>Esc</kbd> ${escapeHtml(t("Close"))}</span></div>
+            </footer>
         </div>
     `;
     document.body.appendChild(overlay);
     navEl = overlay.querySelector(".cmgr-nav");
     bodyEl = overlay.querySelector(".cmgr-body");
     notificationHost = ensureNotificationHost(overlay.querySelector(".cmgr-shell"));
-    overlay.querySelector('[data-action="close"]').onclick = () => overlay.classList.remove("show");
+    overlay.querySelector('[data-action="close"]').onclick = closeOverlay;
+    overlay.querySelector('[data-action="toggle-manager-filters"]').onclick = () => setManagerFiltersOpen(!filtersOpen);
+    overlay.querySelector('.cmgr-selector-filter-backdrop').onclick = () => setManagerFiltersOpen(false);
+    overlay.querySelector('[data-action="view-library"]').onclick = () => switchManagerTab("Library");
+    const handleKey = (event) => {
+        if (!overlay.classList.contains("show")) return;
+        event.stopPropagation();
+        if (event.key === "Escape" && !event.defaultPrevented) {
+            event.preventDefault();
+            const menu = overlay.querySelector(".cmgr-selector-tools[open]");
+            if (menu) {
+                menu.open = false;
+                menu.querySelector("summary").focus();
+            } else if (isDetailDrawerOpen(overlay)) {
+                state.detailOpen = false;
+                setDetailDrawer(overlay, false);
+                overlay.querySelector(".cmgr-card.selected")?.focus({ preventScroll: true });
+            } else if (filtersOpen && window.matchMedia("(max-width: 1179px)").matches) setManagerFiltersOpen(false);
+            else closeOverlay();
+        }
+        if (event.key !== "Tab") return;
+        const controls = [...overlay.querySelectorAll('button, summary, input, select, textarea, a[href], [tabindex="0"]')]
+            .filter((element) => !element.disabled && element.tabIndex >= 0 && element.getClientRects().length);
+        if (!overlay.contains(document.activeElement) || document.activeElement === (event.shiftKey ? controls[0] : controls.at(-1))) {
+            event.preventDefault();
+            (event.shiftKey ? controls.at(-1) : controls[0])?.focus();
+        }
+    };
+    overlay.addEventListener("keydown", handleKey);
+    document.addEventListener("keydown", handleKey);
     overlay.addEventListener("click", (event) => {
-        if (event.target === overlay) overlay.classList.remove("show");
+        if (event.target === overlay) closeOverlay();
     });
+    bindDetailInteractions(overlay, { onCloseDetail: () => { state.detailOpen = false; } });
+    bindCardMedia(overlay);
     state.mounted = true;
     hydrateInitialData();
     render();
+    overlay.querySelector('[role="tab"][aria-selected="true"]')?.focus({ preventScroll: true });
     startPolling();
+}
+
+function closeOverlay() {
+    overlay.querySelectorAll("video").forEach((video) => video.pause());
+    overlay.classList.remove("show");
+    if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+}
+
+function setManagerFiltersOpen(open) {
+    filtersOpen = open;
+    overlay.querySelector('.cmgr-selector-layout').classList.toggle("filters-open", open);
+    const button = overlay.querySelector('[data-action="toggle-manager-filters"]');
+    button.setAttribute("aria-expanded", String(open));
+    if (!open && navEl.contains(document.activeElement)) button.focus({ preventScroll: true });
+}
+
+function switchManagerTab(tab) {
+    if (tab !== state.activeTab) {
+        tabSelections[state.activeTab] = Object.fromEntries(SELECTION_FIELDS.map((field) => [field, state[field]]));
+        Object.assign(state, tabSelections[tab] || {
+            selectedModel: null,
+            selectedVersionId: "",
+            selectedFileName: "",
+            pathOverrides: {},
+            resolution: null,
+            selectedAssetId: "",
+        });
+        state.detailOpen = false;
+        state.resolvingPath = false;
+    }
+    state.activeTab = tab;
+    const needsPath = ["Discover", "Favorites"].includes(tab) && state.selectedModel && !state.resolution;
+    if (tab === "Library") void loadLibrary();
+    if (tab === "Favorites") void loadFavorites(true);
+    if (tab === "Downloads") void loadDownloads();
+    if (tab === "Discover") {
+        void loadTaxonomy(state.assetKind, { silent: true });
+        if (!state.searchItems.length) void search(true, { silent: true });
+        else if (!state.selectedModel) void selectModel(state.searchItems[0]);
+    }
+    render();
+    if (needsPath) void resolveSelectedPath({ detailOnly: true, pathOnly: true });
 }
 
 async function hydrateInitialData() {
@@ -521,7 +654,12 @@ function selectedFavorite() {
     return state.favoriteItems.find((item) => item.key === state.selectedFavoriteKey) || null;
 }
 
-function remoteFavorite(model = state.selectedModel, assetKind = state.assetKind) {
+// A favorite keeps its own asset kind; Discover's kind tabs must not change.
+function detailAssetKind() {
+    return state.activeTab === "Favorites" ? selectedFavorite()?.asset_kind || state.assetKind : state.assetKind;
+}
+
+function remoteFavorite(model = state.selectedModel, assetKind = detailAssetKind()) {
     return favoriteEntryForRemote(state.favoriteItems, model, assetKind);
 }
 
@@ -549,10 +687,14 @@ function refreshFavoriteSurface() {
     refreshNav();
     syncVisibleFavoriteCardMarks();
     if (state.activeTab === "Discover") {
-        if (renderSelectedModelDetail()) return;
+        const favorite = remoteFavorite();
+        syncFavoriteControls(bodyEl, Boolean(favorite), favorite?.folder_id);
+        return;
     }
     if (state.activeTab === "Library") {
-        if (renderSelectedAssetDetail()) return;
+        const favorite = localFavorite();
+        syncFavoriteControls(bodyEl, Boolean(favorite), favorite?.folder_id);
+        return;
     }
     render();
 }
@@ -565,7 +707,7 @@ async function setFavoriteItem(item, favorite, folderId) {
     return data;
 }
 
-async function toggleRemoteFavorite(model = state.selectedModel, assetKind = state.assetKind) {
+async function toggleRemoteFavorite(model = state.selectedModel, assetKind = detailAssetKind()) {
     if (!model) return;
     const existing = remoteFavorite(model, assetKind);
     try {
@@ -797,7 +939,8 @@ function resetSearchResults() {
     state.cursor = "";
     state.nextCursor = "";
     state.searchItems = [];
-    state.selectedModel = null;
+    if (state.activeTab === "Discover") state.selectedModel = null;
+    else delete tabSelections.Discover;
     state.scroll.discoverResults = 0;
 }
 
@@ -807,8 +950,8 @@ function applySearchData(data, reset, silent) {
     state.searchItems = reset ? nextItems : [...state.searchItems, ...nextItems];
     state.contentFilterActive = data?.content_filter_active === true;
     if (reset) {
-        state.selectedModel = null;
-        state.detailPreviewIndex = 0;
+        if (state.activeTab === "Discover") state.selectedModel = null;
+        else delete tabSelections.Discover;
         state.scroll.discoverResults = 0;
     }
     state.nextCursor = data?.metadata?.nextCursor || "";
@@ -829,7 +972,20 @@ function applySearchData(data, reset, silent) {
 function finishSearchRender(reset) {
     state.loadingSearch = false;
     state.autoLoadingMore = false;
+    const autoPick = reset && state.activeTab === "Discover" && !state.selectedModel ? state.searchItems[0] : null;
+    if (autoPick) {
+        state.selectedModel = autoPick;
+        state.pathOverrides = {};
+        state.resolution = null;
+        const firstVersion = getVersions(autoPick)[0] || {};
+        state.selectedVersionId = String(firstVersion.id || "");
+        state.selectedFileName = String(getFiles(firstVersion)[0]?.name || "");
+    }
     render({ preserveScroll: !reset });
+    if (reset && state.activeTab === "Discover") animateCardsIn(bodyEl.querySelectorAll(".cmgr-discover .cmgr-results > .cmgr-card[data-model-id]"));
+    if (autoPick) {
+        void selectModel(autoPick);
+    }
     if (pendingResponsiveSearch && state.activeTab === "Discover") {
         pendingResponsiveSearch = false;
         scheduleResponsiveSearch(true);
@@ -868,7 +1024,7 @@ function scheduleResponsiveSearch(immediate = false) {
         pendingResponsiveSearch = false;
         lastResponsiveSearchKey = signature;
         search(true, { silent: true });
-    }, immediate ? 0 : 450);
+    }, immediate ? 0 : 300);
 }
 
 function setDiscoverLoadStatus(visible) {
@@ -877,7 +1033,7 @@ function setDiscoverLoadStatus(visible) {
     if (!results) return;
     results.querySelectorAll(".cmgr-load-more-skeleton").forEach((item) => item.remove());
     if (visible) {
-        results.insertAdjacentHTML("beforeend", renderLoadingMoreSkeletons());
+        results.insertAdjacentHTML("beforeend", renderLoadingMoreSkeletons(loadMoreSkeletonCount(results)));
     }
 }
 
@@ -887,31 +1043,43 @@ function appendDiscoverItems(items, startIndex = 0) {
     if (!results) return false;
     results.querySelectorAll(".cmgr-load-more-skeleton").forEach((item) => item.remove());
     results.insertAdjacentHTML("beforeend", items.map((model, index) => renderModelCard(model, startIndex + index)).join(""));
+    animateCardsIn([...results.querySelectorAll(":scope > .cmgr-card[data-model-id]")].slice(startIndex));
     bindDiscoverEvents(bodyEl);
-    scheduleLazyPreviews(results);
+    observeCardMedia(results);
     return true;
 }
 
 async function selectModel(model) {
-    state.selectedModel = model;
+    const isCurrent = () => state.activeTab === "Discover" && String(state.selectedModel?.id || "") === String(model.id || "");
+    const prefetched = peekModelDetail(model.id);
+    state.selectedModel = prefetched || model;
     state.pathOverrides = {};
     state.resolution = null;
-    state.detailPreviewIndex = 0;
-    const firstVersion = getVersions(model)[0] || {};
+    const firstVersion = getVersions()[0] || {};
     state.selectedVersionId = String(firstVersion.id || "");
     state.selectedFileName = String(getFiles(firstVersion)[0]?.name || "");
     renderSelectedModelDetail();
-    try {
-        const detail = await apiGet(`/model-detail?id=${encodeURIComponent(model.id)}`);
-        if (detail.success && detail.model) {
-            state.selectedModel = detail.model;
-            const version = getSelectedVersion();
-            state.selectedVersionId = String(version?.id || getVersions(detail.model)[0]?.id || "");
-            state.selectedFileName = String(getSelectedFile()?.name || "");
-            renderSelectedModelDetail();
+    // Arrow-key browsing selects in quick succession; only fetch where it settles.
+    const rapid = performance.now() - lastModelSelectAt < 350;
+    lastModelSelectAt = performance.now();
+    if (!prefetched) {
+        setDetailLoading(bodyEl, true);
+        if (rapid) await new Promise((resolve) => setTimeout(resolve, 250));
+        if (!isCurrent()) return;
+        try {
+            const full = await fetchModelDetail(model.id);
+            if (!isCurrent()) return;
+            if (full) {
+                state.selectedModel = full;
+                state.selectedVersionId = String(getSelectedVersion()?.id || "");
+                state.selectedFileName = String(getSelectedFile()?.name || "");
+                renderSelectedModelDetail();
+            }
+        } catch (_) {
+            // Search results are enough for path resolution in the common case.
         }
-    } catch (_) {
-        // Search results are enough for path resolution in the common case.
+        if (!isCurrent()) return;
+        setDetailLoading(bodyEl, false);
     }
     await resolveSelectedPath({ detailOnly: true, pathOnly: true });
 }
@@ -935,17 +1103,21 @@ function getSelectedFile() {
 }
 
 async function resolveSelectedPath(options = {}) {
-    if (!state.selectedModel) return;
+    const model = state.selectedModel;
+    if (!model) return;
+    const target = `${state.selectedVersionId}|${state.selectedFileName}`;
+    const isCurrent = () => state.selectedModel === model && `${state.selectedVersionId}|${state.selectedFileName}` === target;
     state.resolvingPath = true;
     renderSelectionSurface(options);
     try {
         const data = await apiPost("/resolve-path", {
-            kind: state.assetKind,
-            model: state.selectedModel,
+            kind: detailAssetKind(),
+            model,
             version: getSelectedVersion() || {},
             file: getSelectedFile() || {},
             overrides: state.pathOverrides,
         });
+        if (!isCurrent()) return;
         state.resolution = data.resolution;
         state.pathOverrides = {
             root_kind: data.resolution.root_kind,
@@ -954,6 +1126,7 @@ async function resolveSelectedPath(options = {}) {
             filename: data.resolution.filename,
         };
     } catch (err) {
+        if (!isCurrent()) return;
         state.error = err.message;
     }
     state.resolvingPath = false;
@@ -961,31 +1134,44 @@ async function resolveSelectedPath(options = {}) {
 }
 
 function renderSelectionSurface(options = {}) {
-    if (options.pathOnly && options.detailOnly && state.activeTab === "Discover" && updateSelectedPathPanel()) return;
+    if (options.pathOnly && options.detailOnly && updateSelectedPathPanel()) return;
     if (options.detailOnly && state.activeTab === "Discover" && renderSelectedModelDetail()) return;
     if (options.detailOnly && state.activeTab === "Favorites" && renderSelectedFavoriteDetail()) return;
     render();
+}
+
+function detailAside(subject, html) {
+    return `<aside class="cmgr-detail is-open" data-detail-subject="${escapeAttr(subject)}">${renderDetailDismiss()}${html}</aside>`;
+}
+
+function replaceDetail(split, asideHtml) {
+    const next = htmlToElement(asideHtml);
+    const existing = split.querySelector(":scope > .cmgr-detail");
+    if (existing) swapDetail(existing, next);
+    else split.appendChild(next);
+}
+
+function modelDetailAside() {
+    const model = state.selectedModel;
+    return detailAside(model ? `model:${model.id}` : "", model ? renderModelDetail(model) : renderEmptyModelDetail());
+}
+
+function assetDetailAside(asset = getSelectedAsset()) {
+    return detailAside(asset ? `asset:${asset.id}` : "", asset ? renderAssetDetail(asset) : renderEmptyAssetDetail());
+}
+
+function favoriteDetailAside(item = selectedFavorite()) {
+    return detailAside(item ? `favorite:${item.key}` : "", item ? renderFavoriteDetail(item) : renderEmptyFavoriteDetail());
 }
 
 function renderSelectedModelDetail() {
     if (state.activeTab !== "Discover" || !bodyEl) return false;
     const split = bodyEl.querySelector(".cmgr-discover .cmgr-split");
     if (!split) return false;
-    split.classList.add("has-detail");
     split.querySelectorAll("[data-model-id]").forEach((card) => {
         card.classList.toggle("selected", String(card.dataset.modelId) === String(state.selectedModel?.id || ""));
     });
-    const existing = split.querySelector(".cmgr-detail");
-    const detailModelId = state.selectedModel?.id || "";
-    const detailVersionId = state.selectedVersionId || "";
-    const html = `<aside class="cmgr-detail is-open" data-detail-model-id="${escapeAttr(detailModelId)}" data-detail-version-id="${escapeAttr(detailVersionId)}">${state.selectedModel ? renderModelDetail(state.selectedModel) : renderEmptyModelDetail()}</aside>`;
-    const next = htmlToElement(html);
-    if (existing) {
-        preserveDetailPreview(existing, next);
-        existing.replaceWith(next);
-    } else {
-        split.appendChild(next);
-    }
+    replaceDetail(split, modelDetailAside());
     bindCommonEvents(bodyEl);
     bindDiscoverEvents(bodyEl);
     return true;
@@ -995,34 +1181,30 @@ function renderSelectedAssetDetail() {
     if (state.activeTab !== "Library" || !bodyEl) return false;
     const split = bodyEl.querySelector(".cmgr-library .cmgr-split");
     if (!split) return false;
-    split.classList.add("has-detail");
     split.querySelectorAll("[data-asset-id]").forEach((card) => {
         card.classList.toggle("selected", String(card.dataset.assetId) === String(state.selectedAssetId || ""));
     });
-    const selected = getSelectedAsset();
-    const existing = split.querySelector(".cmgr-detail");
-    const html = `<aside class="cmgr-detail is-open">${selected ? renderAssetDetail(selected) : renderEmptyAssetDetail()}</aside>`;
-    const next = htmlToElement(html);
-    if (existing) {
-        preserveDetailPreview(existing, next);
-        existing.replaceWith(next);
-    } else {
-        split.appendChild(next);
-    }
+    replaceDetail(split, assetDetailAside());
     bindCommonEvents(bodyEl);
     bindLibraryEvents(bodyEl);
     return true;
 }
 
 function updateSelectedPathPanel() {
-    if (!bodyEl || state.activeTab !== "Discover" || !state.selectedModel) return false;
-    const detail = bodyEl.querySelector(".cmgr-discover .cmgr-detail");
+    if (!bodyEl || !["Discover", "Favorites"].includes(state.activeTab) || !state.selectedModel) return false;
+    const detail = bodyEl.querySelector(".cmgr-detail");
     if (!detail) return false;
     const pathBox = detail.querySelector(".cmgr-path-box");
-    const downloadBtn = detail.querySelector('[data-action="download"]');
+    const actionHub = detail.querySelector(".cmgr-detail-action-hub");
     if (pathBox) pathBox.outerHTML = renderPathBox();
-    if (downloadBtn) downloadBtn.disabled = !state.resolution?.download_url;
-    bindDiscoverEvents(bodyEl);
+    if (actionHub) {
+        const version = getSelectedVersion() || getVersions(state.selectedModel)[0] || {};
+        const file = getSelectedFile() || getFiles(version)[0] || {};
+        actionHub.outerHTML = renderModelActionHub(state.selectedModel, version, file, state.resolution);
+    }
+    bindCommonEvents(detail);
+    if (state.activeTab === "Favorites") bindFavoritesEvents(bodyEl);
+    else bindDiscoverEvents(bodyEl);
     return true;
 }
 
@@ -1032,32 +1214,19 @@ function htmlToElement(html) {
     return template.content.firstElementChild;
 }
 
-function preserveDetailPreview(existing, next) {
-    const oldPreview = existing?.querySelector?.(".cmgr-detail-preview");
-    const newPreview = next?.querySelector?.(".cmgr-detail-preview");
-    if (!oldPreview || !newPreview) return;
-    const samePreview = oldPreview.dataset.previewKey && oldPreview.dataset.previewKey === newPreview.dataset.previewKey;
-    const sameSelection = existing.dataset.detailModelId
-        && existing.dataset.detailModelId === next.dataset.detailModelId
-        && existing.dataset.detailVersionId === next.dataset.detailVersionId;
-    if (samePreview || sameSelection) {
-        newPreview.replaceWith(oldPreview);
-    }
-}
-
 async function startDownload() {
     if (!state.selectedModel || !state.resolution) return;
     try {
         await apiPost("/download", {
-            kind: state.assetKind,
+            kind: detailAssetKind(),
             model: state.selectedModel,
             version: getSelectedVersion() || {},
             file: getSelectedFile() || {},
             overrides: state.pathOverrides,
         });
         showToast(t("Download queued."));
-        state.activeTab = "Downloads";
-        await loadDownloads();
+        await loadDownloads(false);
+        syncLiveDownloadSurfaces();
     } catch (err) {
         state.error = err.message;
         render();
@@ -1068,7 +1237,8 @@ async function cancelDownload(taskId) {
     try {
         await apiPost("/download/cancel", { task_id: taskId });
         showToast(t("Cancel requested."));
-        await loadDownloads();
+        await loadDownloads(state.activeTab === "Downloads");
+        syncLiveDownloadSurfaces();
     } catch (err) {
         state.error = err.message;
         render();
@@ -1079,7 +1249,8 @@ async function retryDownload(taskId) {
     try {
         await apiPost("/download/retry", { task_id: taskId });
         showToast(t("Download retried."));
-        await loadDownloads();
+        await loadDownloads(state.activeTab === "Downloads");
+        syncLiveDownloadSurfaces();
     } catch (err) {
         state.error = err.message;
         render();
@@ -1101,22 +1272,70 @@ async function removeDownloadRecord(taskId = "") {
 }
 
 async function loadDownloads(doRender = true) {
+    const prevJobs = state.downloads || {};
+    const prevActiveIds = new Set(
+        Object.values(prevJobs)
+            .filter((job) => ACTIVE_DOWNLOAD_STATUSES.has(job?.status))
+            .map((job) => job.id)
+    );
     try {
         state.downloads = await apiGet("/download-status");
     } catch (_) {
         state.downloads = state.downloads || {};
+    }
+    trackDownloadRates(Object.values(state.downloads));
+    const newlyCompleted = Object.values(state.downloads || {}).some(
+        (job) => prevActiveIds.has(job?.id) && job?.status === "completed"
+    );
+    if (newlyCompleted) {
+        void loadLibrary(true).then(() => {
+            syncLiveDownloadSurfaces();
+        });
     }
     tuneDownloadPolling();
     if (doRender !== false) {
         lastDownloadNavCount = activeDownloadCount();
         render();
     } else if (state.activeTab === "Downloads") {
-        renderDownloadListOnly();
+        patchDownloadPage(bodyEl, downloadPageOptions());
     } else {
         const nextCount = activeDownloadCount();
         if (nextCount !== lastDownloadNavCount) {
             lastDownloadNavCount = nextCount;
             updateDownloadNavBadge();
+        }
+        syncLiveDownloadSurfaces();
+    }
+}
+
+function syncLiveDownloadSurfaces() {
+    updateDownloadNavBadge();
+    if (!bodyEl) return;
+    if (["Discover", "Favorites"].includes(state.activeTab)) {
+        bodyEl.querySelectorAll("[data-model-id]").forEach((card) => {
+            const model = state.searchItems.find((item) => String(item.id) === String(card.dataset.modelId));
+            const slot = card.querySelector("[data-card-status-slot]");
+            if (!model || !slot) return;
+            const html = renderModelCardStatusBadge(model);
+            if (liveMarkup.get(slot) === html) return;
+            liveMarkup.set(slot, html);
+            slot.innerHTML = html;
+        });
+        if (state.selectedModel) {
+            const detail = bodyEl.querySelector(".cmgr-detail");
+            const actionHub = detail?.querySelector(".cmgr-detail-action-hub");
+            const version = getSelectedVersion() || getVersions(state.selectedModel)[0] || {};
+            const file = getSelectedFile() || getFiles(version)[0] || {};
+            if (actionHub && !patchDownloadProgress(actionHub, activeDownloadJobForModel(state.selectedModel, version))) {
+                const html = renderModelActionHub(state.selectedModel, version, file, state.resolution);
+                if (liveMarkup.get(actionHub) === html) return;
+                const next = htmlToElement(html);
+                liveMarkup.set(next, html);
+                actionHub.replaceWith(next);
+                bindCommonEvents(detail);
+                if (state.activeTab === "Favorites") bindFavoritesEvents(bodyEl);
+                else bindDiscoverEvents(bodyEl);
+            }
         }
     }
 }
@@ -1128,14 +1347,19 @@ async function loadLibrary(force = false) {
         const data = await apiGet(`/library${force ? "?force=true" : ""}`);
         state.libraryItems = Array.isArray(data.items) ? data.items : [];
         const visible = state.libraryItems.filter((item) => assetMatchesKind(item));
-        if (!visible.some((item) => item.id === state.selectedAssetId)) {
+        if (state.activeTab === "Library" && !visible.some((item) => item.id === state.selectedAssetId)) {
             state.selectedAssetId = visible[0]?.id || "";
         }
     } catch (err) {
         console.warn("[CivitaiManager] Failed to load library:", err);
     }
     state.libraryLoading = false;
-    if (state.activeTab === "Library") render();
+    if (state.activeTab === "Library") {
+        render();
+    } else if (overlay) {
+        refreshNav();
+        syncLiveDownloadSurfaces();
+    }
 }
 
 function getSelectedAsset() {
@@ -1315,15 +1539,7 @@ function renderSelectedFavoriteDetail() {
     split.querySelectorAll("[data-favorite-key]").forEach((card) => {
         card.classList.toggle("selected", card.dataset.favoriteKey === state.selectedFavoriteKey);
     });
-    const item = selectedFavorite();
-    const existing = split.querySelector(".cmgr-detail");
-    const next = htmlToElement(`<aside class="cmgr-detail is-open">${item ? renderFavoriteDetail(item) : renderEmptyFavoriteDetail()}</aside>`);
-    if (existing) {
-        preserveDetailPreview(existing, next);
-        existing.replaceWith(next);
-    } else {
-        split.appendChild(next);
-    }
+    replaceDetail(split, favoriteDetailAside());
     bindCommonEvents(bodyEl);
     bindFavoritesEvents(bodyEl);
     return true;
@@ -1334,16 +1550,29 @@ async function selectFavoriteItem(item) {
     state.selectedFavoriteKey = item.key;
     const model = favoriteModel(item);
     if (model) {
-        state.assetKind = item.asset_kind || "lora";
-        state.selectedModel = model;
+        const isCurrent = () => state.activeTab === "Favorites" && state.selectedFavoriteKey === item.key;
+        const selectVersion = () => {
+            state.selectedVersionId = String(getVersions()[0]?.id || "");
+            state.selectedFileName = String(getFiles(getVersions()[0])[0]?.name || "");
+        };
+        state.selectedModel = peekModelDetail(model.id) || model;
         state.selectedAssetId = "";
         state.pathOverrides = {};
         state.resolution = null;
-        state.detailPreviewIndex = 0;
-        const version = getVersions(model)[0] || {};
-        state.selectedVersionId = String(version.id || "");
-        state.selectedFileName = String(getFiles(version)[0]?.name || "");
+        selectVersion();
         renderSelectedFavoriteDetail();
+        // The saved snapshot can be a trimmed search card; show the live record.
+        if (state.selectedModel === model) {
+            setDetailLoading(bodyEl, true);
+            const full = await fetchModelDetail(model.id).catch(() => null);
+            if (!isCurrent()) return;
+            setDetailLoading(bodyEl, false);
+            if (full) {
+                state.selectedModel = full;
+                selectVersion();
+                renderSelectedFavoriteDetail();
+            }
+        }
         await resolveSelectedPath({ detailOnly: true, pathOnly: true });
         return;
     }
@@ -1502,33 +1731,49 @@ function maybeAutoLoadMore(element) {
 }
 
 function renderNav(nav) {
+    const tabs = overlay.querySelector('.cmgr-selector-tabs');
+    const icons = { Discover: "discover", Library: "local", Favorites: "favorites", Downloads: "downloads", Settings: "settings" };
+    const count = (tab) => tab === "Library" ? state.libraryItems.length : tab === "Favorites" ? state.favoriteItems.length : tab === "Downloads" ? activeDownloadCount() : "";
+    if (!tabs.children.length) tabs.innerHTML = TABS.map((tab) => `
+        <button class="cmgr-selector-tab" type="button" role="tab" id="cmgr-manager-tab-${tab}" data-tab="${tab}" aria-controls="cmgr-manager-content">
+            ${selectorIcon(icons[tab])}<span>${escapeHtml(t(tab))}</span>${count(tab) !== "" ? `<b>${count(tab)}</b>` : ""}
+        </button>
+    `).join("");
+    tabs.querySelectorAll('[data-tab]').forEach((button, index, buttons) => {
+        const active = button.dataset.tab === state.activeTab;
+        button.classList.toggle("active", active);
+        button.setAttribute("aria-selected", String(active));
+        button.tabIndex = active ? 0 : -1;
+        const badge = button.querySelector("b");
+        if (badge) badge.textContent = count(button.dataset.tab);
+        button.onclick = () => {
+            switchManagerTab(button.dataset.tab);
+            button.focus({ preventScroll: true });
+        };
+        button.onkeydown = (event) => {
+            if (!["ArrowDown", "ArrowUp", "ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+            event.preventDefault();
+            const next = event.key === "Home" ? 0 : event.key === "End" ? buttons.length - 1
+                : (index + (["ArrowDown", "ArrowRight"].includes(event.key) ? 1 : -1) + buttons.length) % buttons.length;
+            buttons[next].click();
+        };
+    });
+    const hasFilters = ["Discover", "Library", "Favorites"].includes(state.activeTab);
+    overlay.querySelector('.cmgr-selector-layout').classList.toggle("has-filters", hasFilters);
+    overlay.querySelector('[data-action="toggle-manager-filters"]').hidden = !hasFilters;
+    bodyEl.setAttribute("aria-labelledby", `cmgr-manager-tab-${state.activeTab}`);
+    overlay.querySelector('[data-action="view-library"]').innerHTML = `${selectorIcon("layers")}<span>${escapeHtml(t("Library"))}</span><b>${state.libraryItems.length}</b>`;
+    setManagerFiltersOpen(filtersOpen);
     nav.innerHTML = `
-        <div class="cmgr-nav-group">
-            <div class="cmgr-nav-title">${escapeHtml(t("Views"))}</div>
-            ${TABS.map((tab) => `
-                <button class="cmgr-nav-btn ${state.activeTab === tab ? "active" : ""}" data-tab="${tab}">
-                    <span>${escapeHtml(t(tab))}</span>
-                    ${tab === "Favorites" && state.favoriteItems.length ? `<b>${state.favoriteItems.length}</b>` : ""}
-                    ${tab === "Downloads" && activeDownloadCount() ? `<b>${activeDownloadCount()}</b>` : ""}
-                </button>
-            `).join("")}
+        <div class="cmgr-selector-filter-heading">
+            <h2>${escapeHtml(t(state.activeTab === "Favorites" ? "Favorites" : "Adjust filters"))}</h2>
+            ${["Discover", "Library"].includes(state.activeTab) && (state.selectedBaseModel || state.selectedTag || (state.activeTab === "Library" ? state.selectedCategory : state.selectedCivitaiCategory)) ? `<button class="cmgr-selector-reset" type="button" data-action="reset-manager-filters">${escapeHtml(t("Reset filters"))}</button>` : ""}
         </div>
         ${["Discover", "Library"].includes(state.activeTab) ? renderAssetSidebar() : ""}
         ${state.activeTab === "Favorites" ? renderFavoritesSidebar() : ""}
     `;
-    nav.querySelectorAll("[data-tab]").forEach((btn) => {
-        btn.onclick = () => {
-            state.activeTab = btn.dataset.tab;
-            if (state.activeTab === "Library") loadLibrary();
-            if (state.activeTab === "Favorites") loadFavorites(true);
-            if (state.activeTab === "Downloads") loadDownloads();
-            if (state.activeTab === "Discover") {
-                loadTaxonomy(state.assetKind, { silent: true });
-                if (!state.searchItems.length) search(true, { silent: true });
-            }
-            render();
-        };
-    });
+    const reset = nav.querySelector('[data-action="reset-manager-filters"]');
+    if (reset) reset.onclick = resetManagerFilters;
     nav.querySelectorAll("[data-asset-kind]").forEach((btn) => {
         btn.onclick = () => selectAssetKind(btn.dataset.assetKind);
     });
@@ -1543,17 +1788,13 @@ function renderNav(nav) {
     nav.querySelectorAll("[data-local-folder-toggle]").forEach((btn) => {
         btn.onclick = (event) => {
             event.stopPropagation();
-            toggleLocalFolder(btn.dataset.localFolderToggle || "");
+            animateSelectorFolder(btn, () => toggleLocalFolder(btn.dataset.localFolderToggle || ""));
         };
     });
     bindSearchCombo(nav.querySelector('[data-combo="base-model"]'), (value) => selectBaseModel(value));
-    const clearBaseModel = nav.querySelector("[data-clear-base-model]");
-    if (clearBaseModel) clearBaseModel.onclick = () => selectBaseModel("");
+    bindSearchCombo(nav.querySelector('[data-combo="category"]'), (value) => selectManagerCategory(CIVITAI_CATEGORY_FILTERS.find((item) => t(item.label) === value)?.value || ""));
     bindSearchCombo(nav.querySelector('[data-combo="tag"]'), (value) => selectTag(value));
-    const clearTag = nav.querySelector("[data-clear-tag]");
-    if (clearTag) clearTag.onclick = () => selectTag("");
     if (state.activeTab === "Favorites") bindFavoritesSidebar(nav);
-    ensureComboOutsideHandler();
 }
 
 function refreshNav() {
@@ -1568,7 +1809,7 @@ function refreshNav() {
 }
 
 function updateDownloadNavBadge() {
-    const button = navEl?.querySelector('[data-tab="Downloads"]');
+    const button = overlay?.querySelector('.cmgr-selector-tabs [data-tab="Downloads"]');
     if (!button) return;
     const count = activeDownloadCount();
     let badge = button.querySelector("b");
@@ -1592,30 +1833,18 @@ function renderAssetSidebar() {
     const baseModelOptions = ensureSelectedOption(baseModels, state.selectedBaseModel);
     const tagOptions = ensureSelectedOption(tags, state.selectedTag);
     return `
-        <div class="cmgr-nav-group cmgr-asset-group">
-            <div class="cmgr-nav-title">${escapeHtml(t("Asset Type"))}</div>
-            ${renderSelectMenu({
-                id: "asset-kind",
-                value: state.assetKind,
-                options: ASSET_KINDS.map((kind) => ({
-                    value: kind.id,
-                    label: `${t(kind.label)}${state.activeTab === "Library" ? ` (${libraryCountForKind(kind.id)})` : ""}`,
-                })),
-                inputAttrs: "data-asset-kind-select",
-            })}
-        </div>
         <div class="cmgr-nav-group cmgr-category-group">
             <div class="cmgr-nav-title">${escapeHtml(t("Base Model"))}</div>
             <div class="cmgr-search-picker">
-                ${renderSearchCombo({
+                ${renderSelectorCombo({
                     id: "base-model",
                     value: state.selectedBaseModel,
                     items: baseModelOptions,
                     placeholder: t("Choose a base model"),
                     searchPlaceholder: t("Search base models..."),
                     emptyText: t("No base models found"),
+                    clearTitle: t("Clear base model"),
                 })}
-                <button class="cmgr-clear-filter" data-clear-base-model title="${escapeAttr(t("Clear base model"))}" ${state.selectedBaseModel ? "" : "disabled"}>${escapeHtml(t("Clear"))}</button>
             </div>
             ${state.taxonomyLoading && state.activeTab === "Discover" ? `<div class="cmgr-nav-note">${escapeHtml(t("Loading base models..."))}</div>` : ""}
             ${!baseModels.length && !state.taxonomyLoading ? `<div class="cmgr-nav-note">${escapeHtml(t("Base models appear from Civitai data."))}</div>` : ""}
@@ -1623,14 +1852,15 @@ function renderAssetSidebar() {
         ${state.activeTab === "Discover" ? `
             <div class="cmgr-nav-group cmgr-category-group">
                 <div class="cmgr-nav-title">${escapeHtml(t("Filter by Category"))}</div>
-                <div class="cmgr-chip-grid">
-                    <button class="cmgr-filter-chip ${!state.selectedCivitaiCategory ? "active" : ""}" data-category="">${escapeHtml(t("All"))}</button>
-                    ${CIVITAI_CATEGORY_FILTERS.map((item) => `
-                        <button class="cmgr-filter-chip ${state.selectedCivitaiCategory === item.value ? "active" : ""}" data-category="${escapeAttr(item.value)}">
-                            ${escapeHtml(t(item.label))}
-                        </button>
-                    `).join("")}
-                </div>
+                ${renderSelectorCombo({
+                    id: "category",
+                    value: selectedCategory ? t(categoryFilterLabel(selectedCategory)) : "",
+                    items: [t("All"), ...CIVITAI_CATEGORY_FILTERS.map((item) => t(item.label))],
+                    placeholder: t("All"),
+                    searchPlaceholder: t("Search"),
+                    emptyText: t("No options found"),
+                    clearTitle: t("Clear"),
+                })}
             </div>
         ` : ""}
         ${state.activeTab === "Library" ? `
@@ -1647,15 +1877,15 @@ function renderAssetSidebar() {
         <div class="cmgr-nav-group cmgr-category-group">
             <div class="cmgr-nav-title">${escapeHtml(t("Search Tags"))}</div>
             <div class="cmgr-search-picker">
-                ${renderSearchCombo({
+                ${renderSelectorCombo({
                     id: "tag",
                     value: state.selectedTag,
                     items: tagOptions,
                     placeholder: t("Choose a tag"),
                     searchPlaceholder: t("Search tags..."),
                     emptyText: t("No tags found"),
+                    clearTitle: t("Clear tag"),
                 })}
-                <button class="cmgr-clear-filter" data-clear-tag title="${escapeAttr(t("Clear tag"))}" ${state.selectedTag ? "" : "disabled"}>${escapeHtml(t("Clear"))}</button>
             </div>
             ${state.taxonomyLoading && state.activeTab === "Discover" ? `<div class="cmgr-nav-note">${escapeHtml(t("Loading tags from Civitai..."))}</div>` : ""}
             ${!tags.length && !state.taxonomyLoading ? `<div class="cmgr-nav-note">${escapeHtml(t("Tags appear from Civitai model and tag data."))}</div>` : ""}
@@ -1828,22 +2058,11 @@ function bindSelectMenus(root) {
     });
 }
 
-function ensureComboOutsideHandler() {
-    if (comboOutsideBound) return;
-    comboOutsideBound = true;
-    document.addEventListener("pointerdown", (event) => {
-        document.querySelectorAll(".cmgr-combo.open").forEach((combo) => {
-            if (!combo.contains(event.target)) {
-                combo.classList.remove("open");
-                combo.querySelector("[data-combo-toggle]")?.setAttribute("aria-expanded", "false");
-            }
-        });
-    }, true);
+function selectCategoryButton(btn) {
+    btn.onclick = () => selectManagerCategory(btn.dataset.category || "");
 }
 
-function selectCategoryButton(btn) {
-    btn.onclick = () => {
-        const category = btn.dataset.category || "";
+function selectManagerCategory(category) {
         if (state.activeTab === "Discover") {
             if (state.selectedCivitaiCategory === category) return;
             state.selectedCivitaiCategory = category;
@@ -1862,7 +2081,18 @@ function selectCategoryButton(btn) {
         } else {
             render();
         }
-    };
+}
+
+function resetManagerFilters() {
+    state.selectedBaseModel = "";
+    state.selectedTag = "";
+    if (state.activeTab === "Discover") state.selectedCivitaiCategory = "";
+    else state.selectedCategory = "";
+    state.selectedModel = null;
+    state.selectedAssetId = "";
+    state.resolution = null;
+    if (state.activeTab === "Discover") void search(true, { silent: true });
+    else render();
 }
 
 function selectBaseModelButton(btn) {
@@ -1878,7 +2108,7 @@ function toggleLocalFolder(path) {
     if (!folder) return;
     const key = localFolderStateKey(folder);
     state.expandedLocalFolders[key] = !state.expandedLocalFolders[key];
-    render();
+    refreshNav();
 }
 
 function expandLocalFolderAncestors(path) {
@@ -1962,38 +2192,85 @@ function renderActiveTab() {
     return renderDiscover();
 }
 
+function renderToolbarKindTabs() {
+    return `
+        <div class="cmgr-kind-tabs" role="tablist" aria-label="${escapeAttr(t("Asset Type"))}">
+            ${ASSET_KINDS.map((kind) => `
+                <button
+                    class="cmgr-kind-tab ${state.assetKind === kind.id ? "active" : ""}"
+                    type="button"
+                    role="tab"
+                    aria-selected="${state.assetKind === kind.id ? "true" : "false"}"
+                    data-asset-kind="${escapeAttr(kind.id)}"
+                ><span>${escapeHtml(t(kind.label))}</span>${state.activeTab === "Library" ? `<b>${libraryCountForKind(kind.id)}</b>` : ""}</button>
+            `).join("")}
+        </div>
+    `;
+}
+
+function renderActiveFilterBar() {
+    const chips = [];
+    if (state.selectedBaseModel) {
+        chips.push({
+            key: "base_model",
+            label: t("Base Model"),
+            value: state.selectedBaseModel,
+            clearAction: "clear-filter-base",
+        });
+    }
+    if (state.activeTab === "Discover" && state.selectedCivitaiCategory) {
+        chips.push({
+            key: "category",
+            label: t("Category"),
+            value: t(categoryFilterLabel(state.selectedCivitaiCategory)),
+            clearAction: "clear-filter-category",
+        });
+    }
+    if (state.activeTab === "Library" && state.selectedCategory) {
+        chips.push({
+            key: "folder",
+            label: t("Local Folders"),
+            value: localFolderFilterLabel(state.selectedCategory),
+            clearAction: "clear-filter-category",
+        });
+    }
+    if (state.selectedTag) {
+        chips.push({
+            key: "tag",
+            label: t("Search Tags"),
+            value: state.selectedTag,
+            clearAction: "clear-filter-tag",
+        });
+    }
+    return renderActiveFilterChips(chips, "reset-all-filters");
+}
+
 function renderDiscover() {
-    const selected = state.selectedModel;
-    const filterText = activeFilterText();
-    const toolbar = renderSearchToolbar({
+    const toolbar = renderSelectorToolbar({
         title: assetKindLabel(state.assetKind),
-        subtitle: filterText || "Civitai",
-        searchHtml: renderToolbarSearchField({
+        headingHtml: renderToolbarKindTabs(),
+        searchHtml: renderSelectorSearch({
             value: state.query,
             inputAttrs: 'data-field="query"',
             placeholder: t("Search as you type..."),
             clearAction: "clear-search",
+            loading: state.loadingSearch,
         }),
         actionsHtml: `
-            ${renderSelectMenu({
-                id: "sort",
-                value: state.sort,
-                options: ["Highest Rated", "Most Downloaded", "Newest"].map((sort) => ({ value: sort, label: t(sort) })),
-                inputAttrs: 'data-field="sort"',
-                className: "cmgr-toolbar-select",
-            })}
-            <button class="cmgr-primary cmgr-search-submit" data-action="search">${escapeHtml(t(state.loadingSearch ? "Searching..." : "Search"))}</button>
+            ${renderSelectorSort(state.sort)}
+            <button class="cmgr-selector-button is-icon" type="button" data-action="search" title="${escapeAttr(t("Refresh"))}" aria-label="${escapeAttr(t("Refresh"))}">${selectorIcon("refresh")}</button>
         `,
+        filterBarHtml: renderActiveFilterBar(),
     });
     return `
         <section class="cmgr-page cmgr-discover">
             ${toolbar}
-            <div class="cmgr-split has-detail">
+            <div class="cmgr-split has-detail ${state.detailOpen ? "is-detail-open" : ""}">
                 <div class="cmgr-results">
                     ${state.searchItems.length ? state.searchItems.map(renderModelCard).join("") : renderEmptySearch()}
-                    ${state.loadingSearch && state.searchItems.length && state.autoLoadingMore ? renderLoadingMoreSkeletons() : ""}
+                    ${state.loadingSearch && state.searchItems.length && state.autoLoadingMore ? renderLoadingMoreSkeletons(loadMoreSkeletonCount(bodyEl.querySelector(".cmgr-discover .cmgr-results"))) : ""}
                 </div>
-                <aside class="cmgr-detail is-open">${selected ? renderModelDetail(selected) : renderEmptyModelDetail()}</aside>
+                ${modelDetailAside()}
             </div>
         </section>
     `;
@@ -2010,7 +2287,7 @@ function renderEmptySearch() {
     });
 }
 
-function renderSearchSkeletons(count = 12) {
+function renderSearchSkeletons(count = 30) {
     return Array.from({ length: count }, (_, index) => `
         <article
             class="cmgr-card cmgr-skeleton-card"
@@ -2029,7 +2306,7 @@ function renderSearchSkeletons(count = 12) {
     `).join("");
 }
 
-function renderLoadingMoreSkeletons(count = 4) {
+function renderLoadingMoreSkeletons(count) {
     return Array.from({ length: count }, (_, index) => `
         <article
             class="cmgr-card cmgr-skeleton-card cmgr-load-more-skeleton"
@@ -2045,23 +2322,36 @@ function renderLoadingMoreSkeletons(count = 4) {
     `).join("");
 }
 
+function renderModelCardStatusBadge(model) {
+    const activeJob = activeDownloadJobForModel(model);
+    if (activeJob) {
+        const total = Number(activeJob.total || 0);
+        const progress = Number(activeJob.progress || 0);
+        const pct = total > 0 ? Math.min(100, Math.round((progress / total) * 100)) : 0;
+        return `<span class="cmgr-card-status is-downloading"><i aria-hidden="true"></i>${pct > 0 ? `${pct}%` : escapeHtml(t("Downloading"))}</span>`;
+    }
+    if (isInstalled(model)) {
+        return `<span class="cmgr-card-status is-installed">✓ ${escapeHtml(t("Installed"))}</span>`;
+    }
+    return "";
+}
+
 function renderModelCard(model, index = 0) {
     const version = getVersions(model)[0] || {};
     const badge = version.baseModel || model.baseModel || model.base_model || "Other";
-    const media = modelPreviewMedia(model);
     const favorite = remoteFavorite(model, state.assetKind);
-    const preview = media.url
-        ? `<span class="cmgr-media-skeleton" aria-hidden="true"></span>${renderMedia(media, model.name, {
-            defer: true,
-            priority: index < HIGH_PRIORITY_PREVIEW_LOADS ? "high" : "auto",
-        })}`
-        : renderUnavailablePreview(media.emptyText, "cmgr-no-image");
+    const creator = model.creator?.username ? `@${model.creator.username}` : "";
+    const preview = renderCardMedia(modelPreviewMedia(model), cardMediaOptions(index));
     return `
-        <article class="cmgr-card ${state.selectedModel?.id === model.id ? "selected" : ""}" data-model-id="${escapeAttr(model.id)}">
+        <article class="cmgr-card ${state.selectedModel?.id === model.id ? "selected" : ""}" data-model-id="${escapeAttr(model.id)}" tabindex="0">
             ${renderFavoriteCardMark(Boolean(favorite))}
+            <div class="cmgr-card-top-badges">
+                ${badge ? `<div class="cmgr-card-badge">${escapeHtml(badge)}</div>` : ""}
+                <div class="cmgr-card-status-slot" data-card-status-slot>${renderModelCardStatusBadge(model)}</div>
+            </div>
             <div class="cmgr-thumb">${preview}</div>
-            ${badge ? `<div class="cmgr-card-badge">${escapeHtml(badge)}</div>` : ""}
             <div class="cmgr-card-body">
+                ${creator ? `<div class="cmgr-card-creator">${escapeHtml(creator)}</div>` : ""}
                 <div class="cmgr-card-title">${escapeHtml(model.name || "Untitled")}</div>
                 ${renderCardStats(model, version)}
             </div>
@@ -2069,12 +2359,73 @@ function renderModelCard(model, index = 0) {
     `;
 }
 
+function cardMediaOptions(index) {
+    return { eager: index < INITIAL_PREVIEW_LOADS, priority: index < HIGH_PRIORITY_PREVIEW_LOADS ? "high" : "auto" };
+}
+
 function renderCardStats(model, version = {}) {
-    const stats = getModelStats(model, version);
+    const stats = modelStats(model, version);
+    const firstFile = getFiles(version)[0] || {};
+    const sizeText = firstFile.sizeKB ? formatBytes(firstFile.sizeKB * 1024) : "";
+    return renderSelectorStats(formatStatCount(stats.downloadCount), formatStatCount(stats.likeCount), sizeText);
+}
+
+function renderModelActionHub(model, version = {}, file = {}, resolution = state.resolution) {
+    const favorite = remoteFavorite(model);
+    const activeJob = activeDownloadJobForModel(model, version);
+    const installedAsset = findInstalledAssetForModel(model, version);
+    const sizeText = file.sizeKB ? formatBytes(file.sizeKB * 1024) : "";
+    const inlineCta = !activeJob && !installedAsset;
+    const favoriteHtml = renderFavoriteControls({
+        favorite: Boolean(favorite),
+        folders: state.favoriteFolders,
+        folderId: favorite?.folder_id || "",
+        toggleAction: "favorite-model",
+        folderAction: "assign-model-favorite-folder",
+        compact: true,
+    });
+    let primaryHtml = "";
+    if (activeJob) {
+        primaryHtml = `
+            <div class="cmgr-detail-download-progress">
+                ${renderDownloadProgress(activeJob)}
+                <div class="cmgr-detail-download-progress-actions">
+                    <button class="cmgr-secondary cmgr-mini-btn" type="button" data-action="open-downloads-tab">${escapeHtml(t("View Downloads"))}</button>
+                    <button class="cmgr-secondary cmgr-mini-btn is-danger" type="button" data-action="cancel-download" data-task-id="${escapeAttr(activeJob.id)}">${escapeHtml(t("Cancel Download"))}</button>
+                </div>
+            </div>
+        `;
+    } else if (installedAsset) {
+        primaryHtml = `
+            <div class="cmgr-detail-installed-bar">
+                <div class="cmgr-detail-installed-badge">
+                    <span class="cmgr-installed-check" aria-hidden="true">✓</span>
+                    <div>
+                        <b>${escapeHtml(t("In Local Library"))}</b>
+                        <span>${escapeHtml(installedAsset.relative_path || installedAsset.filename || "")}</span>
+                    </div>
+                </div>
+                <div class="cmgr-detail-installed-actions">
+                    <button class="cmgr-primary cmgr-mini-btn" type="button" data-action="view-in-library" data-asset-id="${escapeAttr(installedAsset.id)}">${escapeHtml(t("View in Library"))}</button>
+                    <button class="cmgr-secondary cmgr-mini-btn" type="button" data-action="download" ${resolution?.download_url ? "" : "disabled"} title="${escapeAttr(t("Re-download"))}">${escapeHtml(t("Re-download"))}</button>
+                </div>
+            </div>
+        `;
+    } else {
+        const label = sizeText
+            ? t("Download ({size})", { size: sizeText })
+            : t("Download Now");
+        primaryHtml = `
+            <button class="cmgr-primary cmgr-download-cta" type="button" data-action="download" ${resolution?.download_url ? "" : "disabled"}>
+                <span class="cmgr-download-cta-icon" aria-hidden="true">↓</span>
+                <span>${escapeHtml(label)}</span>
+            </button>
+        `;
+    }
     return `
-        <div class="cmgr-card-stat-row" aria-label="Model stats">
-            <span class="cmgr-card-stat-chip" title="Downloads"><span aria-hidden="true">↓</span><span>${formatStatCount(stats.downloadCount)}</span></span>
-            <span class="cmgr-card-stat-chip" title="Likes"><span aria-hidden="true">♥</span><span>${formatStatCount(stats.likeCount)}</span></span>
+        <div class="cmgr-detail-action-hub ${inlineCta ? "is-inline-cta" : ""}">
+            ${primaryHtml}
+            ${favoriteHtml}
         </div>
     `;
 }
@@ -2085,62 +2436,80 @@ function renderModelDetail(model) {
     const files = getFiles(version);
     const file = getSelectedFile() || files[0] || {};
     const resolution = state.resolution;
-    const favorite = remoteFavorite(model, state.assetKind);
-    const modelUrl = `https://civitai.red/models/${encodeURIComponent(model.id || "")}`;
+    const stats = modelStats(model, version);
+    const trainedWords = (Array.isArray(version.trainedWords) ? version.trainedWords : [])
+        .map((word) => String(word || "").trim())
+        .filter(Boolean);
+    const modelUrl = `https://civitai.red/models/${encodeURIComponent(model.id || "")}${version.id ? `?modelVersionId=${encodeURIComponent(version.id)}` : ""}`;
     return `
         <div class="cmgr-detail-scroll">
-            ${renderModelDetailPreview(model, version, state.detailPreviewIndex)}
+            ${renderDetailGallery(galleryItemsForModel(model, version), model.name || "", modelPreviewMedia(model).emptyText)}
             <div class="cmgr-detail-head">
                 <div>
-                    <a class="cmgr-detail-title-link" href="${escapeAttr(modelUrl)}" target="_blank" rel="noopener noreferrer" title="Open on Civitai red">
+                    <a class="cmgr-detail-title-link" href="${escapeAttr(modelUrl)}" target="_blank" rel="noopener noreferrer" title="${escapeAttr(t("Open model page"))}">
                         <h2>${escapeHtml(model.name || "Untitled")}</h2>
                         <span class="cmgr-external-icon" aria-hidden="true">↗</span>
                     </a>
-                    <p>${escapeHtml(model.creator?.username || "Unknown creator")} · ${escapeHtml(model.type || "Asset")} · ${escapeHtml(modelTagSummary(model) || categoryLabel(model))}</p>
+                    <p>${escapeHtml(model.creator?.username || t("Unknown creator"))}</p>
+                    <div class="cmgr-detail-meta">
+                        ${renderDetailFacts(modelFacts(model, version, file))}
+                        ${renderSelectorStats(formatStatCount(stats.downloadCount), formatStatCount(stats.likeCount))}
+                    </div>
                 </div>
             </div>
-            ${renderFavoriteControls({
-                favorite: Boolean(favorite),
-                folders: state.favoriteFolders,
-                folderId: favorite?.folder_id || "",
-                toggleAction: "favorite-model",
-                folderAction: "assign-model-favorite-folder",
-            })}
-            <label class="cmgr-label">${escapeHtml(t("Version"))}</label>
-            ${renderSelectMenu({
-                id: "selected-version",
-                value: String(version.id || ""),
-                options: versions.map((item) => ({
-                    value: String(item.id || ""),
-                    label: `${item.name || item.id} · ${item.baseModel || "Other"}`,
-                })),
-                inputAttrs: 'data-field="selected-version"',
-                className: "cmgr-full",
-            })}
-            <label class="cmgr-label">${escapeHtml(t("File"))}</label>
-            ${renderSelectMenu({
-                id: "selected-file",
-                value: String(file.name || file.id || ""),
-                options: files.map((item) => ({
-                    value: String(item.name || item.id || ""),
-                    label: `${item.name || "Unnamed file"}${item.sizeKB ? ` · ${formatBytes(item.sizeKB * 1024)}` : ""}`,
-                })),
-                inputAttrs: 'data-field="selected-file"',
-                className: "cmgr-full",
-            })}
-            <div class="cmgr-section-title">${escapeHtml(t("Trigger Words"))}</div>
-            <div class="cmgr-trained">
-                ${(Array.isArray(version.trainedWords) ? version.trainedWords : []).slice(0, 12).map((word) => `<button data-copy="${escapeAttr(word)}">${escapeHtml(word)}</button>`).join("") || `<span>${escapeHtml(t("No trained words listed."))}</span>`}
-            </div>
-            ${renderPathBox()}
-            <button class="cmgr-primary cmgr-full" data-action="download" ${resolution?.download_url ? "" : "disabled"}>${escapeHtml(t("Queue Download"))}</button>
-            <div class="cmgr-section-title">${escapeHtml(t("Description"))}</div>
-            <div class="cmgr-description">${sanitizeDescriptionHtml(model.description || version.description || "")}</div>
+            <section class="cmgr-detail-download-card">
+                ${versions.length > 1 ? `
+                    <div class="cmgr-detail-field-block">
+                        <label class="cmgr-label">${selectorIcon("layers")}${escapeHtml(t("Version"))}</label>
+                        ${renderSelectMenu({
+                            id: "selected-version",
+                            value: String(version.id || ""),
+                            options: versions.map((item) => ({ value: String(item.id || ""), label: `${item.name || item.id} · ${item.baseModel || "Other"}` })),
+                            inputAttrs: 'data-field="selected-version"',
+                            className: "cmgr-full",
+                        })}
+                    </div>
+                ` : `<input type="hidden" data-field="selected-version" value="${escapeAttr(version.id || "")}" />`}
+                ${files.length > 1 ? `
+                    <div class="cmgr-detail-field-block">
+                        <label class="cmgr-label">${selectorIcon("file")}${escapeHtml(t("File"))}</label>
+                        ${renderSelectMenu({
+                            id: "selected-file",
+                            value: String(file.name || file.id || ""),
+                            options: files.map((item) => ({
+                                value: String(item.name || item.id || ""),
+                                label: `${item.name || "Unnamed file"}${item.sizeKB ? ` · ${formatBytes(item.sizeKB * 1024)}` : ""}`,
+                            })),
+                            inputAttrs: 'data-field="selected-file"',
+                            className: "cmgr-full",
+                        })}
+                    </div>
+                ` : ""}
+                ${renderModelActionHub(model, version, file, resolution)}
+                ${renderPathBox()}
+            </section>
+            ${trainedWords.length ? `
+                <section class="cmgr-selector-triggers" aria-label="${escapeAttr(t("Trigger Words"))}">
+                <div class="cmgr-section-head">
+                    <div class="cmgr-section-title">${selectorIcon("tag")}${escapeHtml(t("Trigger Words"))}</div>
+                    ${trainedWords.length > 1 ? `<button class="cmgr-copy-all-btn" type="button" data-copy="${escapeAttr(trainedWords.join(", "))}">${escapeHtml(t("Copy All ({count})", { count: trainedWords.length }))}</button>` : ""}
+                </div>
+                <div class="cmgr-trained">
+                    ${trainedWords.slice(0, 16).map((word) => `<button type="button" data-copy="${escapeAttr(word)}">${escapeHtml(word)}</button>`).join("")}
+                </div>
+                </section>
+            ` : ""}
+            ${renderDetailTags(model.tags, state.activeTab === "Discover")}
+            <details class="cmgr-selector-section" data-section="description" open>
+                <summary>${selectorIcon("file")}<span>${escapeHtml(t("Description"))}</span></summary>
+                <div class="cmgr-selector-section-body"><div class="cmgr-description">${"description" in model ? sanitizeDescriptionHtml(model.description || version.description || "") : renderDescriptionSkeleton()}</div></div>
+            </details>
         </div>
     `;
 }
 
 function renderEmptyModelDetail() {
+    if (state.loadingSearch) return renderDetailSkeleton();
     return renderEmptySidebarDetail(
         t("Select a model"),
         t("Model details, versions, files, and download path will stay here."),
@@ -2150,41 +2519,55 @@ function renderEmptyModelDetail() {
 
 function renderPathEditor(resolution) {
     return `
-        <div class="cmgr-grid2">
-            <label>${escapeHtml(t("Type"))}${renderSelectMenu({
-                id: "override-root-kind",
-                value: state.pathOverrides.root_kind || "",
-                options: ROOT_KINDS
-                    .filter((root) => rootKindsForAssetKind(state.assetKind).includes(root.id))
-                    .map((root) => ({ value: root.id, label: t(root.label) })),
-                inputAttrs: 'data-override="root_kind"',
-            })}</label>
-            <label>${escapeHtml(t("Base Model"))}<input class="cmgr-input" data-override="base_model_dir" value="${escapeAttr(state.pathOverrides.base_model_dir || "")}" ${state.pathOverrides.root_kind === "workflows" ? "disabled" : ""} /></label>
-            <label>${escapeHtml(t("Category"))}<input class="cmgr-input" data-override="category_dir" value="${escapeAttr(state.pathOverrides.category_dir || "")}" /></label>
-            <label>${escapeHtml(t("Filename"))}<input class="cmgr-input" data-override="filename" value="${escapeAttr(state.pathOverrides.filename || "")}" /></label>
+        <div class="cmgr-path-drawer">
+            <div class="cmgr-grid2">
+                <label>${escapeHtml(t("Type"))}${renderSelectMenu({
+                    id: "override-root-kind",
+                    value: state.pathOverrides.root_kind || "",
+                    options: ROOT_KINDS
+                        .filter((root) => rootKindsForAssetKind(detailAssetKind()).includes(root.id))
+                        .map((root) => ({ value: root.id, label: t(root.label) })),
+                    inputAttrs: 'data-override="root_kind"',
+                })}</label>
+                <label>${escapeHtml(t("Base Model"))}<input class="cmgr-input" data-override="base_model_dir" value="${escapeAttr(state.pathOverrides.base_model_dir || "")}" ${state.pathOverrides.root_kind === "workflows" ? "disabled" : ""} /></label>
+                <label>${escapeHtml(t("Category"))}<input class="cmgr-input" data-override="category_dir" value="${escapeAttr(state.pathOverrides.category_dir || "")}" /></label>
+                <label>${escapeHtml(t("Filename"))}<input class="cmgr-input" data-override="filename" value="${escapeAttr(state.pathOverrides.filename || "")}" /></label>
+            </div>
+            <div class="cmgr-path">${escapeHtml(resolution.absolute_path || "")}</div>
         </div>
-        <div class="cmgr-path">${escapeHtml(resolution.absolute_path || "")}</div>
-        ${resolution.exists ? `<div class="cmgr-warning">${escapeHtml(t("A file already exists at this path. The downloader will keep both by adding a numeric suffix."))}</div>` : ""}
     `;
 }
 
 function renderPathBox() {
+    const resolution = state.resolution;
+    const open = Boolean(state.pathEditorOpen);
+    const previewPath = resolution
+        ? `${resolution.root_kind || state.pathOverrides.root_kind || ""}/${resolution.relative_path || resolution.filename || ""}`.replace(/\/+/g, "/")
+        : t(state.resolvingPath ? "Resolving path..." : "No path resolved yet.");
     return `
-        <div class="cmgr-path-box">
-            <div class="cmgr-path-title">${escapeHtml(t("Automatic Save Path"))}</div>
-            ${state.resolution ? renderPathEditor(state.resolution) : `<div class="cmgr-muted">${escapeHtml(t(state.resolvingPath ? "Resolving path..." : "No path resolved yet."))}</div>`}
+        <div class="cmgr-path-box ${open ? "is-open" : "is-collapsed"}">
+            <div class="cmgr-path-summary-row">
+                <div class="cmgr-path-summary-main" title="${escapeAttr(resolution?.absolute_path || previewPath)}">
+                    <span class="cmgr-path-folder-icon" aria-hidden="true">📁</span>
+                    <span class="cmgr-path-summary-text">${escapeHtml(previewPath)}</span>
+                </div>
+                <button class="cmgr-path-toggle-btn" type="button" data-action="toggle-path-editor" aria-expanded="${open ? "true" : "false"}">
+                    <span>${escapeHtml(t(open ? "Hide path options" : "Customize path"))}</span>
+                    <i aria-hidden="true">${open ? "▴" : "▾"}</i>
+                </button>
+            </div>
+            ${resolution?.exists ? `<div class="cmgr-warning cmgr-path-conflict">${escapeHtml(t("A file already exists at this path. The downloader will keep both by adding a numeric suffix."))}</div>` : ""}
+            ${resolution && open ? renderPathEditor(resolution) : ""}
         </div>
     `;
 }
 
 function renderLibrary() {
-    const selected = getSelectedAsset();
-    const filterText = activeFilterText();
-    const toolbar = renderSearchToolbar({
+    const toolbar = renderSelectorToolbar({
         title: `${t("Library")} · ${assetKindLabel(state.assetKind)}`,
-        subtitle: filterText || t("Local models"),
-        className: "cmgr-library-search-toolbar cmgr-local-search-toolbar",
-        searchHtml: renderToolbarSearchField({
+        headingHtml: renderToolbarKindTabs(),
+        className: "cmgr-library-selector-toolbar",
+        searchHtml: renderSelectorSearch({
             value: state.libraryQuery,
             inputAttrs: 'data-field="library-query"',
             placeholder: t("Filter local models..."),
@@ -2192,20 +2575,27 @@ function renderLibrary() {
         }),
         actionsHtml: `
             ${libraryMetadataBatch.running
-                ? `<button class="cmgr-secondary" data-action="cancel-enrich-library">${escapeHtml(t("Stop matching"))}</button>`
-                : `<button class="cmgr-secondary" data-action="enrich-library">${escapeHtml(t("Match missing Civitai info"))}</button>`}
-            <button class="cmgr-secondary cmgr-search-submit" data-action="refresh-library" ${libraryMetadataBatch.running ? "disabled" : ""}>${state.libraryLoading ? escapeHtml(t("Scanning...")) : escapeHtml(t("Refresh"))}</button>
+                ? `<button class="cmgr-selector-button" data-action="cancel-enrich-library">${escapeHtml(t("Stop matching"))}</button>`
+                : ""}
+            <button class="cmgr-selector-button" type="button" data-action="refresh-library" ${libraryMetadataBatch.running ? "disabled" : ""}>${selectorIcon("refresh")}<span>${escapeHtml(t(state.libraryLoading ? "Scanning..." : "Refresh"))}</span></button>
+            <details class="cmgr-selector-tools">
+                <summary class="is-icon" aria-label="${escapeAttr(t("Actions"))}" title="${escapeAttr(t("Actions"))}" aria-haspopup="menu">${selectorIcon("more")}</summary>
+                <div class="cmgr-selector-menu" role="menu" aria-label="${escapeAttr(t("Actions"))}">
+                    <button type="button" role="menuitem" data-action="enrich-library" ${libraryMetadataBatch.running ? "disabled" : ""}>${selectorIcon("match")}<span>${escapeHtml(t("Match missing Civitai info"))}</span></button>
+                </div>
+            </details>
         `,
+        filterBarHtml: renderActiveFilterBar(),
     });
     return `
         <section class="cmgr-page cmgr-library">
             ${toolbar}
             ${renderLibraryMetadataBatchStatus()}
-            <div class="cmgr-split has-detail">
+            <div class="cmgr-split has-detail ${state.detailOpen ? "is-detail-open" : ""}">
                 <div class="cmgr-results">
                     ${renderLibraryResults()}
                 </div>
-                <aside class="cmgr-detail is-open">${selected ? renderAssetDetail(selected) : renderEmptyAssetDetail()}</aside>
+                ${assetDetailAside()}
             </div>
         </section>
     `;
@@ -2228,9 +2618,9 @@ function renderAssetCard(asset, index = 0) {
     const badge = asset.base_model || inferBaseFromPath(asset) || "Other";
     const favorite = localFavorite(asset);
     return `
-        <article class="cmgr-card asset ${state.selectedAssetId === asset.id ? "selected" : ""}" data-asset-id="${escapeAttr(asset.id)}">
+        <article class="cmgr-card asset ${state.selectedAssetId === asset.id ? "selected" : ""}" data-asset-id="${escapeAttr(asset.id)}" tabindex="0">
             ${renderFavoriteCardMark(Boolean(favorite))}
-            <div class="cmgr-thumb small">${renderImage(asset.thumb_url, asset.name, { defer: index >= INITIAL_PREVIEW_LOADS, priority: index < HIGH_PRIORITY_PREVIEW_LOADS ? "high" : "auto" })}</div>
+            <div class="cmgr-thumb small">${renderCardMedia(asset.has_preview ? asset.thumb_url : "", cardMediaOptions(index))}</div>
             ${badge ? `<div class="cmgr-card-badge">${escapeHtml(badge)}</div>` : ""}
             <div class="cmgr-card-body">
                 <div class="cmgr-card-title">${escapeHtml(asset.name || asset.filename)}</div>
@@ -2245,36 +2635,63 @@ function renderAssetDetail(asset) {
     const matched = assetHasCivitaiMatch(asset);
     const favorite = localFavorite(asset);
     const civitaiUrl = asset.civitai_url || (asset.model_id ? `https://civitai.red/models/${encodeURIComponent(asset.model_id)}${asset.version_id ? `?modelVersionId=${encodeURIComponent(asset.version_id)}` : ""}` : "");
+    const words = (asset.trained_words || []).map((word) => String(word || "").trim()).filter(Boolean);
+    const title = escapeHtml(asset.name || asset.filename);
     return `
         <div class="cmgr-detail-scroll">
-            ${renderDetailPreview(asset.thumb_url, asset.name, 0)}
+            ${renderDetailGallery(galleryItemsForUrl(asset.has_preview ? asset.thumb_url : ""), asset.name || asset.filename)}
             <div class="cmgr-detail-head">
                 <div>
-                    <h2>${escapeHtml(asset.name || asset.filename)}</h2>
-                    <p>${escapeHtml(labelForRoot(asset.root_kind))} · ${escapeHtml(baseValue || "Other")} · ${escapeHtml(categoryValue || "Other")}</p>
+                    ${civitaiUrl
+                        ? `<a class="cmgr-detail-title-link" href="${escapeAttr(civitaiUrl)}" target="_blank" rel="noopener noreferrer" title="${escapeAttr(t("Open model page"))}"><h2>${title}</h2><span class="cmgr-external-icon" aria-hidden="true">↗</span></a>`
+                        : `<h2>${title}</h2>`}
+                    <p>${escapeHtml([asset.creator, asset.version_name].filter(Boolean).join(" · ") || t("Local file"))}</p>
+                    <div class="cmgr-detail-meta">${renderDetailFacts([labelForRoot(asset.root_kind), baseValue, categoryValue].filter((value) => value !== "Other").concat(formatBytes(asset.size || 0)))}</div>
                 </div>
             </div>
-            <div class="cmgr-detail-match-row ${matched ? "is-matched" : ""}">
-                <div>
-                    <b>${escapeHtml(t(matched ? "Civitai matched" : "Civitai not matched"))}</b>
-                    <span>${escapeHtml(matched ? `${asset.creator || t("Unknown creator")} · ${asset.version_name || asset.version_id || ""}` : t("Use the model file hash to find its Civitai page and metadata."))}</span>
+            <section class="cmgr-detail-download-card">
+                <div class="cmgr-detail-action-hub is-inline-cta">
+                    <button class="cmgr-secondary cmgr-detail-local-cta" type="button" data-action="open-folder">${selectorIcon("local")}<span>${escapeHtml(t("Open Folder"))}</span></button>
+                    ${renderFavoriteControls({
+                        favorite: Boolean(favorite),
+                        folders: state.favoriteFolders,
+                        folderId: favorite?.folder_id || "",
+                        toggleAction: "favorite-asset",
+                        folderAction: "assign-asset-favorite-folder",
+                        compact: true,
+                    })}
                 </div>
-                <button class="cmgr-primary" data-action="enrich-asset" ${libraryMetadataBatch.running ? "disabled" : ""}>${escapeHtml(t(matched ? "Refresh Civitai info" : "Match Civitai info"))}</button>
-            </div>
-            <div class="cmgr-info-list">
-                <div><span>${escapeHtml(t("File"))}</span><b>${escapeHtml(asset.filename)}</b></div>
-                <div><span>${escapeHtml(t("Relative Path"))}</span><b>${escapeHtml(asset.relative_path)}</b></div>
-                <div><span>${escapeHtml(t("Size"))}</span><b>${formatBytes(asset.size || 0)}</b></div>
-                <div><span>${escapeHtml(t("Metadata"))}</span><b>${escapeHtml(t(matched ? "Civitai matched" : "Civitai not matched"))}</b></div>
-                ${civitaiUrl ? `<div><span>Civitai</span><b><a href="${escapeAttr(civitaiUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(t("Open model page"))} ↗</a></b></div>` : ""}
-                <div><span>${escapeHtml(t("Absolute Path"))}</span><b>${escapeHtml(asset.absolute_path || "")}</b></div>
-            </div>
-            <div class="cmgr-section-title">${escapeHtml(t("Trigger Words"))}</div>
-            <div class="cmgr-trained">
-                ${(asset.trained_words || []).slice(0, 16).map((word) => `<button data-copy="${escapeAttr(word)}">${escapeHtml(word)}</button>`).join("") || `<span>${escapeHtml(t("No trained words cached."))}</span>`}
-            </div>
-            <div class="cmgr-path-box">
-                <div class="cmgr-path-title">${escapeHtml(t("Move / Rename"))}</div>
+                ${renderMatchRow(matched, asset, "enrich-asset", libraryMetadataBatch.running)}
+            </section>
+            ${words.length || asset.root_kind === "loras" ? `
+                <section class="cmgr-selector-triggers" aria-label="${escapeAttr(t("Trigger Words"))}">
+                    <div class="cmgr-section-head">
+                        <div class="cmgr-section-title">${selectorIcon("tag")}${escapeHtml(t("Trigger Words"))}</div>
+                        ${words.length > 1 ? `<button class="cmgr-copy-all-btn" type="button" data-copy="${escapeAttr(words.join(", "))}">${escapeHtml(t("Copy All ({count})", { count: words.length }))}</button>` : ""}
+                    </div>
+                    <div class="cmgr-trained">
+                        ${words.slice(0, 16).map((word) => `<button type="button" data-copy="${escapeAttr(word)}">${escapeHtml(word)}</button>`).join("") || `<span>${escapeHtml(t("No trained words cached."))}</span>`}
+                    </div>
+                </section>
+            ` : ""}
+            ${renderDetailTags(asset.tags, false)}
+            <details class="cmgr-selector-section" data-section="file" open>
+                <summary>${selectorIcon("file")}<span>${escapeHtml(t("File"))}</span></summary>
+                <div class="cmgr-selector-section-body">
+                    <div class="cmgr-info-list">
+                        <div><span>${escapeHtml(t("File"))}</span><b>${escapeHtml(asset.filename)}</b></div>
+                        <div><span>${escapeHtml(t("Relative Path"))}</span><b>${escapeHtml(asset.relative_path)}</b></div>
+                        <div><span>${escapeHtml(t("Absolute Path"))}</span><b>${escapeHtml(asset.absolute_path || "")}</b></div>
+                    </div>
+                    <div class="cmgr-detail-danger-row">
+                        <span><b>${escapeHtml(t("Delete local file"))}</b><small>${escapeHtml(t("Also removes companion metadata"))}</small></span>
+                        <button class="cmgr-danger" type="button" data-action="delete-asset">${escapeHtml(t("Delete"))}</button>
+                    </div>
+                </div>
+            </details>
+            <details class="cmgr-selector-section">
+                <summary>${selectorIcon("local")}<span>${escapeHtml(t("Move / Rename"))}</span></summary>
+                <div class="cmgr-selector-section-body">
                 <div class="cmgr-grid2">
                     <label>${escapeHtml(t("Type"))}${renderSelectMenu({
                         id: "move-root-kind",
@@ -2289,19 +2706,8 @@ function renderAssetDetail(asset) {
                     <label>${escapeHtml(t("Filename"))}<input class="cmgr-input" data-move="filename" value="${escapeAttr(asset.filename)}" /></label>
                 </div>
                 <button class="cmgr-secondary cmgr-full" data-action="move-asset">${escapeHtml(t("Move Asset"))}</button>
-            </div>
-            ${renderFavoriteControls({
-                favorite: Boolean(favorite),
-                folders: state.favoriteFolders,
-                folderId: favorite?.folder_id || "",
-                toggleAction: "favorite-asset",
-                folderAction: "assign-asset-favorite-folder",
-            })}
-            ${renderFileActions({
-                favorite: Boolean(favorite),
-                showFavorite: false,
-                actions: { favorite: "favorite-asset", open: "open-folder", delete: "delete-asset" },
-            })}
+                </div>
+            </details>
         </div>
     `;
 }
@@ -2337,81 +2743,28 @@ function renderEmptySidebarDetail(title, description, kind = "model") {
     `;
 }
 
+function downloadPageOptions() {
+    return { title: t("Downloads"), jobs: Object.values(state.downloads || {}), actionsFor: downloadActions };
+}
+
 function renderDownloads() {
-    const jobs = Object.values(state.downloads || {}).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
-    const activeCount = jobs.filter((job) => ["pending", "downloading", "cancelling"].includes(job.status)).length;
-    const finishedCount = jobs.length - activeCount;
+    return renderDownloadPage(downloadPageOptions());
+}
+
+function downloadedAsset(job) {
+    return state.libraryItems.find((item) => (job.relative_path && item.relative_path === job.relative_path)
+        || (job.version_id && String(item.version_id || "") === String(job.version_id))
+        || (job.model_id && String(item.model_id || "") === String(job.model_id))) || null;
+}
+
+function downloadActions(job) {
+    const taskButton = (action, label, className = "cmgr-secondary") => `<button class="${className}" type="button" data-action="${action}" data-task-id="${escapeAttr(job.id)}">${escapeHtml(t(label))}</button>`;
+    if (ACTIVE_DOWNLOAD_STATUSES.has(job.status)) return job.status === "cancelling" ? "" : taskButton("cancel-download", "Cancel");
+    const asset = job.status === "completed" ? downloadedAsset(job) : null;
     return `
-        <section class="cmgr-page cmgr-download-page">
-            <div class="cmgr-toolbar cmgr-download-toolbar">
-                <div class="cmgr-download-toolbar-heading">
-                    <h2>${escapeHtml(t("Downloads"))}</h2>
-                    <span>${escapeHtml(t("{active} active · {finished} finished", { active: activeCount, finished: finishedCount }))}</span>
-                </div>
-                <div class="cmgr-download-toolbar-actions">
-                    ${finishedCount ? `<button class="cmgr-secondary" data-action="clear-downloads">${escapeHtml(t("Clear finished"))}</button>` : ""}
-                    <button class="cmgr-secondary" data-action="refresh-downloads">${escapeHtml(t("Refresh"))}</button>
-                </div>
-            </div>
-            <div class="cmgr-download-list">
-                ${renderDownloadJobs(jobs)}
-            </div>
-        </section>
-    `;
-}
-
-function renderDownloadListOnly() {
-    if (!bodyEl) return false;
-    const list = bodyEl.querySelector(".cmgr-download-list");
-    if (!list) return false;
-    const jobs = Object.values(state.downloads || {}).sort((a, b) => (b.created_at || 0) - (a.created_at || 0));
-    list.innerHTML = renderDownloadJobs(jobs);
-    bindDownloadsEvents(list);
-    return true;
-}
-
-function renderDownloadJobs(jobs) {
-    return jobs.length ? jobs.map(renderDownloadJob).join("") : renderCollectionEmptyState({
-        kind: "downloads",
-        kicker: t("Downloads"),
-        title: t("No download tasks yet"),
-        description: t("Downloads you queue from Discover will appear here with their progress and status."),
-        hints: [t("Live progress"), t("Retry failed tasks")],
-    });
-}
-
-function renderDownloadJob(job) {
-    const total = Number(job.total || 0);
-    const progress = Number(job.progress || 0);
-    const pct = total > 0 ? Math.min(100, Math.round((progress / total) * 100)) : (job.status === "completed" ? 100 : 0);
-    const active = ["pending", "downloading", "cancelling"].includes(job.status);
-    const progressClass = total > 0 ? "" : " indeterminate";
-    const statusKey = String(job.status || "pending").replace(/^./, (letter) => letter.toUpperCase());
-    const path = String(job.relative_path || job.target_path || "");
-    return `
-        <article class="cmgr-download is-${escapeAttr(job.status || "pending")}">
-            <div class="cmgr-download-head">
-                <div class="cmgr-download-title">
-                    <span class="cmgr-download-kind">${escapeHtml(labelForRoot(job.root_kind))}</span>
-                    <strong title="${escapeAttr(job.filename || "Download")}">${escapeHtml(job.filename || "Download")}</strong>
-                </div>
-                <b class="cmgr-download-status ${escapeAttr(job.status || "pending")}"><i aria-hidden="true"></i>${escapeHtml(t(statusKey))}</b>
-            </div>
-            ${path ? `<div class="cmgr-download-path" title="${escapeAttr(job.target_path || path)}">${escapeHtml(path)}</div>` : ""}
-            <div class="cmgr-progress${progressClass}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}">
-                <div style="width:${pct}%"></div>
-            </div>
-            <div class="cmgr-download-meta">
-                <strong>${total > 0 ? `${pct}%` : (active ? escapeHtml(t("Waiting for size...")) : `${pct}%`)}</strong>
-                <span>${formatBytes(progress)} / ${total ? formatBytes(total) : escapeHtml(t("unknown"))}</span>
-            </div>
-            ${job.error ? `<div class="cmgr-warning">${escapeHtml(job.error)}</div>` : ""}
-            <div class="cmgr-download-actions">
-                ${active ? `<button class="cmgr-secondary" data-action="cancel-download" data-task-id="${escapeAttr(job.id)}">${escapeHtml(t("Cancel Download"))}</button>` : ""}
-                ${["failed", "cancelled"].includes(job.status) ? `<button class="cmgr-primary" data-action="retry-download" data-task-id="${escapeAttr(job.id)}">${escapeHtml(t("Retry Download"))}</button>` : ""}
-                ${active ? "" : `<button class="cmgr-download-remove" data-action="remove-download" data-task-id="${escapeAttr(job.id)}" title="${escapeAttr(t("Remove record"))}" aria-label="${escapeAttr(t("Remove record"))}"><span aria-hidden="true"></span></button>`}
-            </div>
-        </article>
+        ${["failed", "cancelled"].includes(job.status) ? taskButton("retry-download", "Retry", "cmgr-primary") : ""}
+        ${asset ? `<button class="cmgr-secondary" type="button" data-action="show-downloaded-asset" data-asset-id="${escapeAttr(asset.id)}">${escapeHtml(t("View in Library"))}</button>` : ""}
+        <button class="cmgr-dl-remove" type="button" data-action="remove-download" data-task-id="${escapeAttr(job.id)}" title="${escapeAttr(t("Remove record"))}" aria-label="${escapeAttr(t("Remove record"))}">${selectorIcon("close")}</button>
     `;
 }
 
@@ -2493,16 +2846,54 @@ function renderSettings() {
 
 function bindCommonEvents(root) {
     bindSelectMenus(root);
+    bindSelectorMenus(root);
     root.querySelectorAll("[data-copy]").forEach((btn) => {
         btn.onclick = async () => {
             try {
                 await navigator.clipboard.writeText(btn.dataset.copy || "");
+                btn.classList.add("is-copied");
+                setTimeout(() => btn.classList.remove("is-copied"), 1400);
                 showToast(t("Copied"));
             } catch (_) {
                 showToast(t("Copy failed"));
             }
         };
     });
+    root.querySelectorAll("[data-asset-kind]").forEach((btn) => {
+        btn.onclick = () => selectAssetKind(btn.dataset.assetKind);
+    });
+    const clearBase = root.querySelector('[data-action="clear-filter-base"]');
+    if (clearBase) clearBase.onclick = () => selectBaseModel("");
+    const clearTag = root.querySelector('[data-action="clear-filter-tag"]');
+    if (clearTag) clearTag.onclick = () => selectTag("");
+    const clearCategory = root.querySelector('[data-action="clear-filter-category"]');
+    if (clearCategory) clearCategory.onclick = () => {
+        if (state.activeTab === "Discover") state.selectedCivitaiCategory = "";
+        else state.selectedCategory = "";
+        state.selectedModel = null;
+        state.selectedAssetId = "";
+        state.resolution = null;
+        if (state.activeTab === "Discover") search(true, { silent: true });
+        else render();
+    };
+    const resetAll = root.querySelector('[data-action="reset-all-filters"]');
+    if (resetAll) resetAll.onclick = resetManagerFilters;
+    root.querySelectorAll('[data-action="view-in-library"]').forEach((btn) => {
+        btn.onclick = () => showInLibrary(btn.dataset.assetId || "");
+    });
+    root.querySelectorAll('[data-action="open-downloads-tab"]').forEach((btn) => {
+        btn.onclick = () => switchManagerTab("Downloads");
+    });
+}
+
+function showInLibrary(assetId) {
+    const asset = state.libraryItems.find((item) => String(item.id) === String(assetId));
+    switchManagerTab("Library");
+    if (!asset) return;
+    selectAssetKind(assetKindForRoot(asset.root_kind));
+    state.selectedAssetId = asset.id;
+    render();
+    bodyEl.querySelector(".cmgr-library .cmgr-card.selected")?.scrollIntoView({ block: "center" });
 }
 
 function bindActiveTabEvents(root) {
@@ -2511,7 +2902,7 @@ function bindActiveTabEvents(root) {
     if (state.activeTab === "Favorites") bindFavoritesEvents(root);
     if (state.activeTab === "Downloads") bindDownloadsEvents(root);
     if (state.activeTab === "Settings") bindSettingsEvents(root);
-    scheduleLazyPreviews(root);
+    observeCardMedia(root);
 }
 
 function filteredFavorites() {
@@ -2528,29 +2919,25 @@ function favoriteTypeLabel(item) {
 }
 
 function renderFavorites() {
-    const item = selectedFavorite();
-    const toolbar = renderSearchToolbar({
+    const toolbar = renderSelectorToolbar({
         title: t("Favorites"),
-        subtitle: state.selectedFavoriteFolderId
-            ? state.favoriteFolders.find((folder) => folder.id === state.selectedFavoriteFolderId)?.name || t("All Favorites")
-            : t("All Favorites"),
-        className: "cmgr-favorites-toolbar",
-        searchHtml: renderToolbarSearchField({
+        className: "cmgr-favorites-selector-toolbar",
+        searchHtml: renderSelectorSearch({
             value: state.favoriteQuery,
             inputAttrs: 'data-field="favorite-query"',
             placeholder: t("Search favorites..."),
             clearAction: "clear-favorite-search",
         }),
-        actionsHtml: `<span class="cmgr-favorite-total">${filteredFavorites().length}</span>`,
+        actionsHtml: `<span class="cmgr-selector-total">${filteredFavorites().length}</span>`,
     });
     return `
         <section class="cmgr-page cmgr-favorites-page">
             ${toolbar}
-            <div class="cmgr-split has-detail">
+            <div class="cmgr-split has-detail ${state.detailOpen ? "is-detail-open" : ""}">
                 <div class="cmgr-results">
                     ${renderFavoriteResults()}
                 </div>
-                <aside class="cmgr-detail is-open">${item ? renderFavoriteDetail(item) : renderEmptyFavoriteDetail()}</aside>
+                ${favoriteDetailAside()}
             </div>
         </section>
     `;
@@ -2558,7 +2945,7 @@ function renderFavorites() {
 
 function renderFavoriteResults() {
     const items = filteredFavorites();
-    if (state.favoritesLoading && !items.length) return renderSearchSkeletons(10);
+    if (state.favoritesLoading && !items.length) return renderSearchSkeletons();
     return items.length
         ? items.map(renderFavoriteCard).join("")
         : renderCollectionEmptyState({
@@ -2577,15 +2964,10 @@ function renderFavoriteResults() {
 function renderFavoriteCard(item, index = 0) {
     const model = favoriteModel(item);
     const localAsset = localAssetForFavorite(item, state.libraryItems);
-    const media = model ? modelPreviewMedia(model) : { url: item.preview_url || localAsset?.thumb_url || "", type: "image" };
-    const preview = media.url
-        ? `<span class="cmgr-media-skeleton" aria-hidden="true"></span>${renderMedia(media, item.name, {
-            defer: true,
-            priority: index < HIGH_PRIORITY_PREVIEW_LOADS ? "high" : "auto",
-        })}`
-        : renderUnavailablePreview(media.emptyText, "cmgr-no-image");
+    const media = model ? modelPreviewMedia(model) : item.preview_url || (localAsset?.has_preview ? localAsset.thumb_url : "");
+    const preview = renderCardMedia(media, cardMediaOptions(index));
     return `
-        <article class="cmgr-card cmgr-favorite-card ${state.selectedFavoriteKey === item.key ? "selected" : ""}" data-favorite-key="${escapeAttr(item.key)}">
+        <article class="cmgr-card cmgr-favorite-card ${state.selectedFavoriteKey === item.key ? "selected" : ""}" data-favorite-key="${escapeAttr(item.key)}" tabindex="0">
             <div class="cmgr-thumb">${preview}</div>
             <div class="cmgr-card-badge">${escapeHtml(favoriteTypeLabel(item))}</div>
             <div class="cmgr-card-body">
@@ -2601,12 +2983,12 @@ function renderFavoriteCard(item, index = 0) {
 
 function renderFavoriteDetail(item) {
     const model = favoriteModel(item);
-    if (model) return renderModelDetail(model);
+    if (model) return renderModelDetail(String(state.selectedModel?.id || "") === String(model.id) ? state.selectedModel : model);
     const asset = localAssetForFavorite(item, state.libraryItems);
     if (asset) return renderAssetDetail(asset);
     return `
         <div class="cmgr-detail-scroll">
-            ${renderDetailPreview(item.preview_url || "", item.name, 0)}
+            ${renderDetailGallery(galleryItemsForUrl(item.preview_url || ""), item.name || "")}
             <div class="cmgr-detail-head"><div><h2>${escapeHtml(item.name || "Untitled")}</h2><p>${escapeHtml(favoriteTypeLabel(item))} · ${escapeHtml(item.creator || t("Unknown creator"))}</p></div></div>
             ${renderFavoriteControls({
                 favorite: true,
@@ -2655,48 +3037,6 @@ function bindFavoritesSidebar(root) {
     });
 }
 
-function scheduleLazyPreviews(root) {
-    if (previewSetupFrame) cancelAnimationFrame(previewSetupFrame);
-    previewSetupFrame = requestAnimationFrame(() => {
-        previewSetupFrame = requestAnimationFrame(() => {
-            previewSetupFrame = 0;
-            if (root?.isConnected) setupLazyPreviews(root);
-        });
-    });
-}
-
-function setupLazyPreviews(root) {
-    previewObserver?.disconnect();
-    previewObserver = null;
-    const pending = [...root.querySelectorAll("img[data-cmgr-src], video[data-cmgr-src]")];
-    if (!pending.length) return;
-
-    const loadImage = (img) => {
-        const src = img.dataset.cmgrSrc;
-        if (!src || img.dataset.cmgrLoaded === "1") return;
-        img.dataset.cmgrLoaded = "1";
-        img.src = src;
-        if (img.tagName === "VIDEO") {
-            img.load();
-            img.play?.().catch(() => {});
-        }
-    };
-
-    const scrollRoot = root.matches?.(".cmgr-results") ? root : root.querySelector(".cmgr-results") || null;
-    if ("IntersectionObserver" in window) {
-        previewObserver = new IntersectionObserver((entries) => {
-            entries.forEach((entry) => {
-                if (!entry.isIntersecting) return;
-                previewObserver?.unobserve(entry.target);
-                loadImage(entry.target);
-            });
-        }, { root: scrollRoot, rootMargin: "100% 0px" });
-        pending.forEach((img) => previewObserver.observe(img));
-    } else {
-        pending.forEach(loadImage);
-    }
-}
-
 function bindDiscoverEvents(root) {
     const queryInput = root.querySelector('[data-field="query"]');
     const clearSearch = root.querySelector('[data-action="clear-search"]');
@@ -2727,12 +3067,13 @@ function bindDiscoverEvents(root) {
         }
         search(true, { silent: true });
     };
-    const sortSelect = root.querySelector('[data-field="sort"]');
-    if (sortSelect) sortSelect.onchange = () => {
-        cancelActiveSearch();
-        state.sort = sortSelect.value;
-        search(true, { silent: true });
-    };
+    root.querySelectorAll('[data-selector-sort]').forEach((button) => {
+        button.onclick = () => {
+            cancelActiveSearch();
+            state.sort = button.dataset.selectorSort;
+            void search(true, { silent: true });
+        };
+    });
     const searchBtn = root.querySelector('[data-action="search"]');
     if (searchBtn) searchBtn.onclick = () => {
         if (responsiveSearchTimer) {
@@ -2746,11 +3087,21 @@ function bindDiscoverEvents(root) {
     if (moreBtn) moreBtn.onclick = () => search(false);
     attachRememberedScroll(root.querySelector(".cmgr-results"), "discoverResults", maybeAutoLoadMore);
     root.querySelectorAll("[data-model-id]").forEach((card) => {
+        const favBtn = card.querySelector("[data-card-favorite]");
+        if (favBtn) {
+            favBtn.onclick = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const model = state.searchItems.find((item) => String(item.id) === String(card.dataset.modelId));
+                if (model) void toggleRemoteFavorite(model, state.assetKind);
+            };
+        }
         card.onclick = () => {
             const results = card.closest(".cmgr-results");
             if (results) {
                 state.scroll.discoverResults = results.scrollTop;
             }
+            openDetailDrawer();
             if (String(state.selectedModel?.id || "") === String(card.dataset.modelId || "")) {
                 return;
             }
@@ -2758,21 +3109,36 @@ function bindDiscoverEvents(root) {
             if (model) selectModel(model);
         };
     });
-    const versionSelect = root.querySelector('[data-field="selected-version"]');
-    if (versionSelect) versionSelect.onchange = async () => {
-        state.selectedVersionId = versionSelect.value;
+    root.querySelectorAll("[data-detail-tag]").forEach((button) => {
+        button.onclick = () => {
+            state.detailOpen = false;
+            selectTag(button.dataset.detailTag);
+        };
+    });
+    const switchVersion = async (nextVersionId) => {
+        if (!nextVersionId || String(state.selectedVersionId) === String(nextVersionId)) return;
+        state.selectedVersionId = String(nextVersionId);
         state.selectedFileName = String(getFiles(getSelectedVersion())[0]?.name || "");
         state.pathOverrides = {};
-        state.detailPreviewIndex = 0;
-        renderSelectedModelDetail();
+        if (state.activeTab === "Favorites") renderSelectedFavoriteDetail();
+        else renderSelectedModelDetail();
         await resolveSelectedPath({ detailOnly: true, pathOnly: true });
     };
+    const versionSelect = root.querySelector('[data-field="selected-version"]');
+    if (versionSelect) versionSelect.onchange = () => void switchVersion(versionSelect.value);
     const fileSelect = root.querySelector('[data-field="selected-file"]');
     if (fileSelect) fileSelect.onchange = async () => {
         state.selectedFileName = fileSelect.value;
         state.pathOverrides = {};
         await resolveSelectedPath({ detailOnly: true, pathOnly: true });
     };
+    const togglePathBtn = root.querySelector('[data-action="toggle-path-editor"]');
+    if (togglePathBtn) {
+        togglePathBtn.onclick = () => {
+            state.pathEditorOpen = !state.pathEditorOpen;
+            if (!updateSelectedPathPanel()) render();
+        };
+    }
     root.querySelectorAll("[data-override]").forEach((input) => {
         input.onchange = async () => {
             state.pathOverrides[input.dataset.override] = input.value;
@@ -2781,27 +3147,18 @@ function bindDiscoverEvents(root) {
     });
     const downloadBtn = root.querySelector('[data-action="download"]');
     if (downloadBtn) downloadBtn.onclick = () => startDownload();
+    root.querySelectorAll('[data-action="cancel-download"]').forEach((btn) => {
+        btn.onclick = () => cancelDownload(btn.dataset.taskId);
+    });
     const favoriteBtn = root.querySelector('[data-action="favorite-model"]');
-    if (favoriteBtn) favoriteBtn.onclick = () => void toggleRemoteFavorite(state.selectedModel, state.assetKind);
+    if (favoriteBtn) favoriteBtn.onclick = () => void toggleRemoteFavorite();
     const favoriteFolder = root.querySelector('[data-action="assign-model-favorite-folder"]');
     if (favoriteFolder) favoriteFolder.onchange = () => void assignFavoriteFolder(remoteFavorite(), favoriteFolder.value);
-    root.querySelectorAll("[data-preview-delta]").forEach((btn) => {
-        btn.onclick = (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            const delta = Number(btn.dataset.previewDelta || 0);
-            state.detailPreviewIndex = Math.max(0, state.detailPreviewIndex + delta);
-            const preview = btn.closest(".cmgr-detail-preview");
-            if (preview && state.selectedModel) {
-                preview.outerHTML = renderModelDetailPreview(state.selectedModel, getSelectedVersion(), state.detailPreviewIndex);
-                if (state.activeTab === "Favorites") bindFavoritesEvents(bodyEl);
-                else bindDiscoverEvents(bodyEl);
-            } else {
-                if (state.activeTab === "Favorites") renderSelectedFavoriteDetail();
-                else renderSelectedModelDetail();
-            }
-        };
-    });
+}
+
+function openDetailDrawer() {
+    state.detailOpen = true;
+    setDetailDrawer(bodyEl, true);
 }
 
 function bindLibraryEvents(root) {
@@ -2825,7 +3182,7 @@ function bindLibraryEvents(root) {
         if (!results) return;
         results.innerHTML = renderLibraryResults();
         bindLibraryCards(root);
-        scheduleLazyPreviews(root);
+        observeCardMedia(root);
     };
     if (queryInput) queryInput.oninput = () => {
         state.libraryQuery = queryInput.value;
@@ -2860,15 +3217,24 @@ function bindLibraryEvents(root) {
 
 function bindLibraryCards(root) {
     root.querySelectorAll("[data-asset-id]").forEach((card) => {
+        const favBtn = card.querySelector("[data-card-favorite]");
+        if (favBtn) {
+            favBtn.onclick = (event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                const asset = state.libraryItems.find((item) => String(item.id || "") === String(card.dataset.assetId || ""));
+                if (asset) void toggleLocalFavorite(asset);
+            };
+        }
         card.onclick = () => {
             const results = card.closest(".cmgr-results");
             if (results) {
                 state.scroll.libraryResults = results.scrollTop;
             }
+            openDetailDrawer();
             if (String(state.selectedAssetId || "") === String(card.dataset.assetId || "")) {
                 return;
             }
-            state.detailPreviewIndex = 0;
             state.selectedAssetId = card.dataset.assetId;
             if (!renderSelectedAssetDetail()) render();
         };
@@ -2876,19 +3242,21 @@ function bindLibraryCards(root) {
 }
 
 function bindDownloadsEvents(root) {
-    const refresh = root.querySelector('[data-action="refresh-downloads"]');
-    if (refresh) refresh.onclick = () => loadDownloads();
-    const clear = root.querySelector('[data-action="clear-downloads"]');
-    if (clear) clear.onclick = () => removeDownloadRecord();
-    root.querySelectorAll('[data-action="cancel-download"]').forEach((button) => {
-        button.onclick = () => cancelDownload(button.dataset.taskId);
-    });
-    root.querySelectorAll('[data-action="retry-download"]').forEach((button) => {
-        button.onclick = () => retryDownload(button.dataset.taskId);
-    });
-    root.querySelectorAll('[data-action="remove-download"]').forEach((button) => {
-        button.onclick = () => removeDownloadRecord(button.dataset.taskId);
-    });
+    const page = root.querySelector(".cmgr-dl-page");
+    if (!page) return;
+    // Rows are patched in place while polling, so actions are delegated.
+    page.onclick = (event) => {
+        const button = event.target.closest("[data-action]");
+        const taskId = button?.dataset.taskId || "";
+        const actions = {
+            "cancel-download": () => cancelDownload(taskId),
+            "retry-download": () => retryDownload(taskId),
+            "remove-download": () => removeDownloadRecord(taskId),
+            "clear-downloads": () => removeDownloadRecord(),
+            "show-downloaded-asset": () => showInLibrary(button.dataset.assetId || ""),
+        };
+        actions[button?.dataset.action]?.();
+    };
 }
 
 function bindSettingsEvents(root) {
@@ -3120,7 +3488,39 @@ function activeDownloadCount() {
 
 function isInstalled(model) {
     const modelId = String(model?.id || "");
+    if (!modelId) return false;
     return state.libraryItems.some((item) => String(item.model_id || "") === modelId);
+}
+
+function findInstalledAssetForModel(model, version = null) {
+    const modelId = String(model?.id || "");
+    const versionId = String(version?.id || "");
+    if (versionId) {
+        const exact = state.libraryItems.find((item) => String(item.version_id || "") === versionId);
+        if (exact) return exact;
+    }
+    if (modelId) {
+        const byModel = state.libraryItems.find((item) => String(item.model_id || "") === modelId);
+        if (byModel) return byModel;
+    }
+    return null;
+}
+
+function activeDownloadJobForModel(model, version = null) {
+    const modelId = String(model?.id || "");
+    const versionId = String(version?.id || "");
+    const jobs = Object.values(state.downloads || {}).filter((job) =>
+        ACTIVE_DOWNLOAD_STATUSES.has(job?.status)
+    );
+    if (versionId) {
+        const byVersion = jobs.find((job) => String(job.version_id || "") === versionId);
+        if (byVersion) return byVersion;
+    }
+    if (modelId) {
+        const byModel = jobs.find((job) => String(job.model_id || "") === modelId);
+        if (byModel) return byModel;
+    }
+    return null;
 }
 
 function inferBaseFromPath(asset) {
@@ -3139,156 +3539,13 @@ function labelForRoot(rootKind) {
     return t(ROOT_KINDS.find((root) => root.id === rootKind)?.label || rootKind || "Asset");
 }
 
-function categoryLabel(model) {
-    if (typeof model.category === "string") return model.category;
-    if (model.category?.name) return model.category.name;
-    return model.modelCategory || "Other";
-}
-
-function modelTagSummary(model) {
-    const tags = Array.isArray(model?.tags)
-        ? model.tags.map((tag) => String(tag || "").trim()).filter(Boolean)
-        : [];
-    return tags.slice(0, 2).join(", ");
-}
-
-function modelPreviewMedia(model, width = 450, options = {}) {
+function modelPreviewMedia(model) {
     const source = findModelPreviewSource(model);
-    if (source) return normalizePreviewMedia(source, width, options);
+    if (source) return createPreviewMedia(source, 450);
     const messageKey = isModelPreviewFiltered(model, state.contentFilterActive)
         ? "Preview hidden by content settings"
         : "No Preview";
     return { url: "", type: "image", emptyText: t(messageKey) };
-}
-
-function modelPreviewItems(model, version = getSelectedVersion(), width = 700, options = {}) {
-    const seen = new Set();
-    const addImages = (images, items) => {
-        if (!Array.isArray(images)) return;
-        const ordered = [
-            ...images.filter((image) => !isPreviewVideo(image)),
-            ...images.filter((image) => isPreviewVideo(image)),
-        ];
-        for (const image of ordered) {
-            if (items.length >= DETAIL_PREVIEW_LIMIT) break;
-            const media = normalizePreviewMedia(image, width, options);
-            if (!media.url || seen.has(media.url)) continue;
-            seen.add(media.url);
-            items.push(media);
-        }
-    };
-    const items = [];
-    addImages(version?.images, items);
-    return items.length ? items : [modelPreviewMedia(model, width, options)];
-}
-
-function isPreviewVideo(image) {
-    const rawUrl = typeof image === "string" ? image : image?.url || image?.videoUrl || image?.thumbnailUrl || "";
-    const mediaType = String(image?.type || image?.mimeType || image?.contentType || "").toLowerCase();
-    return mediaType.includes("video") || looksLikeVideoUrl(rawUrl);
-}
-
-function modelPreviewUrl(model, width = 450) {
-    return modelPreviewMedia(model, width).url;
-}
-
-function renderModelDetailPreview(model, version, index = 0) {
-    return renderDetailPreview(
-        modelPreviewItems(model, version, 450),
-        model.name,
-        index,
-    );
-}
-
-function normalizePreviewMedia(image, width, options = {}) {
-    const media = createPreviewMedia(image, width);
-    if (options.diskCache !== true || media.type === "video" || !media.url) return media;
-    return {
-        ...media,
-        url: `${API}/image?url=${encodeURIComponent(media.url)}&width=${width}`,
-        fallbackUrls: (media.fallbackUrls || []).map((url) => `${API}/image?url=${encodeURIComponent(url)}&width=${width}`),
-    };
-}
-
-function renderMedia(media, alt, options = {}) {
-    const normalized = typeof media === "string" ? { url: media, type: looksLikeVideoUrl(media) ? "video" : "image" } : media || {};
-    if (normalized.type === "video") return renderVideo(normalized, alt, options);
-    return renderImage(normalized, alt, options);
-}
-
-function renderDetailPreview(media, alt, index = 0) {
-    const items = Array.isArray(media)
-        ? media
-        : [typeof media === "string" ? { url: media, type: looksLikeVideoUrl(media) ? "video" : "image" } : media || {}];
-    const available = items.filter((item) => item?.url);
-    const list = available.length ? available : [items[0] || {}];
-    const selectedIndex = ((Number(index) || 0) % list.length + list.length) % list.length;
-    const normalized = list[selectedIndex] || {};
-    const url = normalized.url || "";
-    const bg = url ? renderDetailPreviewBackground(normalized, alt) : "";
-    const rawUrl = String(normalized.rawUrl || "").trim();
-    const originalUrl = /^https?:\/\//i.test(rawUrl) ? rawUrl : "";
-    const originalLink = originalUrl
-        ? `<a class="cmgr-detail-preview-open-original" href="${escapeAttr(originalUrl)}" target="_blank" rel="noopener noreferrer" title="${escapeAttr(t("Open original image"))}" aria-label="${escapeAttr(t("Open original image"))}"></a>`
-        : "";
-    const nav = list.length > 1 ? `
-        <button class="cmgr-detail-preview-nav prev" data-preview-delta="-1" title="Previous preview">‹</button>
-        <button class="cmgr-detail-preview-nav next" data-preview-delta="1" title="Next preview">›</button>
-        <div class="cmgr-detail-preview-count">${selectedIndex + 1} / ${list.length}</div>
-    ` : "";
-    const previewKey = `${normalized.type || "image"}:${url}:${selectedIndex}`;
-    return `<div class="cmgr-detail-preview" data-preview-index="${selectedIndex}" data-preview-key="${escapeAttr(previewKey)}">${bg}${renderMedia(normalized, alt, { priority: "high", detail: true })}${originalLink}${nav}</div>`;
-}
-
-function renderDetailPreviewBackground(media, alt) {
-    const url = media?.url || "";
-    if (!url) return "";
-    if (media.type === "video") {
-        if (media.posterUrl) {
-            return `<img class="cmgr-detail-preview-bg" src="${escapeAttr(media.posterUrl)}" alt="" aria-hidden="true" decoding="async" /><div class="cmgr-detail-preview-overlay"></div>`;
-        }
-        return `<video class="cmgr-detail-preview-bg" src="${escapeAttr(url)}" muted loop playsinline autoplay preload="metadata" aria-hidden="true"></video><div class="cmgr-detail-preview-overlay"></div>`;
-    }
-    return `<img class="cmgr-detail-preview-bg" src="${escapeAttr(url)}" alt="" aria-hidden="true" decoding="async" /><div class="cmgr-detail-preview-overlay"></div>`;
-}
-
-function renderVideo(url, alt, options = {}) {
-    const descriptor = typeof url === "string" ? { url } : url || {};
-    const sourceUrl = descriptor.url || "";
-    if (!sourceUrl) return renderUnavailablePreview(descriptor.emptyText, "cmgr-no-image");
-    const fallbackUrls = previewFallbackUrls(descriptor, sourceUrl);
-    const posterUrl = descriptor.posterUrl || "";
-    const poster = posterUrl
-        ? renderImage({ url: posterUrl, fallbackUrls: descriptor.posterFallbackUrls || [] }, "", {
-            ...options,
-            className: "cmgr-video-poster",
-            ariaHidden: true,
-        })
-        : "";
-    const loaded = window.__cmgrLoadedImageUrls?.has(sourceUrl);
-    const defer = options.defer === true && !loaded;
-    const src = defer ? "" : sourceUrl;
-    const dataSrc = defer ? `data-cmgr-src="${escapeAttr(sourceUrl)}" data-cmgr-loaded="0"` : "";
-    const fallbackAttr = previewFallbackAttr(fallbackUrls);
-    const posterAttr = posterUrl ? 'data-has-poster="1"' : "";
-    const videoState = loaded ? "is-loaded" : (defer ? "is-pending" : "is-loading");
-    return `${poster}<video class="cmgr-preview-img cmgr-preview-video ${videoState}" src="${escapeAttr(src)}" ${dataSrc} ${fallbackAttr} ${posterAttr} muted loop playsinline autoplay preload="${defer ? "none" : "metadata"}" aria-label="${escapeAttr(alt || "Preview video")}" onloadeddata="window.__cmgrMarkImageLoaded?.(this.dataset.cmgrSrc || this.currentSrc || this.src); this.classList.remove('is-pending','is-loading'); this.classList.add('is-loaded')" onerror="let q=[];try{q=JSON.parse(this.dataset.fallbackSrcs||'[]')}catch(_){};const next=q.shift();this.dataset.fallbackSrcs=JSON.stringify(q);if(next){this.src=next;this.load();this.play?.().catch(()=>{});}else if(this.dataset.hasPoster==='1'){this.remove();}else{this.replaceWith(Object.assign(document.createElement('div'),{className:'cmgr-no-image',textContent:'No Preview'}))}"></video>`;
-}
-
-function renderImage(url, alt, options = {}) {
-    const descriptor = typeof url === "string" ? { url } : url || {};
-    const sourceUrl = descriptor.url || "";
-    if (!sourceUrl) return renderUnavailablePreview(descriptor.emptyText, "cmgr-no-image");
-    const fallbackUrls = previewFallbackUrls(descriptor, sourceUrl);
-    const loaded = window.__cmgrLoadedImageUrls?.has(sourceUrl);
-    const defer = options.defer === true && !loaded;
-    const src = defer ? TRANSPARENT_PIXEL : sourceUrl;
-    const lazyAttrs = defer ? `data-cmgr-src="${escapeAttr(sourceUrl)}" data-cmgr-loaded="0" fetchpriority="${options.priority || "auto"}"` : `fetchpriority="${options.priority || "auto"}"`;
-    const fallbackAttr = previewFallbackAttr(fallbackUrls);
-    const imageState = loaded ? "is-loaded" : (defer ? "is-pending" : "is-loading");
-    const extraClass = String(options.className || "").replace(/[^a-z0-9_-]+/gi, " ").trim();
-    const ariaHidden = options.ariaHidden ? 'aria-hidden="true"' : "";
-    return `<img class="cmgr-preview-img ${extraClass} ${imageState}" src="${escapeAttr(src)}" ${lazyAttrs} ${fallbackAttr} ${ariaHidden} alt="${escapeAttr(alt || (options.ariaHidden ? "" : "Preview"))}" loading="${defer ? "lazy" : "eager"}" decoding="async" onload="if(!this.dataset.cmgrSrc || this.dataset.cmgrLoaded==='1'){window.__cmgrMarkImageLoaded?.(this.dataset.cmgrSrc || this.currentSrc || this.src); this.classList.remove('is-pending','is-loading'); this.classList.add('is-loaded')}" onerror="let q=[];try{q=JSON.parse(this.dataset.fallbackSrcs||'[]')}catch(_){};const next=q.shift();this.dataset.fallbackSrcs=JSON.stringify(q);if(next){this.src=next;}else{this.replaceWith(Object.assign(document.createElement('div'),{className:'cmgr-no-image',textContent:'No Preview'}))}" />`;
 }
 
 function bindFavoritesEvents(root) {
@@ -3299,7 +3556,7 @@ function bindFavoritesEvents(root) {
         if (!results) return;
         results.innerHTML = renderFavoriteResults();
         bindFavoriteCards(root);
-        scheduleLazyPreviews(results);
+        observeCardMedia(results);
     };
     if (queryInput) queryInput.oninput = () => {
         state.favoriteQuery = queryInput.value;
@@ -3353,29 +3610,12 @@ function bindFavoriteCards(root) {
         card.onclick = () => {
             const results = card.closest(".cmgr-results");
             if (results) state.scroll.favoriteResults = results.scrollTop;
+            openDetailDrawer();
             if (card.dataset.favoriteKey === state.selectedFavoriteKey) return;
             const item = state.favoriteItems.find((entry) => entry.key === card.dataset.favoriteKey);
             if (item) void selectFavoriteItem(item);
         };
     });
-}
-
-function renderUnavailablePreview(text, className = "cmgr-no-image") {
-    const label = String(text || t("No Preview"));
-    const filteredClass = label === t("Preview hidden by content settings") ? " cmgr-filtered-preview" : "";
-    return `<div class="${className}${filteredClass}">${escapeHtml(label)}</div>`;
-}
-
-function previewFallbackUrls(descriptor, sourceUrl) {
-    const candidates = [
-        ...(Array.isArray(descriptor?.fallbackUrls) ? descriptor.fallbackUrls : []),
-        descriptor?.fallbackUrl,
-    ];
-    return [...new Set(candidates.map((url) => String(url || "").trim()).filter((url) => url && url !== sourceUrl))];
-}
-
-function previewFallbackAttr(urls) {
-    return urls.length ? `data-fallback-srcs="${escapeAttr(JSON.stringify(urls))}"` : "";
 }
 
 function sanitizeDescriptionHtml(html) {
@@ -3408,55 +3648,6 @@ function sanitizeDescriptionHtml(html) {
     if (cleaned) return cleaned;
     const text = raw.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     return text ? `<p>${escapeHtml(text)}</p>` : `<span class="cmgr-muted">${escapeHtml(t("No description available."))}</span>`;
-}
-
-function formatBytes(value) {
-    const bytes = Number(value || 0);
-    if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-    const units = ["B", "KB", "MB", "GB", "TB"];
-    let size = bytes;
-    let unit = 0;
-    while (size >= 1024 && unit < units.length - 1) {
-        size /= 1024;
-        unit += 1;
-    }
-    return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
-}
-
-function readStatValue(source, keys) {
-    if (!source || typeof source !== "object") return 0;
-    for (const key of keys) {
-        const value = Number(source[key]);
-        if (Number.isFinite(value) && value > 0) return value;
-    }
-    return 0;
-}
-
-function getModelStats(model, version = {}) {
-    const modelStats = model?.stats || model?.metrics || {};
-    const versionStats = version?.stats || version?.metrics || {};
-    const downloadKeys = ["downloadCount", "downloads", "download_count"];
-    const likeKeys = ["thumbsUpCount", "likeCount", "likes", "favoriteCount", "favorites", "collectedCount"];
-    return {
-        downloadCount:
-            readStatValue(modelStats, downloadKeys) ||
-            readStatValue(versionStats, downloadKeys) ||
-            readStatValue(model, downloadKeys) ||
-            readStatValue(version, downloadKeys),
-        likeCount:
-            readStatValue(modelStats, likeKeys) ||
-            readStatValue(versionStats, likeKeys) ||
-            readStatValue(model, likeKeys) ||
-            readStatValue(version, likeKeys),
-    };
-}
-
-function formatStatCount(value) {
-    const number = Number(value || 0);
-    if (!Number.isFinite(number) || number <= 0) return "0";
-    if (number >= 1000000) return `${(number / 1000000).toFixed(number >= 10000000 ? 0 : 1).replace(/\.0$/, "")}M`;
-    if (number >= 1000) return `${(number / 1000).toFixed(number >= 10000 ? 0 : 1).replace(/\.0$/, "")}K`;
-    return String(Math.round(number));
 }
 
 function showToast(message) {
