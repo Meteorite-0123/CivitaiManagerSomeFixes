@@ -1,7 +1,19 @@
+import { fetchModelDetail, peekModelDetail } from "./api.js";
 import { renderCardMedia } from "./card_media.js";
 import { renderCollectionEmptyState } from "./components.js";
-import { formatBytes } from "./detail.js";
+import {
+    civitaiModelUrl,
+    formatBytes,
+    formatStatCount,
+    galleryItemsForModel,
+    galleryItemsForUrl,
+    modelStats,
+    renderDescriptionSkeleton,
+    renderDetailGallery,
+    renderDetailTags,
+} from "./detail.js";
 import { t } from "./i18n.js";
+import { renderSelectorStats, selectorIcon } from "./selector_ui.js";
 
 export const ACTIVE_DOWNLOAD_STATUSES = new Set(["pending", "downloading", "cancelling"]);
 const STATUS_LABELS = {
@@ -12,9 +24,24 @@ const STATUS_LABELS = {
     failed: "Failed",
     cancelled: "Cancelled",
 };
+// Title and next step for each failure cause the backend reports.
+const FAILURE_REASONS = {
+    early_access: ["Early Access", "Unlock this version with Buzz on Civitai, then retry."],
+    auth: ["API Key rejected", "Check the Civitai API Key in Settings, then retry."],
+    forbidden: ["Access denied", "Civitai does not let this account download the file."],
+    not_found: ["File no longer available", "The creator may have removed or replaced this file."],
+    rate_limited: ["Too many requests", "Civitai is limiting downloads. Wait a moment, then retry."],
+    server: ["Civitai is unavailable", "Civitai returned a server error. Retry later."],
+    network: ["Network error", "Check your connection or proxy, then retry."],
+    disk: ["Could not save the file", "Check the folder permissions and free disk space."],
+};
+const KIND_LABELS = { loras: "LoRA", checkpoints: "Checkpoint", unet: "UNet", workflows: "Workflow" };
 // Byte rate per job, smoothed across polls so the speed and ETA do not jitter.
 const rates = new Map();
 const renderedActions = new WeakMap();
+const renderedMeta = new WeakMap();
+// Only one row shows its details; the choice survives polling re-renders.
+let openJobId = "";
 
 function escapeHtml(value) {
     return String(value ?? "")
@@ -59,6 +86,14 @@ function formatRemaining(seconds) {
     return t("{count} h left", { count: (seconds / 3600).toFixed(1) });
 }
 
+function formatTime(timestamp) {
+    return timestamp ? new Date(Number(timestamp) * 1000).toLocaleString() : "";
+}
+
+function failureTitle(job) {
+    return t(FAILURE_REASONS[job.error_reason]?.[0] || "Download failed");
+}
+
 function formatAgo(timestamp) {
     const seconds = Math.max(0, Date.now() / 1000 - Number(timestamp || 0));
     if (seconds < 60) return t("Just now");
@@ -72,7 +107,7 @@ function renderMeta(job) {
     const total = Number(job.total || 0);
     if (job.status === "pending") return escapeHtml(t("Waiting in queue..."));
     if (job.status === "cancelling") return escapeHtml(t("Cancelling..."));
-    if (job.status === "failed") return `<span class="is-error">${escapeHtml(job.error || t("Download failed."))}</span>`;
+    if (job.status === "failed") return `<span class="is-error">${escapeHtml(failureTitle(job))}</span><i aria-hidden="true">·</i>${escapeHtml(formatAgo(job.failed_at))}`;
     if (job.status === "cancelled") return escapeHtml(t("Cancelled {time}", { time: formatAgo(job.cancelled_at) }));
     if (job.status === "completed") return escapeHtml(`${formatBytes(total || progress)} · ${formatAgo(job.completed_at)}`);
     const rate = rates.get(job.id)?.rate || 0;
@@ -120,24 +155,193 @@ export function patchDownloadProgress(root, job) {
     return true;
 }
 
+function renderReason(job, modelUrl) {
+    const [title, hint] = FAILURE_REASONS[job.error_reason] || ["Download failed", ""];
+    return `
+        <div class="cmgr-dl-reason">
+            <b>${escapeHtml(t(title))}</b>
+            ${hint ? `<span>${escapeHtml(t(hint))}</span>` : ""}
+            ${job.error ? `<code>${escapeHtml(job.error)}</code>` : ""}
+            ${job.error_reason === "early_access" && modelUrl ? `<a class="cmgr-secondary" href="${escapeHtml(modelUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(t("Unlock on Civitai"))}</a>` : ""}
+        </div>
+    `;
+}
+
+function jobVersion(job, model) {
+    const versions = Array.isArray(model?.modelVersions) ? model.modelVersions : [];
+    return versions.find((version) => String(version.id) === String(job.version_id)) || versions[0] || {};
+}
+
+// Paragraph and line breaks survive as newlines so sentences do not run together.
+function plainText(html) {
+    const marked = String(html || "").replace(/<br\s*\/?>|<\/(?:p|div|li|h[1-6])>/gi, "$&\n");
+    const text = new DOMParser().parseFromString(marked, "text/html").body.textContent || "";
+    return text.replace(/[ \t]+/g, " ").replace(/\s*\n\s*/g, "\n").trim();
+}
+
+// Same footprint as the final gallery, so the row does not jump or show a
+// stand-in image that gets swapped once the Civitai record arrives.
+function renderGallerySkeleton() {
+    return `<div class="cmgr-detail-gallery" aria-busy="true"><div class="cmgr-detail-preview"></div><div class="cmgr-detail-thumbs">${'<span class="cmgr-detail-thumb" aria-hidden="true"></span>'.repeat(5)}</div></div>`;
+}
+
+function renderGallery(job, model) {
+    const items = model ? galleryItemsForModel(model, jobVersion(job, model)) : galleryItemsForUrl(job.preview_url);
+    return renderDetailGallery(items, job.model_name || job.filename || "", t("No Preview"));
+}
+
+// The job only knows what was downloaded; the Civitai record adds stats,
+// trigger words, tags and the description once the row is opened.
+function renderModelInfo(job, model) {
+    const version = jobVersion(job, model);
+    const stats = modelStats(model, version);
+    const words = (Array.isArray(version.trainedWords) ? version.trainedWords : []).map((word) => String(word || "").trim()).filter(Boolean);
+    const description = plainText(model.description || version.description).slice(0, 600);
+    const published = String(version.publishedAt || version.createdAt || "").slice(0, 10);
+    return `
+        <div class="cmgr-dl-model-stats">
+            ${renderSelectorStats(formatStatCount(stats.downloadCount), formatStatCount(stats.likeCount))}
+            ${published ? `<span>${escapeHtml(t("Published {date}", { date: published }))}</span>` : ""}
+        </div>
+        ${words.length ? `
+            <section class="cmgr-selector-triggers" aria-label="${escapeHtml(t("Trigger Words"))}">
+                <div class="cmgr-section-head">
+                    <div class="cmgr-section-title">${selectorIcon("tag")}${escapeHtml(t("Trigger Words"))}</div>
+                    ${words.length > 1 ? `<button class="cmgr-copy-all-btn" type="button" data-dl-copy="${escapeHtml(words.join(", "))}">${escapeHtml(t("Copy All ({count})", { count: words.length }))}</button>` : ""}
+                </div>
+                <div class="cmgr-trained">${words.slice(0, 16).map((word) => `<button type="button" data-dl-copy="${escapeHtml(word)}">${escapeHtml(word)}</button>`).join("")}</div>
+            </section>
+        ` : ""}
+        ${renderDetailTags(model.tags, false)}
+        ${description ? `<p class="cmgr-dl-description">${escapeHtml(description)}</p>` : ""}
+    `;
+}
+
+function renderModelSection(job) {
+    if (!job.model_id) return "";
+    const model = peekModelDetail(job.model_id);
+    return model
+        ? `<div class="cmgr-dl-model">${renderModelInfo(job, model)}</div>`
+        : `<div class="cmgr-dl-model" data-dl-pending data-model-id="${escapeHtml(job.model_id)}" data-version-id="${escapeHtml(job.version_id)}" data-preview-url="${escapeHtml(job.preview_url)}">${renderDescriptionSkeleton()}</div>`;
+}
+
+function renderDetails(job) {
+    const modelUrl = job.model_id ? civitaiModelUrl(job.model_id, job.version_id) : "";
+    const name = escapeHtml(job.model_name || job.filename || "");
+    const size = Number(job.total || job.file_size || 0);
+    const finished = {
+        completed: ["Finished", job.completed_at],
+        failed: ["Failed at", job.failed_at],
+        cancelled: ["Cancelled at", job.cancelled_at],
+    }[job.status];
+    const facts = [
+        ["Model", modelUrl ? `<a href="${escapeHtml(modelUrl)}" target="_blank" rel="noopener noreferrer">${name}</a>` : name],
+        ["Version", escapeHtml(job.version_name)],
+        ["Base Model", escapeHtml(job.base_model)],
+        ["Type", escapeHtml(KIND_LABELS[job.root_kind] || job.model_type)],
+        ["Size", escapeHtml(size ? formatBytes(size) : "")],
+        ["File", job.filename ? `<span class="is-path">${escapeHtml(job.filename)}</span>` : ""],
+        ["Saved to", job.target_path ? `<span class="is-path">${escapeHtml(job.target_path)}</span>` : ""],
+        ["Started", escapeHtml(formatTime(job.created_at))],
+        finished ? [finished[0], escapeHtml(formatTime(finished[1]))] : null,
+    ].filter((fact) => fact?.[1]);
+    const folder = job.status === "completed" && job.relative_path
+        ? `<button class="cmgr-secondary" type="button" data-action="open-download-folder" data-root-kind="${escapeHtml(job.root_kind)}" data-relative-path="${escapeHtml(job.relative_path)}">${selectorIcon("local")}<span>${escapeHtml(t("Open Folder"))}</span></button>`
+        : "";
+    const cached = job.model_id ? peekModelDetail(job.model_id) : null;
+    return `
+        <div class="cmgr-dl-gallery" data-dl-gallery>${cached || !job.model_id ? renderGallery(job, cached) : renderGallerySkeleton()}</div>
+        <div class="cmgr-dl-info">
+            ${job.status === "failed" ? renderReason(job, modelUrl) : ""}
+            <dl class="cmgr-dl-facts">${facts.map(([label, value]) => `<div><dt>${escapeHtml(t(label))}</dt><dd>${value}</dd></div>`).join("")}</dl>
+            ${renderModelSection(job)}
+            ${folder || modelUrl ? `
+                <div class="cmgr-dl-links">
+                    ${folder}
+                    ${modelUrl ? `<a class="cmgr-secondary" href="${escapeHtml(modelUrl)}" target="_blank" rel="noopener noreferrer">${selectorIcon("discover")}<span>${escapeHtml(t("View on Civitai"))}</span></a>` : ""}
+                </div>
+            ` : ""}
+        </div>
+    `;
+}
+
+/** Fills opened rows whose Civitai record was not cached when they rendered. */
+export function hydrateDownloadDetails(root) {
+    root?.querySelectorAll(".cmgr-dl-row.is-open [data-dl-pending]").forEach((host) => {
+        host.removeAttribute("data-dl-pending");
+        const row = host.closest(".cmgr-dl-row");
+        const job = { model_id: host.dataset.modelId, version_id: host.dataset.versionId, preview_url: host.dataset.previewUrl, model_name: row.querySelector(".cmgr-dl-head > b")?.textContent || "" };
+        const gallery = row.querySelector("[data-dl-gallery]");
+        fetchModelDetail(job.model_id).then((model) => {
+            if (!host.isConnected) return;
+            // A long description can make the panel taller than its skeleton;
+            // grow into it instead of jumping.
+            const panel = row.querySelector(".cmgr-dl-details > div");
+            const before = panel.offsetHeight;
+            host.innerHTML = renderModelInfo(job, model);
+            gallery.innerHTML = renderGallery(job, model);
+            if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+            const after = panel.offsetHeight;
+            if (after !== before) panel.animate([{ height: `${before}px` }, { height: `${after}px` }], { duration: 240, easing: "cubic-bezier(.2,.7,.2,1)" });
+            host.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 200, easing: "ease-out" });
+        }, () => {
+            host.remove();
+            gallery.innerHTML = renderGallery(job, null);
+        });
+    });
+}
+
 function renderRow(job, actions) {
     const title = job.model_name || job.filename || t("Download");
+    const status = job.status || "pending";
+    const open = String(job.id) === openJobId;
+    const detailsId = `cmgr-dl-details-${escapeHtml(job.id)}`;
     return `
-        <article class="cmgr-dl-row is-${escapeHtml(job.status || "pending")}" data-job-id="${escapeHtml(job.id)}" data-status="${escapeHtml(job.status || "pending")}">
-            <div class="cmgr-dl-thumb">${renderCardMedia(job.preview_url || "", { eager: true })}</div>
-            <div class="cmgr-dl-main">
-                <div class="cmgr-dl-head">
-                    <b title="${escapeHtml(title)}">${escapeHtml(title)}</b>
-                    ${job.base_model ? `<span class="cmgr-dl-chip">${escapeHtml(job.base_model)}</span>` : ""}
-                    <span class="cmgr-dl-status">${escapeHtml(t(STATUS_LABELS[job.status] || "Pending"))}</span>
+        <article class="cmgr-dl-row is-${escapeHtml(status)}${open ? " is-open" : ""}" data-job-id="${escapeHtml(job.id)}" data-status="${escapeHtml(status)}">
+            <div class="cmgr-dl-row-head"${job.model_id ? ` data-prefetch-model="${escapeHtml(job.model_id)}"` : ""}>
+                <div class="cmgr-dl-thumb">${renderCardMedia(job.preview_url || "", { eager: true })}</div>
+                <div class="cmgr-dl-main">
+                    <div class="cmgr-dl-head">
+                        <b title="${escapeHtml(title)}">${escapeHtml(title)}</b>
+                        ${job.base_model ? `<span class="cmgr-dl-chip">${escapeHtml(job.base_model)}</span>` : ""}
+                    </div>
+                    ${ACTIVE_DOWNLOAD_STATUSES.has(status) ? renderBar(job) : ""}
+                    <div class="cmgr-dl-meta" data-dl-meta>${renderMeta(job)}</div>
                 </div>
-                <div class="cmgr-dl-path" title="${escapeHtml(job.target_path || "")}">${escapeHtml(job.relative_path || job.filename || "")}</div>
-                ${renderBar(job)}
-                <div class="cmgr-dl-meta" data-dl-meta>${renderMeta(job)}</div>
+                <span class="cmgr-dl-status">${escapeHtml(t(STATUS_LABELS[status] || "Pending"))}</span>
+                <div class="cmgr-dl-actions">${actions}</div>
+                <button class="cmgr-dl-expand" type="button" data-dl-toggle aria-expanded="${open}" aria-controls="${detailsId}" aria-label="${escapeHtml(t("Details"))}">${selectorIcon("chevron")}</button>
             </div>
-            <div class="cmgr-dl-actions">${actions}</div>
+            <div class="cmgr-dl-details" id="${detailsId}"><div><div class="cmgr-dl-details-body">${renderDetails(job)}</div></div></div>
         </article>
     `;
+}
+
+function setRowOpen(row, open) {
+    row.classList.toggle("is-open", open);
+    row.querySelector("[data-dl-toggle]").setAttribute("aria-expanded", String(open));
+}
+
+/** Row expansion and trigger-word copying; returns true when the click was handled. */
+export function handleDownloadDetailsClick(event) {
+    const copy = event.target.closest("[data-dl-copy]");
+    if (copy) {
+        navigator.clipboard.writeText(copy.dataset.dlCopy).then(() => {
+            copy.classList.add("is-copied");
+            setTimeout(() => copy.classList.remove("is-copied"), 1400);
+        }, () => {});
+        return true;
+    }
+    const head = event.target.closest(".cmgr-dl-row-head");
+    const control = event.target.closest("a, button");
+    if (!head || (control && !control.hasAttribute("data-dl-toggle"))) return false;
+    const row = head.parentElement;
+    const open = !row.classList.contains("is-open");
+    row.closest("[data-dl-list]")?.querySelectorAll(".cmgr-dl-row.is-open").forEach((other) => setRowOpen(other, false));
+    setRowOpen(row, open);
+    openJobId = open ? row.dataset.jobId : "";
+    if (open) hydrateDownloadDetails(row.parentElement);
+    return true;
 }
 
 function sortJobs(jobs) {
@@ -193,6 +397,7 @@ function rowElement(job, actions) {
     template.innerHTML = renderRow(job, actions).trim();
     const row = template.content.firstElementChild;
     renderedActions.set(row, actions);
+    renderedMeta.set(row, renderMeta(job));
     return row;
 }
 
@@ -229,8 +434,13 @@ export function patchDownloadPage(root, { jobs, actionsFor }) {
                 row?.remove();
                 row = fresh;
             } else {
-                patchBar(row.querySelector(".cmgr-dl-bar"), job);
-                row.querySelector("[data-dl-meta]").innerHTML = renderMeta(job);
+                const bar = row.querySelector(".cmgr-dl-bar");
+                if (bar) patchBar(bar, job);
+                const meta = renderMeta(job);
+                if (renderedMeta.get(row) !== meta) {
+                    row.querySelector("[data-dl-meta]").innerHTML = meta;
+                    renderedMeta.set(row, meta);
+                }
                 if (renderedActions.get(row) !== actions) {
                     row.querySelector(".cmgr-dl-actions").innerHTML = actions;
                     renderedActions.set(row, actions);
@@ -241,5 +451,6 @@ export function patchDownloadPage(root, { jobs, actionsFor }) {
             previous = row;
         }
     }
+    hydrateDownloadDetails(list);
     return true;
 }

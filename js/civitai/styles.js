@@ -2204,13 +2204,6 @@ export function injectStyles() {
             transform: translateX(-115%);
             animation: cmgrSkeletonShimmer 1.35s ease-in-out infinite;
         }
-        .cmgr-skeleton-media {
-            position: absolute;
-            inset: 2px;
-            z-index: 0;
-            border-radius: calc(var(--cmgr-radius) - 2px);
-            background: color-mix(in srgb, var(--cmgr-panel-soft) 90%, var(--cmgr-text) 10%);
-        }
         .cmgr-skeleton-badge,
         .cmgr-skeleton-line,
         .cmgr-skeleton-stats span {

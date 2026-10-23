@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import gzip
 import importlib.util
+import io
 import json
 import os
 import sys
@@ -377,6 +378,39 @@ class SearchFallbackTests(unittest.TestCase):
 
         self.assertTrue(response["content_filter_active"])
 
+    def search(self, query, cursor, pages):
+        with (
+            mock.patch.object(manager, "_read_models_json", side_effect=pages) as read_models,
+            mock.patch.object(manager, "_merge_taxonomy_cache"),
+            mock.patch.object(manager, "_taxonomy_cache_get", return_value={}),
+        ):
+            response = manager._search_civitai_models(
+                "lora", query, cursor, "Highest Rated", 40, "", "", "", manager._default_config(),
+            )
+        return response, [call.args[0] for call in read_models.call_args_list]
+
+    def test_query_retried_as_unknown_tag_does_not_return_the_unfiltered_listing(self):
+        unfiltered = {"items": [{"id": 1, "name": "Detail Tweaker", "tags": ["concept"]}], "metadata": {"nextCursor": "1|2"}}
+        response, requests = self.search("zzqxv", "", [{"items": [], "metadata": {}}, unfiltered])
+
+        self.assertEqual(requests[1]["tag"], "zzqxv")
+        self.assertEqual(response["items"], [])
+        self.assertNotIn("nextCursor", response["metadata"])
+
+    def test_tag_retry_pages_continue_the_tag_search(self):
+        tagged = {"items": [{"id": 3, "name": "Brush", "tags": ["watercolor"]}], "metadata": {"nextCursor": "9|8"}}
+        first, _ = self.search("watercolor", "", [{"items": [], "metadata": {}}, tagged])
+        cursor = first["metadata"]["nextCursor"]
+        second, requests = self.search("watercolor", cursor, [tagged])
+
+        self.assertEqual([item["id"] for item in first["items"]], [3])
+        self.assertEqual(cursor, f"{manager.SEARCH_ATTEMPT_CURSOR_PREFIX}1:9|8")
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["tag"], "watercolor")
+        self.assertNotIn("query", requests[0])
+        self.assertEqual(requests[0]["cursor"], "9|8")
+        self.assertEqual(second["metadata"]["nextCursor"], cursor)
+
     def test_fallback_filters_items_and_prefixes_next_cursor(self):
         result = {
             "items": [
@@ -657,6 +691,31 @@ class DownloadRedirectTests(unittest.TestCase):
         self.assertEqual(redirected.get_header("Authorization"), "Bearer secret")
         self.assertEqual(redirected.get_header("Cookie"), "session=secret")
 
+    def _http_error(self, code, body):
+        return urllib.error.HTTPError("https://civitai.red/api/download/models/1", code, "Forbidden", {}, io.BytesIO(body))
+
+    def test_early_access_refusal_keeps_civitai_reason(self):
+        reason, error = manager._download_failure(self._http_error(403, b'{"error":"Early Access","message":"This asset is in Early Access. You can use Buzz access it now!"}'))
+
+        self.assertEqual(reason, "early_access")
+        self.assertEqual(error, "Civitai refused the download: This asset is in Early Access. You can use Buzz access it now!")
+
+    def test_failures_are_classified_by_cause(self):
+        cases = [
+            (self._http_error(403, b"Forbidden"), "auth"),
+            (self._http_error(401, b'{"error":"Unauthorized"}'), "auth"),
+            (self._http_error(403, b'{"message":"Purchase required"}'), "forbidden"),
+            (self._http_error(404, b""), "not_found"),
+            (self._http_error(429, b""), "rate_limited"),
+            (self._http_error(502, b'{"message":"boom"}'), "server"),
+            (urllib.error.URLError("timed out"), "network"),
+            (PermissionError("denied"), "disk"),
+        ]
+        for exc, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(manager._download_failure(exc)[0], expected)
+        self.assertEqual(manager._download_failure(self._http_error(502, b'{"message":"boom"}'))[1], "HTTP 502: Forbidden")
+
     def test_fallback_download_url_uses_download_endpoint_without_v1(self):
         self.assertEqual(
             manager._download_url_for({"id": 123}, {}),
@@ -686,6 +745,33 @@ class DownloadJobTests(unittest.TestCase):
             history_limit=history_limit,
             retention_seconds=retention_seconds,
         )
+
+    def test_preview_is_saved_before_the_job_reports_completion(self):
+        store = self.make_store()
+        store.add({"id": "job", "status": "pending", "created_at": 1}, {})
+        target = Path(self.temp_dir.name) / "loras" / "hero.safetensors"
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.headers = {"Content-Length": "5"}
+        response.read.side_effect = [b"model", b""]
+        statuses = []
+
+        def save_preview(url, path, api_key=None, timeout=30):
+            statuses.append(store.snapshot("job")["status"])
+            Path(path).write_bytes(b"jpg")
+
+        with (
+            mock.patch.object(manager, "_download_store", return_value=store),
+            mock.patch.object(manager, "load_config", return_value={"save_metadata": False, "save_preview": True}),
+            mock.patch.object(manager._DOWNLOAD_URL_OPENER, "open", return_value=response),
+            mock.patch.object(manager, "_download_binary", side_effect=save_preview),
+            mock.patch.object(manager, "_root_for_kind", return_value=str(target.parent)),
+        ):
+            manager._download_worker("job", "https://civitai.red/api/download/models/1", str(target), "loras", {}, "https://image.civitai.com/a/b/preview.jpeg")
+
+        self.assertEqual(statuses, ["downloading"])
+        self.assertEqual(store.snapshot("job")["status"], "completed")
+        self.assertTrue(target.with_suffix(".jpg").is_file())
 
     def test_active_count_only_includes_pending_and_downloading(self):
         store = self.make_store()

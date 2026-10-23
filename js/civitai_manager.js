@@ -7,11 +7,12 @@ import {
     INITIAL_PREVIEW_LOADS,
     ROOT_KINDS,
     ROOT_LOCAL_FOLDER,
+    SEARCH_PAGE_SIZE,
     TABS,
 } from "./civitai/constants.js";
-import { apiGet, apiPost, clearSearchCache, fetchModelDetail, getSearchCache, peekModelDetail, setSearchCache } from "./civitai/api.js";
-import { animateCardsIn, bindCardMedia, loadMoreSkeletonCount, observeCardMedia, preconnectMediaHosts, renderCardMedia } from "./civitai/card_media.js";
-import { ACTIVE_DOWNLOAD_STATUSES, patchDownloadPage, patchDownloadProgress, renderDownloadPage, renderDownloadProgress, trackDownloadRates } from "./civitai/downloads.js";
+import { apiGet, apiPost, clearSearchCache, fetchModelDetail, getSearchCache, peekModelDetail, setSearchCache, unseenSearchItems } from "./civitai/api.js";
+import { animateCardsIn, bindCardMedia, loadMoreSkeletonCount, observeCardMedia, preconnectMediaHosts, renderCardMedia, renderCardSkeletons } from "./civitai/card_media.js";
+import { ACTIVE_DOWNLOAD_STATUSES, patchDownloadPage, patchDownloadProgress, renderDownloadPage, renderDownloadProgress, handleDownloadDetailsClick, hydrateDownloadDetails, trackDownloadRates } from "./civitai/downloads.js";
 import {
     bindFavoriteFolderSidebar,
     bindSearchCombo,
@@ -33,6 +34,7 @@ import {
     galleryItemsForModel,
     galleryItemsForUrl,
     isDetailDrawerOpen,
+    isEarlyAccess,
     modelFacts,
     modelStats,
     renderDescriptionSkeleton,
@@ -41,6 +43,7 @@ import {
     renderDetailGallery,
     renderDetailSkeleton,
     renderDetailTags,
+    renderEarlyAccessNotice,
     renderMatchRow,
     setDetailDrawer,
     setDetailLoading,
@@ -83,7 +86,6 @@ let responsiveSearchTimer = null;
 let pendingResponsiveSearch = false;
 let lastResponsiveSearchKey = "";
 let lastDownloadNavCount = -1;
-let sidebarEntryClickBound = false;
 let filtersOpen = false;
 let returnFocus = null;
 let lastModelSelectAt = 0;
@@ -381,7 +383,7 @@ function registerEntryPoint() {
                 type: "custom",
                 render: renderSidebarLauncher,
             });
-            bindSidebarEntryClick();
+            bindSidebarLauncher();
             document.querySelector(".cmgr-left-entry")?.remove();
             return;
         } catch (error) {
@@ -391,17 +393,21 @@ function registerEntryPoint() {
     createFallbackLeftButton();
 }
 
-function bindSidebarEntryClick() {
-    if (sidebarEntryClickBound) return;
-    sidebarEntryClickBound = true;
-    document.addEventListener("click", (event) => {
-        const target = event.target instanceof Element ? event.target : null;
-        const button = target?.closest?.(`.${SIDEBAR_TAB_ID}-tab-button`);
-        if (!button) return;
-        event.preventDefault();
-        event.stopImmediatePropagation();
+// The sidebar tab is only a launcher: selecting it opens the manager at once
+// and puts back whichever panel was open before, so its panel never shows.
+function bindSidebarLauncher() {
+    const sidebar = app.extensionManager.sidebarTab;
+    if (typeof sidebar?.$subscribe !== "function") return;
+    let previous = sidebar.activeSidebarTabId;
+    sidebar.$subscribe(() => {
+        const active = sidebar.activeSidebarTabId;
+        if (active !== SIDEBAR_TAB_ID) {
+            previous = active;
+            return;
+        }
+        sidebar.activeSidebarTabId = previous;
         openOverlay();
-    }, true);
+    }, { flush: "sync" });
 }
 
 function renderSidebarLauncher(element) {
@@ -883,7 +889,7 @@ async function search(reset = true, options = {}) {
         kind: state.assetKind,
         query: state.query,
         sort: state.sort,
-        limit: "40",
+        limit: String(SEARCH_PAGE_SIZE),
     });
     if (state.selectedBaseModel) params.set("base_model", state.selectedBaseModel);
     if (state.selectedTag) params.set("tag", state.selectedTag);
@@ -945,7 +951,7 @@ function resetSearchResults() {
 }
 
 function applySearchData(data, reset, silent) {
-    const nextItems = Array.isArray(data?.items) ? data.items : [];
+    const nextItems = unseenSearchItems(reset ? [] : state.searchItems, data?.items);
     const startIndex = state.searchItems.length;
     state.searchItems = reset ? nextItems : [...state.searchItems, ...nextItems];
     state.contentFilterActive = data?.content_filter_active === true;
@@ -954,7 +960,12 @@ function applySearchData(data, reset, silent) {
         else delete tabSelections.Discover;
         state.scroll.discoverResults = 0;
     }
-    state.nextCursor = data?.metadata?.nextCursor || "";
+    // A page that adds nothing new ends the list instead of loading forever.
+    state.nextCursor = reset || nextItems.length ? data?.metadata?.nextCursor || "" : "";
+    // A thin page means the rest is a slow, mostly empty scan (e.g. a keyword
+    // inside a base model): keep searching behind a progress bar instead of
+    // placeholder cards that may never be filled.
+    state.sparseResults = nextItems.length < SEARCH_PAGE_SIZE / 2;
     state.cursor = state.nextCursor;
     if (data?.taxonomy) mergeTaxonomy(state.assetKind, data.taxonomy);
     if (data?.warning && !silent && !nextItems.length) {
@@ -964,6 +975,7 @@ function applySearchData(data, reset, silent) {
         state.loadingSearch = false;
         state.autoLoadingMore = false;
         setDiscoverLoadStatus(false);
+        maybeAutoLoadMore(bodyEl.querySelector(".cmgr-discover .cmgr-results"));
         return true;
     }
     return false;
@@ -986,6 +998,7 @@ function finishSearchRender(reset) {
     if (autoPick) {
         void selectModel(autoPick);
     }
+    if (state.activeTab === "Discover") maybeAutoLoadMore(bodyEl.querySelector(".cmgr-discover .cmgr-results"));
     if (pendingResponsiveSearch && state.activeTab === "Discover") {
         pendingResponsiveSearch = false;
         scheduleResponsiveSearch(true);
@@ -1032,16 +1045,17 @@ function setDiscoverLoadStatus(visible) {
     const results = bodyEl.querySelector(".cmgr-discover .cmgr-results");
     if (!results) return;
     results.querySelectorAll(".cmgr-load-more-skeleton").forEach((item) => item.remove());
-    if (visible) {
-        results.insertAdjacentHTML("beforeend", renderLoadingMoreSkeletons(loadMoreSkeletonCount(results)));
+    results.parentElement.classList.toggle("is-searching-more", visible && state.sparseResults);
+    if (visible && !state.sparseResults) {
+        results.insertAdjacentHTML("beforeend", renderCardSkeletons(loadMoreSkeletonCount(results), { loadMore: true }));
     }
 }
 
 function appendDiscoverItems(items, startIndex = 0) {
-    if (!items.length || !bodyEl) return false;
-    const results = bodyEl.querySelector(".cmgr-discover .cmgr-results");
+    const results = bodyEl?.querySelector(".cmgr-discover .cmgr-results");
     if (!results) return false;
     results.querySelectorAll(".cmgr-load-more-skeleton").forEach((item) => item.remove());
+    if (!items.length) return true;
     results.insertAdjacentHTML("beforeend", items.map((model, index) => renderModelCard(model, startIndex + index)).join(""));
     animateCardsIn([...results.querySelectorAll(":scope > .cmgr-card[data-model-id]")].slice(startIndex));
     bindDiscoverEvents(bodyEl);
@@ -1580,6 +1594,16 @@ async function selectFavoriteItem(item) {
     state.selectedModel = null;
     state.selectedAssetId = asset?.id || "";
     renderSelectedFavoriteDetail();
+}
+
+async function openDownloadFolder({ rootKind, relativePath }) {
+    try {
+        await apiPost("/asset/open-folder", { root_kind: rootKind, relative_path: relativePath });
+        showToast(t("Folder opened"));
+    } catch (err) {
+        state.error = err.message;
+        updateTransientMessages();
+    }
 }
 
 async function openSelectedFolder() {
@@ -2265,10 +2289,10 @@ function renderDiscover() {
     return `
         <section class="cmgr-page cmgr-discover">
             ${toolbar}
-            <div class="cmgr-split has-detail ${state.detailOpen ? "is-detail-open" : ""}">
+            <div class="cmgr-split has-detail ${state.detailOpen ? "is-detail-open" : ""} ${state.loadingSearch && state.searchItems.length && state.sparseResults ? "is-searching-more" : ""}">
                 <div class="cmgr-results">
                     ${state.searchItems.length ? state.searchItems.map(renderModelCard).join("") : renderEmptySearch()}
-                    ${state.loadingSearch && state.searchItems.length && state.autoLoadingMore ? renderLoadingMoreSkeletons(loadMoreSkeletonCount(bodyEl.querySelector(".cmgr-discover .cmgr-results"))) : ""}
+                    ${state.loadingSearch && state.searchItems.length && state.autoLoadingMore && !state.sparseResults ? renderCardSkeletons(loadMoreSkeletonCount(bodyEl.querySelector(".cmgr-discover .cmgr-results")), { loadMore: true }) : ""}
                 </div>
                 ${modelDetailAside()}
             </div>
@@ -2277,7 +2301,7 @@ function renderDiscover() {
 }
 
 function renderEmptySearch() {
-    if (state.loadingSearch) return renderSearchSkeletons();
+    if (state.loadingSearch) return renderCardSkeletons(30);
     return renderCollectionEmptyState({
         kind: "discover",
         kicker: t("Discover"),
@@ -2285,41 +2309,6 @@ function renderEmptySearch() {
         description: t("Try another keyword or loosen the filters to explore more from Civitai."),
         hints: [t("Change keywords"), t("Adjust filters")],
     });
-}
-
-function renderSearchSkeletons(count = 30) {
-    return Array.from({ length: count }, (_, index) => `
-        <article
-            class="cmgr-card cmgr-skeleton-card"
-            ${index === 0 ? `role="status" aria-label="${escapeAttr(t("Searching Civitai..."))}"` : 'aria-hidden="true"'}
-        >
-            <div class="cmgr-skeleton-media"></div>
-            <div class="cmgr-skeleton-badge"></div>
-            <div class="cmgr-skeleton-content">
-                <div class="cmgr-skeleton-line cmgr-skeleton-title ${index % 3 === 1 ? "is-medium" : index % 3 === 2 ? "is-short" : ""}"></div>
-                <div class="cmgr-skeleton-stats">
-                    <span></span>
-                    <span></span>
-                </div>
-            </div>
-        </article>
-    `).join("");
-}
-
-function renderLoadingMoreSkeletons(count) {
-    return Array.from({ length: count }, (_, index) => `
-        <article
-            class="cmgr-card cmgr-skeleton-card cmgr-load-more-skeleton"
-            ${index === 0 ? `role="status" aria-label="${escapeAttr(t("Loading more..."))}"` : 'aria-hidden="true"'}
-        >
-            <div class="cmgr-skeleton-media"></div>
-            <div class="cmgr-skeleton-badge"></div>
-            <div class="cmgr-skeleton-content">
-                <div class="cmgr-skeleton-line ${index % 2 ? "is-medium" : ""}"></div>
-                <div class="cmgr-skeleton-stats"><span></span><span></span></div>
-            </div>
-        </article>
-    `).join("");
 }
 
 function renderModelCardStatusBadge(model) {
@@ -2347,6 +2336,7 @@ function renderModelCard(model, index = 0) {
             ${renderFavoriteCardMark(Boolean(favorite))}
             <div class="cmgr-card-top-badges">
                 ${badge ? `<div class="cmgr-card-badge">${escapeHtml(badge)}</div>` : ""}
+                ${isEarlyAccess(version) ? `<div class="cmgr-card-badge is-early-access" title="${escapeAttr(t("Early Access"))}" aria-label="${escapeAttr(t("Early Access"))}">${selectorIcon("lock")}</div>` : ""}
                 <div class="cmgr-card-status-slot" data-card-status-slot>${renderModelCardStatusBadge(model)}</div>
             </div>
             <div class="cmgr-thumb">${preview}</div>
@@ -2485,6 +2475,7 @@ function renderModelDetail(model) {
                         })}
                     </div>
                 ` : ""}
+                ${findInstalledAssetForModel(model, version) ? "" : renderEarlyAccessNotice(model, version)}
                 ${renderModelActionHub(model, version, file, resolution)}
                 ${renderPathBox()}
             </section>
@@ -2945,7 +2936,7 @@ function renderFavorites() {
 
 function renderFavoriteResults() {
     const items = filteredFavorites();
-    if (state.favoritesLoading && !items.length) return renderSearchSkeletons();
+    if (state.favoritesLoading && !items.length) return renderCardSkeletons(30);
     return items.length
         ? items.map(renderFavoriteCard).join("")
         : renderCollectionEmptyState({
@@ -3244,8 +3235,10 @@ function bindLibraryCards(root) {
 function bindDownloadsEvents(root) {
     const page = root.querySelector(".cmgr-dl-page");
     if (!page) return;
+    hydrateDownloadDetails(page);
     // Rows are patched in place while polling, so actions are delegated.
     page.onclick = (event) => {
+        if (handleDownloadDetailsClick(event)) return;
         const button = event.target.closest("[data-action]");
         const taskId = button?.dataset.taskId || "";
         const actions = {
@@ -3254,6 +3247,7 @@ function bindDownloadsEvents(root) {
             "remove-download": () => removeDownloadRecord(taskId),
             "clear-downloads": () => removeDownloadRecord(),
             "show-downloaded-asset": () => showInLibrary(button.dataset.assetId || ""),
+            "open-download-folder": () => openDownloadFolder(button.dataset),
         };
         actions[button?.dataset.action]?.();
     };

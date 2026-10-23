@@ -5,10 +5,11 @@ import {
     HIGH_PRIORITY_PREVIEW_LOADS,
     INITIAL_PREVIEW_LOADS,
     ROOT_LOCAL_FOLDER,
+    SEARCH_PAGE_SIZE,
 } from "./civitai/constants.js";
-import { apiGet, apiPost, fetchModelDetail, getSearchCache, peekModelDetail, setSearchCache } from "./civitai/api.js";
-import { animateCardsIn, bindCardMedia, loadMoreSkeletonCount, observeCardMedia, preconnectMediaHosts, renderCardMedia } from "./civitai/card_media.js";
-import { ACTIVE_DOWNLOAD_STATUSES, patchDownloadPage, patchDownloadProgress, renderDownloadPage, renderDownloadProgress, trackDownloadRates } from "./civitai/downloads.js";
+import { apiGet, apiPost, fetchModelDetail, getSearchCache, peekModelDetail, setSearchCache, unseenSearchItems } from "./civitai/api.js";
+import { animateCardsIn, bindCardMedia, loadMoreSkeletonCount, observeCardMedia, preconnectMediaHosts, renderCardMedia, renderCardSkeletons } from "./civitai/card_media.js";
+import { ACTIVE_DOWNLOAD_STATUSES, patchDownloadPage, patchDownloadProgress, renderDownloadPage, renderDownloadProgress, handleDownloadDetailsClick, hydrateDownloadDetails, trackDownloadRates } from "./civitai/downloads.js";
 import {
     bindFavoriteFolderSidebar,
     bindSearchCombo,
@@ -30,6 +31,7 @@ import {
     galleryItemsForModel,
     galleryItemsForUrl,
     isDetailDrawerOpen,
+    isEarlyAccess,
     modelFacts,
     modelStats,
     renderDescriptionSkeleton,
@@ -38,6 +40,7 @@ import {
     renderDetailGallery,
     renderDetailSkeleton,
     renderDetailTags,
+    renderEarlyAccessNotice,
     renderMatchRow,
     setDetailDrawer,
     setDetailLoading,
@@ -107,6 +110,7 @@ const popup = {
     remoteItems: [],
     contentFilterActive: false,
     nextCursor: "",
+    sparseResults: false,
     remoteLoading: false,
     remoteResetting: false,
     selectedRemote: null,
@@ -1245,7 +1249,8 @@ function setRemoteLoadingMore(visible) {
     const results = popupBody?.querySelector(".cmgr-lora-results");
     if (!results) return false;
     results.querySelectorAll(".cmgr-load-more-skeleton").forEach((item) => item.remove());
-    if (visible) results.insertAdjacentHTML("beforeend", renderLoadingMoreSkeletons(loadMoreSkeletonCount(results)));
+    results.parentElement.classList.toggle("is-searching-more", visible && popup.sparseResults);
+    if (visible && !popup.sparseResults) results.insertAdjacentHTML("beforeend", renderCardSkeletons(loadMoreSkeletonCount(results), { loadMore: true }));
     return true;
 }
 
@@ -1253,7 +1258,7 @@ function appendRemoteItems(items, startIndex) {
     if (popup.tab !== "discover") return false;
     const results = popupBody?.querySelector(".cmgr-lora-results");
     if (!results) return false;
-    results.querySelectorAll(".cmgr-load-more-skeleton").forEach((item) => item.remove());
+    setRemoteLoadingMore(false);
     if (items.length) {
         results.insertAdjacentHTML("beforeend", items.map((model, index) => renderRemoteCard(model, startIndex + index)).join(""));
         animateCardsIn([...results.querySelectorAll(":scope > .cmgr-card[data-remote-id]")].slice(startIndex));
@@ -1313,7 +1318,7 @@ function renderDiscover() {
     return `
         <section class="cmgr-page cmgr-lora-page">
             ${toolbar}
-            <div class="cmgr-split has-detail cmgr-lora-split ${popup.detailOpen ? "is-detail-open" : ""}">
+            <div class="cmgr-split has-detail cmgr-lora-split ${popup.detailOpen ? "is-detail-open" : ""} ${popup.remoteLoading && !popup.remoteResetting && popup.sparseResults ? "is-searching-more" : ""}">
                 <div class="cmgr-results cmgr-lora-results">
                     ${renderRemoteResults()}
                 </div>
@@ -1324,7 +1329,7 @@ function renderDiscover() {
 }
 
 function renderRemoteResults() {
-    if (!popup.remoteItems.length && popup.remoteLoading) return renderSkeletons();
+    if (!popup.remoteItems.length && popup.remoteLoading) return renderCardSkeletons(30);
     if (!popup.remoteItems.length) return renderCollectionEmptyState({
         kind: "discover",
         kicker: t("Discover"),
@@ -1334,29 +1339,8 @@ function renderRemoteResults() {
     });
     return `
         ${popup.remoteItems.map((model, index) => renderRemoteCard(model, index)).join("")}
-        ${popup.remoteLoading && !popup.remoteResetting ? renderLoadingMoreSkeletons(loadMoreSkeletonCount(popupBody?.querySelector(".cmgr-lora-results"))) : ""}
+        ${popup.remoteLoading && !popup.remoteResetting && !popup.sparseResults ? renderCardSkeletons(loadMoreSkeletonCount(popupBody?.querySelector(".cmgr-lora-results")), { loadMore: true }) : ""}
     `;
-}
-
-function renderSkeletons(count = 30) {
-    return Array.from({ length: count }, () => `
-        <article class="cmgr-card cmgr-lora-card cmgr-skeleton-card">
-            <div class="cmgr-skeleton-media"></div>
-            <div class="cmgr-skeleton-content"><div class="cmgr-skeleton-line cmgr-skeleton-title"></div></div>
-        </article>
-    `).join("");
-}
-
-function renderLoadingMoreSkeletons(count) {
-    return Array.from({ length: count }, (_, index) => `
-        <article
-            class="cmgr-card cmgr-lora-card cmgr-skeleton-card cmgr-load-more-skeleton"
-            ${index === 0 ? `role="status" aria-label="${escapeAttr(t("Loading more..."))}"` : 'aria-hidden="true"'}
-        >
-            <div class="cmgr-skeleton-media"></div>
-            <div class="cmgr-skeleton-content"><div class="cmgr-skeleton-line ${index % 2 ? "is-medium" : ""}"></div></div>
-        </article>
-    `).join("");
 }
 
 function versionsFor(model) {
@@ -1419,6 +1403,7 @@ function renderRemoteCard(model, index = 0) {
             ${renderFavoriteCardMark(Boolean(favorite))}
             <div class="cmgr-card-top-badges">
                 ${version.baseModel ? `<div class="cmgr-card-badge">${escapeHtml(version.baseModel)}</div>` : ""}
+                ${isEarlyAccess(version) ? `<div class="cmgr-card-badge is-early-access" title="${escapeAttr(t("Early Access"))}" aria-label="${escapeAttr(t("Early Access"))}">${selectorIcon("lock")}</div>` : ""}
                 <div class="cmgr-card-status-slot">${installed ? `<span class="cmgr-card-status is-installed">✓ ${escapeHtml(t("Installed"))}</span>` : ""}</div>
             </div>
             <div class="cmgr-thumb">${preview}</div>
@@ -1479,6 +1464,7 @@ function renderRemoteDetail() {
                         </select>
                     </div>
                 ` : ""}
+                ${findLocalForRemote(model, version) ? "" : renderEarlyAccessNotice(model, version)}
                 <div class="cmgr-detail-action-hub ${pending ? "" : "is-inline-cta"}">
                     <div data-remote-download-state>${renderRemoteDownloadState(model, version, file)}</div>
                     ${renderFavoriteControls({
@@ -1574,7 +1560,7 @@ function renderFavorites() {
 
 function renderFavoriteResults() {
     const items = filteredLoraFavorites();
-    if (popup.favoritesLoading && !items.length) return renderSkeletons();
+    if (popup.favoritesLoading && !items.length) return renderCardSkeletons(30);
     return items.length
         ? items.map(renderFavoriteCard).join("")
         : renderCollectionEmptyState({
@@ -1701,7 +1687,7 @@ async function searchRemote(reset = true) {
         kind: "lora",
         query: popup.discoverQuery,
         sort: popup.sort,
-        limit: "40",
+        limit: String(SEARCH_PAGE_SIZE),
     });
     if (popup.selectedBaseModel) params.set("base_model", popup.selectedBaseModel);
     if (popup.selectedCategory) params.set("category", popup.selectedCategory);
@@ -1775,12 +1761,17 @@ function setDiscoverSelection(model) {
 }
 
 function applyRemoteSearch(data, reset) {
-    const items = Array.isArray(data?.items) ? data.items : [];
+    const items = unseenSearchItems(reset ? [] : popup.remoteItems, data?.items);
     const startIndex = reset ? 0 : popup.remoteItems.length;
     popup.remoteItems = reset ? items : [...popup.remoteItems, ...items];
     popup.contentFilterActive = data?.content_filter_active === true;
     if (reset) setDiscoverSelection(items[0] || null);
-    popup.nextCursor = data?.metadata?.nextCursor || "";
+    // A page that adds nothing new ends the list instead of loading forever.
+    popup.nextCursor = reset || items.length ? data?.metadata?.nextCursor || "" : "";
+    // A thin page means the rest is a slow, mostly empty scan (e.g. a keyword
+    // inside a base model): keep searching behind a progress bar instead of
+    // placeholder cards that may never be filled.
+    popup.sparseResults = items.length < SEARCH_PAGE_SIZE / 2;
     return { items, startIndex };
 }
 
@@ -1908,7 +1899,7 @@ function renderLocal() {
 
 function renderLocalResults() {
     const items = filteredLocalItems();
-    if (popup.libraryLoading && !items.length) return renderSkeletons();
+    if (popup.libraryLoading && !items.length) return renderCardSkeletons(30);
     if (!items.length) return renderCollectionEmptyState({
         kind: "library",
         kicker: t("Library"),
@@ -2715,7 +2706,8 @@ async function finishPendingApply(job, pending) {
     addLoraToTargetNode(pending.node || popup.node, {
         ...entryFromAsset(asset),
         display_name: pending.displayName || asset.name,
-        preview_url: asset.thumb_url || pending.previewUrl || "",
+        // Without a saved preview the local URL only serves a placeholder.
+        preview_url: (asset.has_preview ? asset.thumb_url : pending.previewUrl || asset.thumb_url) || "",
         trained_words: asset.trained_words?.length ? asset.trained_words : pending.trainedWords,
         base_model: asset.base_model || pending.baseModel || "",
     }, false);
@@ -3020,8 +3012,10 @@ function bindRemoteDownloadEvents(root) {
 function bindLoraDownloadEvents(root) {
     const page = root?.querySelector(".cmgr-dl-page");
     if (!page) return;
+    hydrateDownloadDetails(page);
     // Rows are patched in place while polling, so actions are delegated.
     page.onclick = (event) => {
+        if (handleDownloadDetailsClick(event)) return;
         const button = event.target.closest("[data-action]");
         const taskId = button?.dataset.taskId || "";
         const actions = {
@@ -3029,6 +3023,8 @@ function bindLoraDownloadEvents(root) {
             "retry-download": () => retryDownload(taskId),
             "remove-download": () => removeDownloadRecord(taskId),
             "clear-downloads": () => clearFinishedDownloadRecords(),
+            "open-download-folder": () => apiPost("/asset/open-folder", { root_kind: button.dataset.rootKind, relative_path: button.dataset.relativePath })
+                .then(() => showToast(t("Folder opened")), (error) => showToast(error.message)),
         };
         void actions[button?.dataset.action]?.();
     };

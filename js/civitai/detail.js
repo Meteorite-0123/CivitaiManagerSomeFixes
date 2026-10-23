@@ -35,6 +35,29 @@ export function formatBytes(value) {
     return `${size.toFixed(size >= 10 || unit === 0 ? 0 : 1)} ${units[unit]}`;
 }
 
+export function civitaiModelUrl(modelId, versionId = "") {
+    return `https://civitai.red/models/${encodeURIComponent(modelId || "")}${versionId ? `?modelVersionId=${encodeURIComponent(versionId)}` : ""}`;
+}
+
+// Early Access (or permanent paid access) versions must be unlocked with Buzz
+// on Civitai; until then the download endpoint answers 403 whatever the key.
+export function isEarlyAccess(version) {
+    const pending = (value) => Boolean(value) && Date.parse(value) > Date.now();
+    const paid = version?.paidAccess;
+    return version?.availability === "EarlyAccess" || pending(version?.earlyAccessEndsAt) || Boolean(paid && (paid.permanent || !paid.endsAt || pending(paid.endsAt)));
+}
+
+export function renderEarlyAccessNotice(model, version) {
+    if (!isEarlyAccess(version)) return "";
+    return `
+        <div class="cmgr-early-access" role="note">
+            <span class="cmgr-early-access-icon" aria-hidden="true">${selectorIcon("lock")}</span>
+            <div><b>${escapeHtml(t("Early Access"))}</b><span>${escapeHtml(t("Unlock this version with Buzz on Civitai first, or the download is refused. Already unlocked versions download normally."))}</span></div>
+            <a class="cmgr-secondary" href="${escapeAttr(civitaiModelUrl(model?.id, version?.id))}" target="_blank" rel="noopener noreferrer">${escapeHtml(t("Unlock on Civitai"))}</a>
+        </div>
+    `;
+}
+
 export function formatStatCount(value) {
     const number = Number(value || 0);
     if (!Number.isFinite(number) || number <= 0) return "0";
@@ -363,16 +386,16 @@ export function bindDetailInteractions(overlay, { onCloseDetail }) {
         showGalleryItem(gallery, Number(gallery.dataset.galleryCurrent || 0) + (event.key === "ArrowRight" ? 1 : -1));
         gallery.querySelector("[data-gallery-open]")?.focus({ preventScroll: true });
     });
-    // Resting on a remote card warms its full record before the click.
+    // Resting on a remote card (or a download row) warms its full record before the click.
     overlay.addEventListener("pointerover", (event) => {
-        const card = event.target.closest?.(".cmgr-card[data-model-id], .cmgr-card[data-remote-id]");
+        const card = event.target.closest?.(".cmgr-card[data-model-id], .cmgr-card[data-remote-id], [data-prefetch-model]");
         if (!card || card.contains(event.relatedTarget) || card.classList.contains("selected")) return;
         clearTimeout(prefetchTimer);
-        const id = card.dataset.modelId || card.dataset.remoteId;
+        const id = card.dataset.modelId || card.dataset.remoteId || card.dataset.prefetchModel;
         prefetchTimer = setTimeout(() => fetchModelDetail(id).catch(() => {}), PREFETCH_DELAY);
     });
     overlay.addEventListener("pointerout", (event) => {
-        const card = event.target.closest?.(".cmgr-card");
+        const card = event.target.closest?.(".cmgr-card, [data-prefetch-model]");
         if (card && !card.contains(event.relatedTarget)) clearTimeout(prefetchTimer);
     });
 }

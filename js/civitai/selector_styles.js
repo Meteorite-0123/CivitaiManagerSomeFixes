@@ -348,7 +348,7 @@ export function injectSelectorStyles() {
         }
         .cmgr-selector-body [hidden] { display: none !important; }
         .cmgr-selector-body .cmgr-split { background: var(--selector-rail); }
-        .cmgr-selector-body .cmgr-results { padding: 20px; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 184px), 1fr)); grid-auto-rows: max-content !important; }
+        .cmgr-selector-body .cmgr-results { padding: 20px; gap: 16px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 184px), 1fr)); grid-auto-rows: max-content !important; scrollbar-gutter: stable; }
         .cmgr-selector-body .cmgr-card {
             display: block;
             height: auto !important;
@@ -387,6 +387,15 @@ export function injectSelectorStyles() {
         .cmgr-selector-body :is(.cmgr-card-badge, .cmgr-card-status) { padding: 5px 7px; border: 0; border-radius: 4px; background: var(--selector-menu); color: var(--selector-text); font-size: 10px; font-weight: 500; line-height: 13px; box-shadow: none; backdrop-filter: none; }
         .cmgr-selector-body .cmgr-card-status.is-installed { background: #2f9e62; color: #fff; }
         .cmgr-selector-body .cmgr-card-status.is-downloading { background: var(--selector-primary); color: #fff; }
+        .cmgr-selector-body .cmgr-card-badge.is-early-access { display: grid; place-items: center; width: 23px; height: 23px; padding: 0; background: #d97a1e; color: #fff; }
+        .cmgr-selector-body .cmgr-card-badge.is-early-access svg { width: 13px; height: 13px; stroke-width: 2; }
+        .cmgr-selector-body .cmgr-early-access { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 8px 10px; margin: 0; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--selector-warn) 40%, transparent); border-radius: 8px; background: color-mix(in srgb, var(--selector-warn) 10%, var(--selector-surface)); }
+        .cmgr-selector-body .cmgr-early-access-icon { color: var(--selector-warn); }
+        .cmgr-selector-body .cmgr-early-access-icon svg { width: 16px; height: 16px; }
+        .cmgr-selector-body .cmgr-early-access > div { display: grid; gap: 3px; min-width: 0; }
+        .cmgr-selector-body .cmgr-early-access b { color: var(--selector-warn); font-size: 12px; font-weight: 600; }
+        .cmgr-selector-body .cmgr-early-access span { color: var(--selector-text); font-size: 11.5px; line-height: 17px; }
+        .cmgr-selector-body .cmgr-early-access > a { grid-column: 2; display: inline-flex; align-items: center; justify-self: start; min-height: 28px; padding: 0 10px; font-size: 11px; text-decoration: none; }
         .cmgr-selector-body .cmgr-card-badge { top: 9px; left: 9px; }
         .cmgr-selector-body .cmgr-card-top-badges { top: 9px; left: 9px; }
         .cmgr-selector-body .cmgr-card-top-badges .cmgr-card-badge { position: static; }
@@ -397,17 +406,23 @@ export function injectSelectorStyles() {
         .cmgr-selector-body .cmgr-card-favorite-btn:hover { color: var(--selector-favorite) !important; background: var(--selector-menu) !important; border-color: transparent !important; }
         .cmgr-selector-body .cmgr-card-favorite-btn.is-active, .cmgr-selector-body .cmgr-card-favorite-btn.is-active:hover { color: #fff !important; background: #e09b17 !important; box-shadow: 0 2px 8px rgba(0, 0, 0, .3); }
         .cmgr-selector-body .cmgr-no-image { background: var(--selector-field); color: var(--selector-muted); font-size: 12px; font-weight: 400; }
-        .cmgr-selector-body .cmgr-skeleton-media { position: absolute; inset: 0; width: 100%; height: 100%; border-radius: 0; background: var(--selector-field); }
-        .cmgr-selector-body .cmgr-skeleton-content { position: absolute; inset: auto 0 0; min-height: 88px; box-sizing: border-box; padding: 16px 12px; background: var(--selector-surface); }
+        .cmgr-selector-body .cmgr-skeleton-card::after { display: none; }
+        .cmgr-selector-body .cmgr-skeleton-badge { top: 9px; left: 9px; width: 56px; height: 23px; background: var(--selector-menu); }
+        .cmgr-selector-body .cmgr-skeleton-content { position: absolute; inset: auto 0 0; display: grid; gap: 5px; box-sizing: border-box; padding: 42px 12px 12px; background: linear-gradient(0deg, rgba(12, 17, 25, .96), rgba(12, 17, 25, .78) 62%, transparent); }
+        .cmgr-selector-body .cmgr-skeleton-content :is(.cmgr-skeleton-line, .cmgr-skeleton-stats span) { background: rgba(255, 255, 255, .13); }
+        .cmgr-selector-body .cmgr-skeleton-line { height: 12px; margin: 3px 0; }
+        .cmgr-selector-body .cmgr-skeleton-line.is-creator { width: 38%; height: 9px; }
+        .cmgr-selector-body .cmgr-skeleton-stats { align-items: center; gap: 6px; min-height: 24px; margin-top: 2px; }
+        .cmgr-selector-body .cmgr-skeleton-stats span { width: 52px; height: 23px; }
         .cmgr-selector-body :is(.cmgr-skeleton-line, .cmgr-skeleton-stats span, .cmgr-skeleton-badge) { border-radius: 4px; }
         .cmgr-selector-body .cmgr-media-skeleton { background: var(--selector-field); transition: opacity .32s ease .04s; }
         .cmgr-selector-body :is(.cmgr-thumb, .cmgr-dl-thumb, .cmgr-applied-thumb):has(.cmgr-card-media.is-loaded, .cmgr-no-image) .cmgr-media-skeleton { opacity: 0; }
-        .cmgr-selector-body .cmgr-card-media { opacity: 0; transform: scale(1.015); transition: opacity .32s ease, transform .5s cubic-bezier(.2,.7,.2,1); }
-        .cmgr-selector-body .cmgr-card-media.is-loaded { opacity: 1; transform: none; }
+        .cmgr-selector-body .cmgr-card-media { opacity: 0; transition: opacity .32s ease; }
+        .cmgr-selector-body .cmgr-card-media.is-loaded { opacity: 1; }
         .cmgr-selector-body .cmgr-card-video:not(.cmgr-card-media) { opacity: 0; transition: opacity .22s ease; }
         .cmgr-selector-body .cmgr-card-video.is-loaded { opacity: 1; }
         .cmgr-selector-body .cmgr-card.is-entering > :not(.cmgr-thumb) { animation: cmgrCardIn .36s cubic-bezier(.2,.7,.2,1) var(--cmgr-enter-delay, 0ms) both; }
-        @keyframes cmgrCardIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+        @keyframes cmgrCardIn { from { opacity: 0; } }
         .cmgr-selector-body .cmgr-detail { background: var(--selector-surface); border-color: var(--selector-line); box-shadow: none; }
         .cmgr-selector-body .cmgr-detail-scroll { padding: 16px 18px 24px; }
         .cmgr-selector-body .cmgr-detail-preview { height: clamp(220px, 32vh, 360px); min-height: 0; border: 0; border-radius: 7px; background: var(--selector-rail); box-shadow: none; }
@@ -418,8 +433,8 @@ export function injectSelectorStyles() {
         .cmgr-selector-body .cmgr-detail-head h2 { margin: 0; color: var(--selector-text); font-size: 17px; font-weight: 550; line-height: 23px; }
         .cmgr-selector-body .cmgr-detail-head p { margin: 7px 0 0; color: var(--selector-muted); font-size: 11px; font-weight: 400; line-height: 17px; }
         .cmgr-selector-body .cmgr-detail-head .cmgr-card-stat-row { margin-top: 12px; }
-        .cmgr-selector-body .cmgr-detail-head .cmgr-card-stat-chip { background: var(--selector-field); border-color: transparent; color: var(--selector-text); }
-        .cmgr-selector-body .cmgr-detail-head .cmgr-card-stat-chip svg { color: var(--selector-accent); }
+        .cmgr-selector-body :is(.cmgr-detail-head, .cmgr-dl-model) .cmgr-card-stat-chip { background: var(--selector-field); border-color: transparent; color: var(--selector-text); }
+        .cmgr-selector-body :is(.cmgr-detail-head, .cmgr-dl-model) .cmgr-card-stat-chip svg { color: var(--selector-accent); }
         .cmgr-selector-body .cmgr-detail-title-link:hover h2 { color: var(--selector-accent); }
         .cmgr-selector-body .cmgr-external-icon { border: 0; border-radius: 4px; background: transparent; color: var(--selector-muted); }
         .cmgr-selector-body .cmgr-detail-match-row { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 0; padding: 12px 0 0; border: 0; border-top: 1px solid var(--selector-line); border-radius: 0; background: transparent; }
@@ -580,13 +595,14 @@ export function injectSelectorStyles() {
         .cmgr-selector-overlay .cmgr-notification-host .cmgr-notice { border: 0; border-radius: 7px; background: var(--selector-menu); color: var(--selector-text); font: 400 12px/18px -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; backdrop-filter: none; }
         .cmgr-selector-body .cmgr-card:focus-visible { outline: 2px solid var(--selector-accent); outline-offset: 2px; }
         .cmgr-selector-body .cmgr-detail.is-loading::before { content: ""; position: absolute; z-index: 9; inset: 0 0 auto; height: 2px; background: linear-gradient(90deg, transparent, var(--selector-accent), transparent) no-repeat; background-size: 40% 100%; animation: cmgrDetailLoading 1s linear infinite; }
+        .cmgr-selector-body .cmgr-split.is-searching-more::before { content: ""; position: absolute; z-index: 4; grid-column: 1; grid-row: 1; top: 0; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, transparent, var(--selector-accent), transparent) no-repeat; background-size: 40% 100%; animation: cmgrDetailLoading 1s linear infinite; pointer-events: none; }
         @keyframes cmgrDetailLoading { from { background-position: -70% 0; } to { background-position: 170% 0; } }
         .cmgr-selector-body .cmgr-detail-dismiss { display: none; }
         .cmgr-selector-body :is(.cmgr-detail-stage-media, .cmgr-detail-thumb img, .cmgr-detail-preview-bg) { transition: opacity .26s ease; }
         .cmgr-selector-body :is(.cmgr-detail-stage-media, .cmgr-detail-thumb img, .cmgr-detail-preview-bg):not(.is-loaded) { opacity: 0; }
         .cmgr-selector-body .cmgr-detail-preview:not(:has(.cmgr-detail-stage-media.is-loaded, .cmgr-no-image))::after,
         .cmgr-selector-body .cmgr-detail-skeleton :is(.cmgr-detail-skeleton-block, .cmgr-detail-skeleton-chips span, .cmgr-detail-skeleton-lines span)::after,
-        .cmgr-selector-body .cmgr-description .cmgr-detail-skeleton-lines span::after { content: ""; position: absolute; inset: 0; background: linear-gradient(105deg, transparent 22%, color-mix(in srgb, var(--selector-text) 9%, transparent) 44%, transparent 66%); transform: translateX(-115%); animation: cmgrSkeletonShimmer 1.35s ease-in-out infinite; }
+        .cmgr-selector-body :is(.cmgr-description, .cmgr-dl-model) .cmgr-detail-skeleton-lines span::after { content: ""; position: absolute; inset: 0; background: linear-gradient(105deg, transparent 22%, color-mix(in srgb, var(--selector-text) 9%, transparent) 44%, transparent 66%); transform: translateX(-115%); animation: cmgrSkeletonShimmer 1.35s ease-in-out infinite; }
         .cmgr-selector-body .cmgr-detail-skeleton .cmgr-detail-preview { position: relative; overflow: hidden; }
         .cmgr-selector-body .cmgr-detail-skeleton-lines { display: grid; gap: 8px; margin: 16px 0; }
         .cmgr-selector-body .cmgr-detail-skeleton-lines span, .cmgr-selector-body .cmgr-detail-skeleton-chips span, .cmgr-selector-body .cmgr-detail-skeleton-block { position: relative; display: block; overflow: hidden; border-radius: 5px; background: var(--selector-field); }
@@ -664,31 +680,64 @@ export function injectSelectorStyles() {
         .cmgr-selector-body .cmgr-dl-group > h3 { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; color: var(--selector-muted); font-size: 11px; font-weight: 500; }
         .cmgr-selector-body .cmgr-dl-group > h3 b { min-width: 18px; padding: 0 6px; border-radius: 9px; background: var(--selector-field); color: var(--selector-text); font-size: 10px; font-weight: 500; line-height: 18px; text-align: center; }
         .cmgr-selector-body .cmgr-dl-rows { display: grid; gap: 8px; }
-        .cmgr-selector-body .cmgr-dl-row { display: grid; grid-template-columns: 52px minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 10px 12px; border: 1px solid var(--selector-line); border-radius: 8px; background: var(--selector-surface); }
+        .cmgr-selector-body .cmgr-dl-row { border: 1px solid var(--selector-line); border-radius: 8px; background: var(--selector-surface); transition: border-color .15s ease; }
+        .cmgr-selector-body .cmgr-dl-row:hover { border-color: color-mix(in srgb, var(--selector-muted) 50%, transparent); }
+        .cmgr-selector-body .cmgr-dl-row.is-open { border-color: color-mix(in srgb, var(--selector-accent) 45%, transparent); }
+        .cmgr-selector-body .cmgr-dl-row-head { display: grid; grid-template-columns: 48px minmax(0, 1fr) 84px 156px 28px; align-items: center; gap: 14px; padding: 10px 12px; cursor: pointer; }
+        .cmgr-selector-body .cmgr-dl-thumb { width: 48px; height: 48px; }
+        .cmgr-selector-body .cmgr-dl-main { display: grid; gap: 6px; min-width: 0; }
+        .cmgr-selector-body .cmgr-dl-status { justify-self: start; padding: 3px 8px; border-radius: 4px; background: var(--selector-field); color: var(--selector-muted); font-size: 11px; font-weight: 500; line-height: 16px; white-space: nowrap; }
+        .cmgr-selector-body .cmgr-dl-actions { display: flex; align-items: center; justify-content: flex-end; gap: 6px; min-width: 0; }
+        .cmgr-selector-body .cmgr-dl-expand { display: grid; place-items: center; width: 28px; height: 28px; margin: 0; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--selector-muted); cursor: pointer; }
+        .cmgr-selector-body .cmgr-dl-expand:hover { background: var(--selector-hover); color: var(--selector-text); }
+        .cmgr-selector-body .cmgr-dl-expand svg { width: 16px; height: 16px; transition: transform .2s cubic-bezier(.2,.7,.2,1); }
+        .cmgr-selector-body .cmgr-dl-row.is-open .cmgr-dl-expand svg { transform: rotate(180deg); }
+        .cmgr-selector-body .cmgr-dl-details { display: grid; grid-template-rows: 0fr; visibility: hidden; transition: grid-template-rows .22s cubic-bezier(.2,.7,.2,1), visibility 0s linear .22s; }
+        .cmgr-selector-body .cmgr-dl-row.is-open .cmgr-dl-details { grid-template-rows: 1fr; visibility: visible; transition: grid-template-rows .22s cubic-bezier(.2,.7,.2,1); }
+        .cmgr-selector-body .cmgr-dl-details > div { min-height: 0; overflow: hidden; }
+        .cmgr-selector-body .cmgr-dl-details-body { display: grid; grid-template-columns: 280px minmax(0, 1fr); align-items: start; gap: 20px; margin: 0 12px; padding: 14px 0 16px; border-top: 1px solid var(--selector-line); }
+        .cmgr-selector-body .cmgr-dl-gallery .cmgr-detail-preview { position: relative; height: clamp(240px, 34vh, 360px); overflow: hidden; }
+        .cmgr-selector-body .cmgr-dl-gallery [aria-busy] .cmgr-detail-thumb { opacity: 1; cursor: default; }
+        .cmgr-selector-body .cmgr-dl-info { display: grid; align-content: start; gap: 14px; min-width: 0; }
+        .cmgr-selector-body .cmgr-dl-model { display: grid; gap: 12px; padding-top: 12px; border-top: 1px solid var(--selector-line); }
+        .cmgr-selector-body .cmgr-dl-model :is(.cmgr-selector-triggers, .cmgr-detail-tags, .cmgr-detail-skeleton-lines) { margin: 0; }
+        .cmgr-selector-body .cmgr-dl-model-stats { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--selector-muted); font-size: 11px; }
+        .cmgr-selector-body .cmgr-dl-model-stats .cmgr-card-stat-row { margin: 0; }
+        .cmgr-selector-body .cmgr-dl-description { display: -webkit-box; margin: 0; overflow: hidden; color: var(--selector-muted); font-size: 12px; line-height: 1.65; white-space: pre-line; -webkit-box-orient: vertical; -webkit-line-clamp: 4; }
+        .cmgr-selector-body .cmgr-dl-links { display: flex; flex-wrap: wrap; gap: 8px; }
+        .cmgr-selector-body .cmgr-dl-links > * { display: inline-flex; align-items: center; gap: 6px; text-decoration: none; }
+        .cmgr-selector-body .cmgr-dl-links svg { width: 15px; height: 15px; }
+        .cmgr-selector-body .cmgr-dl-facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); grid-auto-flow: dense; gap: 10px 24px; margin: 0; }
+        .cmgr-selector-body .cmgr-dl-facts > div { display: grid; gap: 3px; min-width: 0; }
+        .cmgr-selector-body .cmgr-dl-facts > div:has(.is-path) { grid-column: 1 / -1; }
+        .cmgr-selector-body .cmgr-dl-facts dt { color: var(--selector-muted); font-size: 10.5px; }
+        .cmgr-selector-body .cmgr-dl-facts dd { margin: 0; color: var(--selector-text); font-size: 12px; line-height: 18px; overflow-wrap: anywhere; }
+        .cmgr-selector-body .cmgr-dl-facts dd a { color: var(--selector-accent); text-decoration: none; }
+        .cmgr-selector-body .cmgr-dl-facts dd a:hover { text-decoration: underline; }
+        .cmgr-selector-body .cmgr-dl-facts .is-path { font: 11px/18px ui-monospace, "Cascadia Mono", Consolas, monospace; user-select: text; }
+        .cmgr-selector-body .cmgr-dl-reason { display: grid; gap: 4px; padding: 10px 12px; border-left: 3px solid var(--cmgr-danger); border-radius: 6px; background: color-mix(in srgb, var(--cmgr-danger) 9%, var(--selector-surface)); }
+        .cmgr-selector-body .cmgr-dl-reason > b { color: var(--cmgr-danger); font-size: 12px; font-weight: 600; }
+        .cmgr-selector-body .cmgr-dl-reason > span { color: var(--selector-text); font-size: 12px; line-height: 18px; }
+        .cmgr-selector-body .cmgr-dl-reason > code { color: var(--selector-muted); font: 10.5px/16px ui-monospace, "Cascadia Mono", Consolas, monospace; overflow-wrap: anywhere; }
+        .cmgr-selector-body .cmgr-dl-reason > a { display: inline-flex; align-items: center; justify-self: start; min-height: 30px; margin-top: 4px; text-decoration: none; }
         .cmgr-selector-body .cmgr-dl-row.is-new { animation: cmgrRowIn .32s cubic-bezier(.2,.7,.2,1); }
         .cmgr-selector-body .cmgr-dl-row.is-changed { animation: cmgrRowFlash .9s ease; }
         @keyframes cmgrRowIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
         @keyframes cmgrRowFlash { from { background: var(--selector-selected); } to { background: var(--selector-surface); } }
-        .cmgr-selector-body .cmgr-dl-thumb { width: 52px; height: 52px; }
-        .cmgr-selector-body .cmgr-dl-main { display: grid; gap: 5px; min-width: 0; }
         .cmgr-selector-body .cmgr-dl-head { display: flex; align-items: center; gap: 8px; min-width: 0; }
         .cmgr-selector-body .cmgr-dl-head > b { min-width: 0; overflow: hidden; color: var(--selector-text); font-size: 13px; font-weight: 550; text-overflow: ellipsis; white-space: nowrap; }
         .cmgr-selector-body .cmgr-dl-chip { flex: 0 0 auto; padding: 1px 6px; border-radius: 4px; background: var(--selector-field); color: var(--selector-muted); font-size: 10px; }
-        .cmgr-selector-body .cmgr-dl-status { flex: 0 0 auto; margin-left: auto; padding: 2px 7px; border-radius: 4px; background: var(--selector-field); color: var(--selector-muted); font-size: 10px; font-weight: 500; }
         .cmgr-selector-body .is-downloading .cmgr-dl-status { background: var(--selector-selected); color: var(--selector-accent); }
         .cmgr-selector-body .is-completed .cmgr-dl-status { background: color-mix(in srgb, var(--selector-good) 15%, transparent); color: var(--selector-good); }
         .cmgr-selector-body .is-failed .cmgr-dl-status { background: color-mix(in srgb, var(--cmgr-danger) 14%, transparent); color: var(--cmgr-danger); }
-        .cmgr-selector-body .cmgr-dl-path { overflow: hidden; color: var(--selector-muted); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
         .cmgr-selector-body .cmgr-dl-bar { position: relative; height: 4px; overflow: hidden; border-radius: 2px; background: var(--selector-field); }
         .cmgr-selector-body .cmgr-dl-bar > span { display: block; height: 100%; border-radius: inherit; background: var(--selector-accent); transition: width .6s linear; }
         .cmgr-selector-body .cmgr-dl-bar.is-indeterminate > span { width: 35% !important; animation: cmgrBarSlide 1.1s ease-in-out infinite; }
         @keyframes cmgrBarSlide { from { transform: translateX(-100%); } to { transform: translateX(290%); } }
-        .cmgr-selector-body .cmgr-dl-row:not(.is-pending, .is-downloading, .is-cancelling) .cmgr-dl-bar { display: none; }
         .cmgr-selector-body .cmgr-dl-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; color: var(--selector-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
         .cmgr-selector-body .cmgr-dl-meta b { color: var(--selector-text); font-weight: 550; }
         .cmgr-selector-body .cmgr-dl-meta i { font-style: normal; opacity: .5; }
         .cmgr-selector-body .cmgr-dl-meta .is-error { color: var(--cmgr-danger); overflow-wrap: anywhere; }
-        .cmgr-selector-body .cmgr-dl-actions { display: flex; align-items: center; gap: 6px; }
         .cmgr-selector-body .cmgr-dl-actions :is(.cmgr-primary, .cmgr-secondary) { min-height: 30px; padding: 0 10px; font-size: 11px; }
         .cmgr-selector-body .cmgr-dl-remove { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--selector-muted); cursor: pointer; opacity: 0; transition: opacity .15s ease, background-color .15s ease; }
         .cmgr-selector-body .cmgr-dl-row:hover .cmgr-dl-remove, .cmgr-selector-body .cmgr-dl-remove:focus-visible { opacity: 1; }
@@ -749,9 +798,10 @@ export function injectSelectorStyles() {
             .cmgr-selector-body .cmgr-applied-row { grid-template-columns: 24px 48px minmax(0, 1fr) auto auto auto; }
             .cmgr-selector-body .cmgr-applied-order { display: none; }
             .cmgr-selector-body .cmgr-applied-strength { grid-column: 2 / -1; grid-row: 2; }
-            .cmgr-selector-body .cmgr-dl-row { grid-template-columns: 44px minmax(0, 1fr); }
+            .cmgr-selector-body .cmgr-dl-row-head { grid-template-columns: 44px minmax(0, 1fr) auto 28px; }
             .cmgr-selector-body .cmgr-dl-thumb { width: 44px; height: 44px; }
-            .cmgr-selector-body .cmgr-dl-actions { grid-column: 1 / -1; justify-content: flex-end; }
+            .cmgr-selector-body .cmgr-dl-actions { grid-column: 2 / -1; grid-row: 2; }
+            .cmgr-selector-body .cmgr-dl-details-body { grid-template-columns: minmax(0, 1fr); }
         }
         @media (max-width: 980px) {
             .cmgr-selector-body .cmgr-split.has-detail { display: grid; grid-template-columns: minmax(0, 1fr); overflow: hidden; }
@@ -766,7 +816,7 @@ export function injectSelectorStyles() {
         }
         @media (max-width: 720px) {
             .cmgr-selector-body .cmgr-results { padding: 14px; gap: 12px; }
-            .cmgr-selector-body .cmgr-card .cmgr-card-body { min-height: 0; padding: 34px 10px 10px; }
+            .cmgr-selector-body :is(.cmgr-card .cmgr-card-body, .cmgr-skeleton-content) { min-height: 0; padding: 34px 10px 10px; }
             .cmgr-selector-body .cmgr-detail-scroll { padding: 16px; }
             .cmgr-selector-body :is(.cmgr-download-list, .cmgr-lora-applied-list) { padding: 14px; }
         }

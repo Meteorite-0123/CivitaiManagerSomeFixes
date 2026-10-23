@@ -63,6 +63,12 @@ function searchCacheKey(path) {
     return `${SEARCH_CACHE_VERSION}:${path}`;
 }
 
+// Civitai pages can overlap; only items that are not on screen yet are kept.
+export function unseenSearchItems(shown, page) {
+    const ids = new Set(shown.map((item) => String(item.id)));
+    return (Array.isArray(page) ? page : []).filter((item) => !ids.has(String(item.id)) && ids.add(String(item.id)));
+}
+
 export function getSearchCache(path) {
     try {
         const raw = localStorage.getItem(SEARCH_CACHE_KEY);

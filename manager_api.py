@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import http.client
 import json
 import mimetypes
 import os
@@ -72,11 +73,12 @@ MODEL_DETAIL_CACHE_TTL = 5 * 60
 MODEL_DETAIL_CACHE_LIMIT = 64
 # Search cards only need these fields; /model-detail delivers the full record.
 SEARCH_MODEL_FIELDS = ("id", "name", "type", "nsfw", "nsfwLevel", "tags", "stats", "availability")
-SEARCH_VERSION_FIELDS = ("id", "name", "baseModel", "baseModelType", "publishedAt", "trainedWords", "stats", "availability")
+SEARCH_VERSION_FIELDS = ("id", "name", "baseModel", "baseModelType", "publishedAt", "trainedWords", "stats", "availability", "earlyAccessEndsAt", "paidAccess")
 SEARCH_FILE_FIELDS = ("id", "name", "sizeKB", "type", "primary", "metadata", "hashes", "downloadUrl")
 SEARCH_IMAGE_FIELDS = ("url", "type", "nsfwLevel", "width", "height")
 SEARCH_PRIMARY_IMAGE_LIMIT = 12
 SEARCH_FALLBACK_CURSOR_PREFIX = "fallback:"
+SEARCH_ATTEMPT_CURSOR_PREFIX = "attempt:"
 SEARCH_FALLBACK_MAX_PAGES = 8
 RETRYABLE_HTTP_STATUS = {429, 500, 502, 503, 504}
 DOWNLOAD_MAX_WORKERS = 3
@@ -1388,6 +1390,35 @@ def _ensure_download_workers() -> None:
         _DOWNLOAD_WORKERS_STARTED = True
 
 
+DOWNLOAD_HTTP_REASONS = {401: "auth", 404: "not_found", 429: "rate_limited"}
+
+
+def _download_failure(exc: Exception) -> tuple[str, str]:
+    """Classify a failed download for the UI, keeping Civitai's own wording."""
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            body = json.loads(exc.read(4096) or b"null")
+        except (OSError, ValueError):
+            body = None
+        body = body if isinstance(body, dict) else {}
+        detail = str(body.get("message") or body.get("error") or "").strip()
+        message = f"Civitai refused the download: {detail}" if detail and exc.code < 500 else f"HTTP {exc.code}: {exc.reason}"
+        if exc.code == 403:
+            # Civitai explains refusals such as Early Access in the body; only
+            # an unexplained 403 points at the API Key.
+            if "early access" in f"{body.get('error') or ''} {detail}".lower():
+                return "early_access", message
+            return ("forbidden" if detail else "auth"), message
+        if exc.code >= 500:
+            return "server", message
+        return DOWNLOAD_HTTP_REASONS.get(exc.code, "http"), message
+    if isinstance(exc, (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException)):
+        return "network", str(getattr(exc, "reason", "") or exc)
+    if isinstance(exc, OSError):
+        return "disk", str(exc)
+    return "unknown", str(exc)
+
+
 def _download_worker(
     task_id: str,
     download_url: str,
@@ -1411,7 +1442,7 @@ def _download_worker(
         req = urllib.request.Request(download_url, headers=_request_headers(api_key, json_content=False))
         with _DOWNLOAD_URL_OPENER.open(req, timeout=60) as resp, open(temp_path, "wb") as handle:
             total = int(resp.headers.get("Content-Length") or 0)
-            store.update(task_id, status="downloading", total=total, error="")
+            store.update(task_id, status="downloading", total=total, error="", error_reason="")
             while True:
                 if cancel_event.is_set():
                     raise DownloadCancelled()
@@ -1431,6 +1462,15 @@ def _download_worker(
 
         if config.get("save_metadata", True):
             _write_asset_metadata(final_path, root_kind, metadata)
+        # The preview is saved before the job reports completion: the library
+        # rescan that completion triggers (e.g. to apply the LoRA to a node)
+        # must already find it, or the node keeps the "No Preview" placeholder.
+        if config.get("save_preview", True) and preview_url:
+            try:
+                preview_path = _companion_preview_path(final_path, preview_url)
+                _download_binary(preview_url, preview_path, api_key=None, timeout=30)
+            except Exception as exc:
+                print(f"[CivitaiManager] Preview download failed: {exc}")
 
         store.update(
             task_id,
@@ -1441,28 +1481,14 @@ def _download_worker(
             completed_at=_now(),
         )
         _LIBRARY_INDEX.invalidate()
-
-        if config.get("save_preview", True) and preview_url:
-            try:
-                preview_path = _companion_preview_path(final_path, preview_url)
-                _download_binary(preview_url, preview_path, api_key=None, timeout=30)
-            except Exception as exc:
-                print(f"[CivitaiManager] Preview download failed: {exc}")
     except DownloadCancelled:
         store.update(task_id, status="cancelled", error="", cancelled_at=_now())
-    except urllib.error.HTTPError as exc:
-        if cancel_event.is_set():
-            store.update(task_id, status="cancelled", error="", cancelled_at=_now())
-        else:
-            error = f"HTTP {exc.code}: {exc.reason}"
-            if exc.code in (401, 403):
-                error = "Civitai refused the download. Configure a valid API Key in Settings."
-            store.update(task_id, status="failed", error=error, failed_at=_now())
     except Exception as exc:
         if cancel_event.is_set():
             store.update(task_id, status="cancelled", error="", cancelled_at=_now())
         else:
-            store.update(task_id, status="failed", error=str(exc), failed_at=_now())
+            reason, error = _download_failure(exc)
+            store.update(task_id, status="failed", error=error, error_reason=reason, failed_at=_now())
     finally:
         if os.path.exists(temp_path):
             try:
@@ -1945,9 +1971,13 @@ def _search_civitai_models(
     metadata: dict[str, Any] = {}
     attempted: set[tuple[str, str, str]] = set()
     fallback_cursor = ""
+    attempt_index = 0
     if cursor.startswith(SEARCH_FALLBACK_CURSOR_PREFIX):
         fallback_cursor = cursor[len(SEARCH_FALLBACK_CURSOR_PREFIX):]
         cursor = ""
+    elif cursor.startswith(SEARCH_ATTEMPT_CURSOR_PREFIX):
+        index_text, _, cursor = cursor[len(SEARCH_ATTEMPT_CURSOR_PREFIX):].partition(":")
+        attempt_index = int(index_text) if index_text.isdigit() else 0
 
     def add_attempt(attempts: list[tuple[str, str, str]], attempt_query: str, attempt_tag: str, attempt_base: str) -> None:
         key = (attempt_query.strip(), attempt_tag.strip(), attempt_base.strip())
@@ -1959,14 +1989,19 @@ def _search_civitai_models(
     attempts: list[tuple[str, str, str]] = []
     if not fallback_cursor:
         add_attempt(attempts, query, api_tag, base_model)
-        if not cursor and query and api_tag:
+        if query and api_tag:
             add_attempt(attempts, query, "", base_model)
-        if not cursor and query and not api_tag:
+        if query and not api_tag:
             add_attempt(attempts, "", query, base_model)
-        if not cursor and query and api_tag:
+        if query and api_tag:
             add_attempt(attempts, "", api_tag, base_model)
+    if cursor:
+        # Later pages continue the attempt that produced the first page.
+        attempts = attempts[attempt_index:attempt_index + 1]
+    else:
+        attempt_index = 0
 
-    for attempt_query, attempt_tag, attempt_base in attempts:
+    for index, (attempt_query, attempt_tag, attempt_base) in enumerate(attempts, start=attempt_index):
         fetch_limit = 100 if base_model else limit
         params = _build_model_query_params(
             kind,
@@ -1989,8 +2024,14 @@ def _search_civitai_models(
 
         page_items = result.get("items") if isinstance(result.get("items"), list) else []
         page_items = [item for item in page_items if isinstance(item, dict)]
+        if attempt_tag and not attempt_query and attempt_tag == query.strip():
+            # Civitai ignores unknown tags, so a query retried as a tag must
+            # still match the query or the page is just the unfiltered listing.
+            page_items = [item for item in page_items if _model_text_matches(item, query)]
         if page_items:
             metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+            if index and metadata.get("nextCursor"):
+                metadata = {**metadata, "nextCursor": f"{SEARCH_ATTEMPT_CURSOR_PREFIX}{index}:{metadata['nextCursor']}"}
             _merge_taxonomy_cache(kind, config, page_items)
             if base_model:
                 page_items = [item for item in page_items if _base_model_matches(item, base_model)]
@@ -2272,7 +2313,10 @@ def _enqueue_download_request(body: dict[str, Any]) -> tuple[str, dict[str, Any]
         "model_id": model.get("id") or "",
         "version_id": version.get("id") or "",
         "model_name": str(model.get("name") or ""),
+        "model_type": str(model.get("type") or ""),
+        "version_name": str(version.get("name") or ""),
         "base_model": str(version.get("baseModel") or model.get("baseModel") or ""),
+        "file_size": int(float(file_info.get("sizeKB") or 0) * 1024),
         "preview_url": preview_url or "",
         "created_at": _now(),
     }, retry_payload, DOWNLOAD_MAX_ACTIVE_JOBS)

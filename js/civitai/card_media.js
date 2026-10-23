@@ -97,6 +97,23 @@ export function animateCardsIn(cards) {
     });
 }
 
+// Placeholders reuse the real card's thumb skeleton and body layout, so a
+// result replaces its placeholder in place: the text fades in, nothing moves.
+export function renderCardSkeletons(count, { loadMore = false } = {}) {
+    const label = escapeHtml(t(loadMore ? "Loading more..." : "Loading..."));
+    return Array.from({ length: count }, (_, index) => `
+        <article class="cmgr-card cmgr-skeleton-card${loadMore ? " cmgr-load-more-skeleton" : ""}" ${index ? 'aria-hidden="true"' : `role="status" aria-label="${label}"`}>
+            <div class="cmgr-thumb"><span class="cmgr-media-skeleton" aria-hidden="true"></span></div>
+            <div class="cmgr-skeleton-badge"></div>
+            <div class="cmgr-skeleton-content">
+                <div class="cmgr-skeleton-line ${["", "is-medium", "is-short"][index % 3]}"></div>
+                <div class="cmgr-skeleton-line is-creator"></div>
+                <div class="cmgr-skeleton-stats"><span></span><span></span></div>
+            </div>
+        </article>
+    `).join("");
+}
+
 // Placeholder cards finish the current grid row and add one more, so the
 // skeletons never leave a ragged half row.
 export function loadMoreSkeletonCount(results) {
@@ -158,7 +175,17 @@ function toggleClip(event, entering) {
     clip.play().catch(() => {});
 }
 
+// Every shimmer runs on the document clock, so a placeholder swapped for a
+// real card keeps sweeping in step instead of restarting.
+function alignShimmer(event) {
+    if (event.animationName !== "cmgrSkeletonShimmer") return;
+    for (const animation of event.target.getAnimations({ subtree: true })) {
+        if (animation.animationName === "cmgrSkeletonShimmer" && animation.startTime !== 0) animation.startTime = 0;
+    }
+}
+
 export function bindCardMedia(overlay) {
+    overlay.addEventListener("animationstart", alignShimmer);
     overlay.addEventListener("load", revealMedia, true);
     overlay.addEventListener("loadeddata", revealMedia, true);
     overlay.addEventListener("playing", (event) => event.target.classList?.add("is-loaded"), true);

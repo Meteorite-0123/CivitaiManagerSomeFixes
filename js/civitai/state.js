@@ -12,6 +12,7 @@ export const state = {
     sort: "Highest Rated",
     cursor: "",
     nextCursor: "",
+    sparseResults: false,
     loadingSearch: false,
     autoLoadingMore: false,
     searchItems: [],

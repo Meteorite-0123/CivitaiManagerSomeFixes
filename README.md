@@ -4,7 +4,7 @@
 
 ### 在 ComfyUI 内完成 Civitai 模型的发现、下载、整理与使用
 
-[![Version](https://img.shields.io/badge/version-1.1.0-4f8cff?style=flat-square)](https://github.com/nregret/CivitaiManager)
+[![Version](https://img.shields.io/badge/version-1.1.1-4f8cff?style=flat-square)](https://github.com/nregret/CivitaiManager)
 [![Comfy Registry](https://img.shields.io/badge/Comfy_Registry-CivitaiManager-8b5cf6?style=flat-square)](https://registry.comfy.org/zh/publishers/nnegret/nodes/CivitaiManager)
 [![Python](https://img.shields.io/badge/Python-%E2%89%A53.10-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![ComfyUI](https://img.shields.io/badge/ComfyUI-Custom_Node-111827?style=flat-square)](https://github.com/comfyanonymous/ComfyUI)
