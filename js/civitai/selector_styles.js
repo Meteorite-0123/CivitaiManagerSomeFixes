@@ -528,10 +528,10 @@ export function injectSelectorStyles() {
         .cmgr-selector-body .cmgr-file-group-head > span:not(.cmgr-file-role) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--selector-muted); font-size: 10px; }
         .cmgr-selector-body .cmgr-file-rows { display: grid; gap: 4px; }
         .cmgr-selector-body .cmgr-file-row {
-            display: grid;
-            grid-template-columns: auto minmax(0, 1fr) auto;
+            display: flex;
+            flex-wrap: wrap;
             align-items: center;
-            gap: 10px;
+            gap: 6px 10px;
             width: 100%;
             min-height: 38px;
             padding: 7px 10px;
@@ -547,12 +547,13 @@ export function injectSelectorStyles() {
         .cmgr-selector-body .cmgr-file-row.is-checked { background: color-mix(in srgb, var(--selector-accent) 6%, var(--selector-field)); }
         .cmgr-selector-body .cmgr-file-row.is-selected { border-color: var(--selector-accent); background: var(--selector-selected); }
         .cmgr-selector-body .cmgr-file-row.is-selected .cmgr-file-name { color: var(--selector-accent); }
-        .cmgr-selector-body .cmgr-file-check { width: 14px; height: 14px; margin: 0; accent-color: var(--selector-accent); cursor: pointer; }
+        .cmgr-selector-body .cmgr-file-check { flex: 0 0 auto; width: 14px; height: 14px; margin: 0; accent-color: var(--selector-accent); cursor: pointer; }
         .cmgr-selector-body .cmgr-file-main {
-            display: grid;
-            grid-template-columns: auto minmax(0, 1fr) auto;
+            display: flex;
+            flex: 1 1 190px;
+            flex-wrap: wrap;
             align-items: center;
-            gap: 10px;
+            gap: 2px 8px;
             min-width: 0;
             margin: 0;
             padding: 0;
@@ -565,20 +566,21 @@ export function injectSelectorStyles() {
         }
         .cmgr-selector-body .cmgr-file-main:focus-visible { outline: 1px solid var(--selector-accent); outline-offset: 3px; border-radius: 4px; }
         .cmgr-selector-body .cmgr-file-name {
+            flex: 1 1 120px;
             min-width: 0;
-            overflow-wrap: anywhere;
+            overflow-wrap: break-word;
             word-break: break-word;
             font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
             font-size: 11.5px;
             line-height: 15px;
         }
-        .cmgr-selector-body .cmgr-file-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; flex: 0 0 auto; }
+        .cmgr-selector-body .cmgr-file-meta { display: flex; flex: 0 0 auto; flex-direction: column; align-items: flex-end; gap: 1px; margin-left: auto; }
         .cmgr-selector-body .cmgr-file-meta span { color: var(--selector-muted); font-size: 9.5px; white-space: nowrap; }
         .cmgr-selector-body .cmgr-file-meta b { font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
-        .cmgr-selector-body .cmgr-file-target { display: inline-flex; align-items: center; gap: 4px; min-width: 0; margin: 0; color: var(--selector-muted); font-size: 10px; cursor: pointer; }
+        .cmgr-selector-body .cmgr-file-target { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; min-width: 0; max-width: 100%; margin: 0 0 0 auto; color: var(--selector-muted); font-size: 10px; cursor: pointer; }
         .cmgr-selector-body .cmgr-file-target select {
             min-height: 24px;
-            max-width: 148px;
+            max-width: 140px;
             padding: 2px 4px;
             border: 1px solid var(--selector-line);
             border-radius: 5px;
@@ -610,10 +612,7 @@ export function injectSelectorStyles() {
         @media (max-width: 560px) {
             .cmgr-selector-body .cmgr-file-picker-head { flex-direction: column; }
             .cmgr-selector-body .cmgr-file-picker-actions { width: 100%; justify-content: flex-start; }
-            .cmgr-selector-body .cmgr-file-row { grid-template-columns: auto minmax(0, 1fr); }
-            .cmgr-selector-body .cmgr-file-target { grid-column: 1 / -1; justify-self: start; padding-left: 24px; }
-            .cmgr-selector-body .cmgr-file-main { grid-template-columns: auto minmax(0, 1fr); }
-            .cmgr-selector-body .cmgr-file-meta { grid-column: 1 / -1; flex-direction: row; gap: 8px; }
+            .cmgr-selector-body .cmgr-file-main { flex-basis: 100%; }
         }
         .cmgr-selector-body .cmgr-version-pill { min-height: 32px; padding: 6px 9px; border: 1px solid transparent; border-radius: 5px; background: var(--selector-field); color: var(--selector-muted); font-size: 11px; font-weight: 400; }
         .cmgr-selector-body .cmgr-version-pill:hover { border-color: var(--selector-line); color: var(--selector-text); }
@@ -682,7 +681,8 @@ export function injectSelectorStyles() {
         .cmgr-selector-body .cmgr-setting-card { border: 0; border-radius: 8px; background: var(--selector-surface); box-shadow: none; }
         .cmgr-selector-body .cmgr-settings-head h2 { color: var(--selector-text); font-size: 15px; font-weight: 550; }
         .cmgr-selector-body .cmgr-settings-head p { color: var(--selector-muted); font-size: 12px; font-weight: 400; }
-        .cmgr-selector-body .cmgr-root-row { padding: 12px 0; border: 0; border-bottom: 1px solid var(--selector-line); border-radius: 0; background: transparent; }
+        .cmgr-selector-body .cmgr-root-row { padding: 8px 0; border: 0; border-bottom: 1px solid var(--selector-line); border-radius: 0; background: transparent; }
+        .cmgr-selector-body .cmgr-root-list { max-height: 188px; overflow-y: auto; padding-right: 4px; scrollbar-width: thin; scrollbar-color: var(--selector-line) transparent; }
         .cmgr-selector-body .cmgr-check { padding: 8px 0; border: 0; border-radius: 0; background: transparent; }
         .cmgr-selector-body .cmgr-settings-footer { padding: 16px 0 0; border: 0; border-top: 1px solid var(--selector-line); border-radius: 0; background: transparent; }
         .cmgr-selector-body .cmgr-root-row b { border: 0; background: transparent; color: var(--selector-text); font-size: 11px; font-weight: 400; }

@@ -117,7 +117,7 @@ function renderFileRow(file, role, selected, options = {}) {
     return `
         <div class="cmgr-file-row ${selected ? "is-selected" : ""} ${checked ? "is-checked" : ""}" data-file-row="${escapeAttr(key)}" role="group" aria-label="${escapeAttr(name)}">
             <input class="cmgr-file-check" type="checkbox" data-file-check="${escapeAttr(key)}" ${checked ? "checked" : ""} aria-label="${escapeAttr(t("Include {file} in the download", { file: name }))}" />
-            <button class="cmgr-file-main" type="button" role="radio" aria-checked="${selected}" data-file-option="${escapeAttr(key)}" title="${escapeAttr(name)}">
+            <button class="cmgr-file-main" type="button" aria-pressed="${checked}" data-file-option="${escapeAttr(key)}" title="${escapeAttr(name)}">
                 <span class="cmgr-file-role is-${escapeAttr(role)}">${escapeHtml(t(FILE_ROLES[role]?.short || "FILE"))}</span>
                 <span class="cmgr-file-name">${escapeHtml(name)}</span>
                 <span class="cmgr-file-meta">
@@ -147,7 +147,7 @@ function renderGroup(role, items, selectedName, options = {}) {
                 <span class="cmgr-file-role is-${escapeAttr(role)}">${escapeHtml(t(info.short))}</span>
                 <span>${escapeHtml(options.title || t(info.label))} · ${items.length}</span>
             </div>
-            <div class="cmgr-file-rows" role="radiogroup" aria-label="${escapeAttr(t(info.label))}">
+            <div class="cmgr-file-rows" role="group" aria-label="${escapeAttr(t(info.label))}">
                 ${items.map((file) => renderFileRow(file, role, fileKey(file) === selected, rowFor(file, role))).join("")}
             </div>
         </div>
@@ -186,7 +186,7 @@ export function renderFilePicker(files, selectedName, options = {}) {
             <div class="cmgr-file-picker-head">
                 <div>
                     <div class="cmgr-label">${selectorIcon("file")}${escapeHtml(t("Files"))}</div>
-                    <p>${escapeHtml(t("Check the files to download together, then adjust each target folder if needed."))}</p>
+                    <p>${escapeHtml(t("Click a file to select it for the bulk download, then adjust each target folder if needed."))}</p>
                 </div>
                 <div class="cmgr-file-picker-actions">
                     <button class="cmgr-selector-button cmgr-file-select-all" type="button" data-action="select-all-files">${escapeHtml(renderedFiles.length && checkedCount === renderedFiles.length ? t("Clear selection") : t("Select all"))}</button>

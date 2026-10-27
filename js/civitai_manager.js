@@ -1182,6 +1182,15 @@ function resetFileSelection(version = getSelectedVersion(), preferredName = stat
     state.fileOverrides = {};
 }
 
+/** Adds or removes one file from the bulk download selection. */
+function setFileChecked(key, checked) {
+    if (!key) return;
+    const selected = new Set((state.selectedFileNames || []).map(String));
+    if (checked) selected.add(String(key));
+    else selected.delete(String(key));
+    state.selectedFileNames = [...selected];
+}
+
 /** Keeps checkboxes, the "select all" label and the download count in sync. */
 function syncFilePickerSelection(root = bodyEl) {
     const picker = root?.querySelector?.("[data-file-picker]");
@@ -1191,7 +1200,9 @@ function syncFilePickerSelection(root = bodyEl) {
     for (const box of boxes) {
         const isChecked = checked.has(String(box.dataset.fileCheck || ""));
         box.checked = isChecked;
-        box.closest("[data-file-row]")?.classList.toggle("is-checked", isChecked);
+        const row = box.closest("[data-file-row]");
+        row?.classList.toggle("is-checked", isChecked);
+        row?.querySelector("[data-file-option]")?.setAttribute("aria-pressed", String(isChecked));
     }
     const checkedCount = boxes.filter((box) => box.checked).length;
     const download = picker.querySelector('[data-action="download-selected-files"]');
@@ -3000,6 +3011,7 @@ function downloadActions(job) {
 function renderSettings() {
     const config = state.config || {};
     const roots = config.roots || {};
+    const rootEntries = settingsRootEntries(roots);
     return `
         <section class="cmgr-page settings">
             <div class="cmgr-settings-grid">
@@ -3053,9 +3065,10 @@ function renderSettings() {
                                 <h2>${escapeHtml(t("Resolved Roots"))}</h2>
                                 <p>${escapeHtml(t("Model roots detected from ComfyUI folder paths."))}</p>
                             </div>
+                            <span class="cmgr-setting-status">${escapeHtml(t("{count} folders", { count: rootEntries.length }))}</span>
                         </div>
                         <div class="cmgr-root-list">
-                            ${settingsRootEntries(roots).map((root) => `
+                            ${rootEntries.map((root) => `
                                 <div class="cmgr-root-row">
                                     <span>${escapeHtml(t(root.label))}</span>
                                     <b title="${escapeAttr(root.path)}">${escapeHtml(root.path)}</b>
@@ -3360,29 +3373,27 @@ function bindDiscoverEvents(root) {
     root.querySelectorAll("[data-file-option]").forEach((button) => {
         button.onclick = async () => {
             const name = button.dataset.fileOption || "";
-            if (!name || name === state.selectedFileName) return;
+            if (!name) return;
+            // Clicking the row is the selection gesture: no Ctrl needed for a
+            // bulk download, and clicking it again removes the tick.
+            const checked = (state.selectedFileNames || []).map(String).includes(String(name));
+            setFileChecked(name, !checked);
+            syncFilePickerSelection(root);
+            if (name === state.selectedFileName) return;
             state.selectedFileName = name;
             // Start from whatever target this file already had so switching the
             // focused file never discards another row's folder choice.
             state.pathOverrides = { ...(state.fileOverrides?.[name] || {}) };
             const picker = button.closest("[data-file-picker]");
             picker?.querySelectorAll("[data-file-row]").forEach((row) => {
-                const active = row.dataset.fileRow === name;
-                row.classList.toggle("is-selected", active);
-                const option = row.querySelector("[data-file-option]");
-                option?.setAttribute("aria-checked", String(active));
+                row.classList.toggle("is-selected", row.dataset.fileRow === name);
             });
             await resolveSelectedPath({ detailOnly: true, pathOnly: true });
         };
     });
     root.querySelectorAll("[data-file-check]").forEach((box) => {
         box.onchange = () => {
-            const key = String(box.dataset.fileCheck || "");
-            if (!key) return;
-            const checked = new Set((state.selectedFileNames || []).map(String));
-            if (box.checked) checked.add(key);
-            else checked.delete(key);
-            state.selectedFileNames = [...checked];
+            setFileChecked(box.dataset.fileCheck || "", box.checked);
             syncFilePickerSelection(root);
         };
     });
