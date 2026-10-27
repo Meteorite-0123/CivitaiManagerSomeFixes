@@ -11,9 +11,12 @@ export const TABS = ["Discover", "Library", "Favorites", "Downloads", "Settings"
 
 export const ASSET_KINDS = [
     { id: "checkpoint", label: "Checkpoint/UNet", rootKinds: ["checkpoints", "unet"] },
-    { id: "lora", label: "LoRA" },
-    { id: "workflow", label: "Workflow" },
+    { id: "lora", label: "LoRA", rootKinds: ["loras"] },
+    { id: "workflow", label: "Workflow", rootKinds: ["workflows"] },
 ];
+
+// Library-only tab that collects every model folder outside the classic kinds.
+export const OTHER_LIBRARY_KIND = "other";
 
 export const CIVITAI_CATEGORY_FILTERS = [
     { label: "Action", value: "action" },

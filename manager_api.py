@@ -677,8 +677,8 @@ def _validate_asset_filename(root_kind: str, filename: str) -> str:
     normalized = _normalize_root_kind(root_kind)
     name = os.path.basename(str(filename or ""))
     extension = os.path.splitext(name)[1].lower()
-    if normalized == "workflows" and name.lower().endswith(".civitai.json"):
-        raise ValueError("Workflow companion metadata is not an asset")
+    if name.lower().endswith(".civitai.json"):
+        raise ValueError("Companion metadata is not an asset")
     if extension not in _extensions_for_root(normalized):
         allowed = ", ".join(sorted(_extensions_for_root(normalized)))
         raise ValueError(f"Invalid {normalized} file extension; expected one of: {allowed}")
@@ -688,8 +688,8 @@ def _validate_asset_filename(root_kind: str, filename: str) -> str:
 def _validate_root_transition(source_root_kind: str, target_root_kind: str) -> None:
     source = _normalize_root_kind(source_root_kind)
     target = _normalize_root_kind(target_root_kind)
-    # Root kinds outside the classic families can only move inside their own kind.
-    if ROOT_KIND_FAMILIES.get(source, source) != ROOT_KIND_FAMILIES.get(target, target):
+    # Workflows live outside the models tree, so they never mix with model folders.
+    if (source == "workflows") != (target == "workflows"):
         raise ValueError(f"Cannot move an asset from {source} to {target}")
 
 
@@ -803,7 +803,11 @@ def _invalidate_model_root_cache() -> None:
 
 
 def _roots_for_kind(root_kind: str) -> list[str]:
-    return _target_paths_for(_normalize_root_kind(root_kind))
+    normalized = _normalize_root_kind(root_kind)
+    if normalized in TARGET_ROOT_ORDER:
+        return _target_paths_for(normalized)
+    # Dynamically discovered folders keep the exact path (and case) they were found at.
+    return list(_model_root_map().get(normalized, []))
 
 
 def _root_for_kind(root_kind: str) -> str:
@@ -1450,7 +1454,10 @@ def _unique_path(path: str) -> str:
 
 def _companion_metadata_path(asset_path: str, root_kind: str) -> str:
     base, ext = os.path.splitext(asset_path)
-    if root_kind == "workflows" and ext.lower() == ".json":
+    # JSON assets (workflows) and every file inside configs would otherwise
+    # collide with their own companion metadata, so they use the
+    # "<name>.civitai.json" suffix.
+    if ext.lower() == ".json" or str(root_kind or "").strip().lower() == "configs":
         return f"{base}.civitai.json"
     return f"{base}.json"
 
@@ -1692,7 +1699,7 @@ def _download_binary(url: str, target_path: str, api_key: str | None = None, tim
 def _build_library_snapshot() -> dict[str, Any]:
     return {
         "roots": _root_display(),
-        "root_paths": {kind: _roots_for_kind(kind) for kind in ("checkpoints", "unet", "loras", "workflows")},
+        "root_paths": {kind: list(paths) for kind, paths in _model_root_map().items()},
         "items": _scan_all_library_items(),
         "generated_at": _now(),
     }
@@ -1753,14 +1760,20 @@ def _civitai_ids_from_metadata(metadata: dict[str, Any]) -> tuple[Any, Any]:
     return model_id, version_id
 
 
-def _scan_library_kind(root_kind: str) -> list[dict[str, Any]]:
-    extensions = WORKFLOW_EXTENSIONS if root_kind == "workflows" else MODEL_EXTENSIONS
+def _scan_library_kind(root_kind: str, seen_roots: set[str] | None = None) -> list[dict[str, Any]]:
+    extensions = _extensions_for_root(root_kind)
+    structured = root_kind in STRUCTURED_ROOT_KINDS
     items: list[dict[str, Any]] = []
     roots = _roots_for_kind(root_kind)
     primary_root = _root_for_kind(root_kind)
     if all(os.path.normcase(os.path.realpath(root)) != os.path.normcase(os.path.realpath(primary_root)) for root in roots):
         roots.insert(0, primary_root)
     for root in roots:
+        root_key = os.path.normcase(os.path.realpath(root))
+        if seen_roots is not None:
+            if root_key in seen_roots:
+                continue
+            seen_roots.add(root_key)
         if not os.path.isdir(root):
             continue
         storage_root_id = _storage_root_id(root)
@@ -1769,7 +1782,8 @@ def _scan_library_kind(root_kind: str) -> list[dict[str, Any]]:
                 ext = os.path.splitext(name)[1].lower()
                 if ext not in extensions:
                     continue
-                if root_kind == "workflows" and name.endswith(".civitai.json"):
+                # "<name>.civitai.json" is companion metadata for any asset kind.
+                if name.lower().endswith(".civitai.json"):
                     continue
 
                 abs_path = os.path.join(dirpath, name)
@@ -1778,9 +1792,25 @@ def _scan_library_kind(root_kind: str) -> list[dict[str, Any]]:
                 metadata_status, metadata = _metadata_for_asset(abs_path, root_kind)
                 preview_file = _preview_for_asset(abs_path)
                 rel_parts = rel_path.split("/")
-                inferred_base = rel_parts[0] if root_kind != "workflows" and len(rel_parts) > 2 else ""
-                inferred_category = rel_parts[1] if root_kind != "workflows" and len(rel_parts) > 2 else (rel_parts[0] if root_kind == "workflows" and len(rel_parts) > 1 else "Other")
+                if structured:
+                    inferred_base = rel_parts[0] if len(rel_parts) > 2 else ""
+                    inferred_category = rel_parts[1] if len(rel_parts) > 2 else "Other"
+                elif root_kind == "workflows":
+                    inferred_base = ""
+                    inferred_category = rel_parts[0] if len(rel_parts) > 1 else "Other"
+                else:
+                    # Flat folders (VAE, text encoders, ...) have no subfolders.
+                    inferred_base = ""
+                    inferred_category = ""
                 resolution = metadata.get("resolution") if isinstance(metadata.get("resolution"), dict) else {}
+                if not structured:
+                    resolution_base = ""
+                else:
+                    resolution_base = resolution.get("base_model_dir") or ""
+                if not (structured or root_kind == "workflows"):
+                    resolution_category = ""
+                else:
+                    resolution_category = resolution.get("category_dir") or ""
                 hashes = metadata.get("hashes") if isinstance(metadata.get("hashes"), dict) else {}
                 model_id, version_id = _civitai_ids_from_metadata(metadata)
                 civitai_url = _civitai_red_url(str(metadata.get("civitai_url") or ""))
@@ -1806,8 +1836,8 @@ def _scan_library_kind(root_kind: str) -> list[dict[str, Any]]:
                     "absolute_path": abs_path,
                     "size": stat.st_size,
                     "mtime": int(stat.st_mtime),
-                    "base_model": metadata.get("base_model") or resolution.get("base_model_dir") or inferred_base,
-                    "category": metadata.get("category") or resolution.get("category_dir") or inferred_category,
+                    "base_model": metadata.get("base_model") or resolution_base or inferred_base,
+                    "category": metadata.get("category") or resolution_category or inferred_category,
                     "creator": metadata.get("creator") or "",
                     "model_id": model_id,
                     "version_id": version_id,
@@ -1827,8 +1857,11 @@ def _scan_library_kind(root_kind: str) -> list[dict[str, Any]]:
 
 def _scan_all_library_items() -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
-    for root_kind in ("checkpoints", "unet", "loras", "workflows"):
-        items.extend(_scan_library_kind(root_kind))
+    # Different ComfyUI folder names can point at the same physical directory, so
+    # every real path is scanned once even when it shows up under two kinds.
+    seen_roots: set[str] = set()
+    for root_kind in _model_root_map():
+        items.extend(_scan_library_kind(root_kind, seen_roots))
 
     by_hash: dict[str, list[dict[str, Any]]] = {}
     for item in items:
@@ -1910,10 +1943,14 @@ def _update_moved_asset_metadata(
     status, metadata = _metadata_for_asset(dst_path, target_root_kind)
     if status != "cached":
         return
+    if target_root_kind not in STRUCTURED_ROOT_KINDS:
+        base_model_dir = ""
+    if target_root_kind != "workflows" and target_root_kind not in STRUCTURED_ROOT_KINDS:
+        category_dir = ""
     resolution = metadata.get("resolution") if isinstance(metadata.get("resolution"), dict) else {}
     resolution.update({
         "root_kind": target_root_kind,
-        "base_model_dir": "" if target_root_kind == "workflows" else base_model_dir,
+        "base_model_dir": base_model_dir,
         "category_dir": category_dir,
         "filename": filename,
         "relative_path": relative_path,
@@ -2885,8 +2922,13 @@ async def move_asset_api(request: web.Request) -> web.Response:
         target_root = source_root if target_root_kind == source_root_kind else _root_for_kind(target_root_kind)
         if target_root_kind == "workflows":
             dst_path = _safe_join(target_root, category_dir, filename)
-        else:
+        elif target_root_kind in STRUCTURED_ROOT_KINDS:
             dst_path = _safe_join(target_root, base_model_dir, category_dir, filename)
+        else:
+            # Component folders (VAE, text encoders, ...) keep files at their root.
+            base_model_dir = ""
+            category_dir = ""
+            dst_path = _safe_join(target_root, filename)
         relative_path = os.path.relpath(dst_path, target_root).replace("\\", "/")
         _move_asset_bundle(src_path, dst_path, source_root_kind, target_root_kind)
         _update_moved_asset_metadata(

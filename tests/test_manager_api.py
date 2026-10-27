@@ -270,13 +270,15 @@ class PathAndConfigTests(unittest.TestCase):
         self.assertEqual(manager._safe_segment("CON"), "_CON")
         self.assertEqual(manager._safe_filename("NUL.safetensors", "model"), "_NUL.safetensors")
 
-    def test_move_validation_keeps_component_folders_separate(self):
+    def test_move_validation_allows_model_folders_but_keeps_workflows_separate(self):
         manager._validate_root_transition("vae", "vae")
         manager._validate_root_transition("checkpoints", "unet")
-        with self.assertRaisesRegex(ValueError, "Cannot move"):
-            manager._validate_root_transition("vae", "text_encoders")
+        manager._validate_root_transition("vae", "text_encoders")
+        manager._validate_root_transition("loras", "vae")
         with self.assertRaisesRegex(ValueError, "Cannot move"):
             manager._validate_root_transition("loras", "workflows")
+        with self.assertRaisesRegex(ValueError, "Cannot move"):
+            manager._validate_root_transition("workflows", "loras")
 
     def test_config_normalizes_boolean_strings_and_absolute_workflow_path(self):
         normalized = manager._normalize_config({
@@ -307,7 +309,7 @@ class PathAndConfigTests(unittest.TestCase):
                 manager._resolve_asset_path("loras", "../outside.safetensors")
             with self.assertRaisesRegex(ValueError, "file extension"):
                 manager._resolve_asset_path("loras", "model.json")
-            with self.assertRaisesRegex(ValueError, "companion metadata"):
+            with self.assertRaisesRegex(ValueError, "Companion metadata"):
                 manager._resolve_asset_path("workflows", "flow.civitai.json")
 
     def test_asset_path_resolves_configured_secondary_root(self):
@@ -531,6 +533,69 @@ class LibraryScanTests(unittest.TestCase):
         self.assertEqual(len({item["id"] for item in items}), 2)
         self.assertEqual({item["storage_root"] for item in items}, {str(primary), str(secondary)})
         self.assertTrue(all("root_id=" in item["thumb_url"] for item in items))
+
+    def test_scan_component_folder_uses_flat_layout(self):
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / "ae.safetensors").write_bytes(b"vae")
+            (Path(root) / "ae.json").write_text(json.dumps({"name": "Flux AE"}), encoding="utf-8")
+            (Path(root) / "ae.png").write_bytes(b"preview")
+            (Path(root) / "ae.civitai.json").write_text("{}", encoding="utf-8")
+
+            with mock.patch.object(manager, "_root_for_kind", return_value=root):
+                items = manager._scan_library_kind("vae")
+
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["filename"], "ae.safetensors")
+        self.assertEqual(items[0]["name"], "Flux AE")
+        self.assertEqual(items[0]["base_model"], "")
+        self.assertEqual(items[0]["category"], "")
+        self.assertEqual(items[0]["metadata_status"], "cached")
+
+    def test_config_scan_uses_dedicated_companion_metadata(self):
+        with tempfile.TemporaryDirectory() as root:
+            (Path(root) / "flux.yaml").write_text("cfg", encoding="utf-8")
+            (Path(root) / "flux.civitai.json").write_text(
+                json.dumps({"name": "Flux Config"}),
+                encoding="utf-8",
+            )
+            (Path(root) / "plain.json").write_text("{}", encoding="utf-8")
+
+            with mock.patch.object(manager, "_root_for_kind", return_value=root):
+                items = manager._scan_library_kind("configs")
+
+        names = {item["filename"]: item for item in items}
+        self.assertEqual(set(names), {"flux.yaml", "plain.json"})
+        self.assertEqual(names["flux.yaml"]["name"], "Flux Config")
+        self.assertEqual(names["flux.yaml"]["metadata_status"], "cached")
+        self.assertEqual(names["plain.json"]["metadata_status"], "missing")
+
+    def test_scan_all_items_covers_every_folder_and_dedupes_shared_roots(self):
+        with tempfile.TemporaryDirectory() as base:
+            base_path = Path(base)
+            checkpoints = base_path / "checkpoints"
+            vae = base_path / "vae"
+            shared = base_path / "shared"
+            (checkpoints / "Base" / "Category").mkdir(parents=True)
+            (checkpoints / "Base" / "Category" / "model.safetensors").write_bytes(b"ckpt")
+            vae.mkdir()
+            (vae / "ae.safetensors").write_bytes(b"vae")
+            shared.mkdir()
+            (shared / "encoder.safetensors").write_bytes(b"encoder")
+            root_map = {
+                "checkpoints": [str(checkpoints)],
+                "vae": [str(vae)],
+                "text_encoders": [str(shared)],
+                "clip": [str(shared)],
+            }
+            with (
+                mock.patch.object(manager, "_model_root_map", return_value=root_map),
+                mock.patch.object(manager, "_roots_for_kind", side_effect=lambda kind: list(root_map[kind])),
+                mock.patch.object(manager, "_root_for_kind", side_effect=lambda kind: root_map[kind][0]),
+            ):
+                items = manager._scan_all_library_items()
+
+        self.assertEqual({item["root_kind"] for item in items}, {"checkpoints", "vae", "text_encoders"})
+        self.assertEqual(sum(1 for item in items if item["filename"] == "encoder.safetensors"), 1)
 
 
 class LibraryIndexTests(unittest.TestCase):
@@ -1050,6 +1115,7 @@ class AssetApiAsyncTests(unittest.IsolatedAsyncioTestCase):
             "checkpoints": base / "checkpoints",
             "unet": base / "unet",
             "loras": base / "loras",
+            "vae": base / "vae",
             "workflows": base / "workflows",
         }
         for root in self.roots.values():
@@ -1118,6 +1184,43 @@ class AssetApiAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status, 400)
         self.assertTrue(source.is_file())
+
+    async def test_move_to_component_folder_drops_base_and_category(self):
+        source = self.roots["loras"] / "Base" / "Category" / "model.safetensors"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(b"model")
+        manager._write_asset_metadata(str(source), "loras", {
+            "name": "Example",
+            "resolution": {
+                "root_kind": "loras",
+                "base_model_dir": "Base",
+                "category_dir": "Category",
+                "filename": "model.safetensors",
+                "relative_path": "Base/Category/model.safetensors",
+            },
+        })
+
+        response = await manager.move_asset_api(_JsonRequest({
+            "root_kind": "loras",
+            "relative_path": "Base/Category/model.safetensors",
+            "target_root_kind": "vae",
+            "base_model_dir": "Base",
+            "category_dir": "Category",
+            "filename": "moved.safetensors",
+        }))
+
+        target = self.roots["vae"] / "moved.safetensors"
+        self.assertEqual(response.status, 200)
+        self.assertFalse(source.exists())
+        self.assertTrue(target.is_file())
+        metadata = json.loads(target.with_suffix(".json").read_text(encoding="utf-8"))
+        self.assertEqual(metadata["resolution"], {
+            "root_kind": "vae",
+            "base_model_dir": "",
+            "category_dir": "",
+            "filename": "moved.safetensors",
+            "relative_path": "moved.safetensors",
+        })
 
     async def test_move_preflight_preserves_source_when_companion_target_exists(self):
         source = self.roots["checkpoints"] / "Old" / "Category" / "model.safetensors"

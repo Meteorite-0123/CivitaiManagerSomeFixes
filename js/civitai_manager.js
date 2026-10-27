@@ -6,6 +6,7 @@ import {
     DEFAULT_TARGET_KINDS,
     HIGH_PRIORITY_PREVIEW_LOADS,
     INITIAL_PREVIEW_LOADS,
+    OTHER_LIBRARY_KIND,
     ROOT_KINDS,
     ROOT_LOCAL_FOLDER,
     SEARCH_PAGE_SIZE,
@@ -51,7 +52,6 @@ import {
     swapDetail,
 } from "./civitai/detail.js";
 import {
-    assetKindForRoot,
     favoriteEntryForLocal,
     favoriteEntryForRemote,
     favoriteItemForLocal,
@@ -2244,7 +2244,7 @@ function selectAssetKind(kind) {
     state.cursor = "";
     state.scroll.discoverResults = 0;
     state.scroll.libraryResults = 0;
-    loadTaxonomy(kind, { silent: true });
+    if (kind !== OTHER_LIBRARY_KIND) loadTaxonomy(kind, { silent: true });
     if (state.activeTab === "Discover") {
         search(true, { silent: true });
     } else {
@@ -2260,10 +2260,16 @@ function renderActiveTab() {
     return renderDiscover();
 }
 
+function libraryAssetKinds() {
+    return state.activeTab === "Library"
+        ? [...ASSET_KINDS, { id: OTHER_LIBRARY_KIND, label: "Other" }]
+        : ASSET_KINDS;
+}
+
 function renderToolbarKindTabs() {
     return `
         <div class="cmgr-kind-tabs" role="tablist" aria-label="${escapeAttr(t("Asset Type"))}">
-            ${ASSET_KINDS.map((kind) => `
+            ${libraryAssetKinds().map((kind) => `
                 <button
                     class="cmgr-kind-tab ${state.assetKind === kind.id ? "active" : ""}"
                     type="button"
@@ -2540,10 +2546,13 @@ function renderEmptyModelDetail() {
     );
 }
 
-function targetKindOptions() {
+function configuredTargetKinds() {
     const configured = Array.isArray(state.config?.target_kinds) ? state.config.target_kinds : [];
-    const kinds = configured.length ? configured : DEFAULT_TARGET_KINDS;
-    return kinds
+    return configured.length ? configured : DEFAULT_TARGET_KINDS;
+}
+
+function targetKindOptions() {
+    return configuredTargetKinds()
         .filter((kind) => kind?.id)
         .map((kind) => ({ value: kind.id, label: t(kind.label || kind.id) }));
 }
@@ -2658,7 +2667,8 @@ function renderLibraryResults() {
 }
 
 function renderAssetCard(asset, index = 0) {
-    const badge = asset.base_model || inferBaseFromPath(asset) || "Other";
+    const badge = asset.base_model
+        || (isStructuredRootKind(asset.root_kind) ? (inferBaseFromPath(asset) || "Other") : labelForRoot(asset.root_kind));
     const favorite = localFavorite(asset);
     return `
         <article class="cmgr-card asset ${state.selectedAssetId === asset.id ? "selected" : ""}" data-asset-id="${escapeAttr(asset.id)}" tabindex="0">
@@ -2675,6 +2685,7 @@ function renderAssetCard(asset, index = 0) {
 function renderAssetDetail(asset) {
     const baseValue = asset.base_model || inferBaseFromPath(asset);
     const categoryValue = asset.category || inferCategoryFromPath(asset);
+    const moveFields = moveFieldVisibility(asset.root_kind);
     const matched = assetHasCivitaiMatch(asset);
     const favorite = localFavorite(asset);
     const civitaiUrl = asset.civitai_url || (asset.model_id ? `https://civitai.red/models/${encodeURIComponent(asset.model_id)}${asset.version_id ? `?modelVersionId=${encodeURIComponent(asset.version_id)}` : ""}` : "");
@@ -2739,15 +2750,14 @@ function renderAssetDetail(asset) {
                     <label>${escapeHtml(t("Type"))}${renderSelectMenu({
                         id: "move-root-kind",
                         value: asset.root_kind || "",
-                        options: ROOT_KINDS
-                            .filter((root) => compatibleRootKinds(asset.root_kind).includes(root.id))
-                            .map((root) => ({ value: root.id, label: t(root.label) })),
+                        options: moveTargetKindOptions(asset),
                         inputAttrs: 'data-move="target_root_kind"',
                     })}</label>
-                    <label>${escapeHtml(t("Base Model"))}<input class="cmgr-input" data-move="base_model_dir" value="${escapeAttr(baseValue || "Other")}" ${asset.root_kind === "workflows" ? "disabled" : ""}/></label>
-                    <label>${escapeHtml(t("Category"))}<input class="cmgr-input" data-move="category_dir" value="${escapeAttr(categoryValue || "Other")}" /></label>
+                    <label>${escapeHtml(t("Base Model"))}<input class="cmgr-input" data-move="base_model_dir" value="${escapeAttr(baseValue || "Other")}" ${moveFields.base ? "" : "disabled"} /></label>
+                    <label>${escapeHtml(t("Category"))}<input class="cmgr-input" data-move="category_dir" value="${escapeAttr(categoryValue || "Other")}" ${moveFields.category ? "" : "disabled"} /></label>
                     <label>${escapeHtml(t("Filename"))}<input class="cmgr-input" data-move="filename" value="${escapeAttr(asset.filename)}" /></label>
                 </div>
+                <p class="cmgr-path-hint" data-move-flat-hint ${moveFields.structured ? "hidden" : ""}>${escapeHtml(t("This folder keeps files directly, without Base Model or Category subfolders."))}</p>
                 <button class="cmgr-secondary cmgr-full" data-action="move-asset">${escapeHtml(t("Move Asset"))}</button>
                 </div>
             </details>
@@ -2933,7 +2943,7 @@ function showInLibrary(assetId) {
     const asset = state.libraryItems.find((item) => String(item.id) === String(assetId));
     switchManagerTab("Library");
     if (!asset) return;
-    selectAssetKind(assetKindForRoot(asset.root_kind));
+    selectAssetKind(libraryKindForRoot(asset.root_kind));
     state.selectedAssetId = asset.id;
     render();
     bodyEl.querySelector(".cmgr-library .cmgr-card.selected")?.scrollIntoView({ block: "center" });
@@ -3257,6 +3267,20 @@ function bindLibraryEvents(root) {
     if (move) move.onclick = () => {
         moveSelectedAsset(readMoveForm(root));
     };
+    const moveRootKind = root.querySelector('[data-move="target_root_kind"]');
+    const moveBaseModel = root.querySelector('[data-move="base_model_dir"]');
+    const moveCategory = root.querySelector('[data-move="category_dir"]');
+    const moveFlatHint = root.querySelector("[data-move-flat-hint]");
+    const syncMoveFields = () => {
+        const visibility = moveFieldVisibility(moveRootKind?.value || "");
+        if (moveBaseModel) moveBaseModel.disabled = !visibility.base;
+        if (moveCategory) moveCategory.disabled = !visibility.category;
+        if (moveFlatHint) moveFlatHint.hidden = visibility.structured;
+    };
+    if (moveRootKind) {
+        moveRootKind.onchange = syncMoveFields;
+        syncMoveFields();
+    }
     const del = root.querySelector('[data-action="delete-asset"]');
     if (del) del.onclick = () => deleteSelectedAsset();
     const enrich = root.querySelector('[data-action="enrich-asset"]');
@@ -3346,6 +3370,14 @@ function assetKindLabel(kind) {
 }
 
 function rootKindsForAssetKind(kind) {
+    if (kind === OTHER_LIBRARY_KIND) {
+        const classic = new Set(ASSET_KINDS.flatMap((item) => item.rootKinds || []));
+        const ids = new Set(configuredTargetKinds().map((item) => item.id));
+        state.libraryItems.forEach((item) => {
+            if (item?.root_kind) ids.add(item.root_kind);
+        });
+        return Array.from(ids).filter((id) => id && !classic.has(id));
+    }
     const found = ASSET_KINDS.find((item) => item.id === kind);
     if (Array.isArray(found?.rootKinds)) return found.rootKinds;
     if (kind === "workflow") return ["workflows"];
@@ -3353,14 +3385,34 @@ function rootKindsForAssetKind(kind) {
     return ["loras"];
 }
 
-function compatibleRootKinds(rootKind) {
-    if (["checkpoints", "unet"].includes(rootKind)) return ["checkpoints", "unet"];
-    if (rootKind === "workflows") return ["workflows"];
-    return ["loras"];
+function moveTargetKindOptions(asset) {
+    const workflow = asset?.root_kind === "workflows";
+    const options = targetKindOptions().filter((option) => (
+        workflow ? option.value === "workflows" : option.value !== "workflows"
+    ));
+    if (asset?.root_kind && !options.some((option) => option.value === asset.root_kind)) {
+        options.unshift({ value: asset.root_kind, label: labelForRoot(asset.root_kind) });
+    }
+    return options;
+}
+
+function moveFieldVisibility(rootKind) {
+    const root = String(rootKind || "");
+    const structured = ["checkpoints", "unet", "loras"].includes(root);
+    return {
+        structured,
+        base: structured,
+        category: structured || root === "workflows",
+    };
 }
 
 function assetMatchesKind(asset, kind = state.assetKind) {
     return rootKindsForAssetKind(kind).includes(asset.root_kind);
+}
+
+function libraryKindForRoot(rootKind) {
+    const found = ASSET_KINDS.find((item) => (item.rootKinds || []).includes(rootKind));
+    return found?.id || OTHER_LIBRARY_KIND;
 }
 
 function assetCategory(asset) {
@@ -3491,9 +3543,19 @@ function itemLocalFolderPath(asset) {
 }
 
 function itemLocalFolderParts(asset) {
-    if (typeof asset?.folder_path === "string") return splitLocalPath(asset.folder_path);
-    const parts = splitLocalPath(asset?.relative_path);
-    parts.pop();
+    let parts;
+    if (typeof asset?.folder_path === "string") {
+        parts = splitLocalPath(asset.folder_path);
+    } else {
+        parts = splitLocalPath(asset?.relative_path);
+        parts.pop();
+    }
+    const rootKind = String(asset?.root_kind || "");
+    const classic = ["checkpoints", "unet", "loras", "workflows"];
+    if (rootKind && !classic.includes(rootKind)) {
+        // The Other tab mixes several model folders; keep them apart in the tree.
+        return [labelForRoot(rootKind), ...parts];
+    }
     return parts;
 }
 
@@ -3580,15 +3642,20 @@ function activeDownloadJobForModel(model, version = null) {
     return null;
 }
 
+function isStructuredRootKind(rootKind) {
+    return ["checkpoints", "unet", "loras"].includes(String(rootKind || ""));
+}
+
 function inferBaseFromPath(asset) {
-    if (asset.root_kind === "workflows") return "";
+    if (!isStructuredRootKind(asset?.root_kind)) return "";
     const parts = String(asset.relative_path || "").split("/");
     return parts.length > 2 ? parts[0] : "Other";
 }
 
 function inferCategoryFromPath(asset) {
     const parts = String(asset.relative_path || "").split("/");
-    if (asset.root_kind === "workflows") return parts.length > 1 ? parts[0] : "Other";
+    if (asset?.root_kind === "workflows") return parts.length > 1 ? parts[0] : "Other";
+    if (!isStructuredRootKind(asset?.root_kind)) return "";
     return parts.length > 2 ? parts[1] : "Other";
 }
 
