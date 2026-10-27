@@ -3,6 +3,7 @@ import {
     API,
     ASSET_KINDS,
     CIVITAI_CATEGORY_FILTERS,
+    DEFAULT_TARGET_KINDS,
     HIGH_PRIORITY_PREVIEW_LOADS,
     INITIAL_PREVIEW_LOADS,
     ROOT_KINDS,
@@ -59,6 +60,7 @@ import {
     filterFavoriteItems,
     localAssetForFavorite,
 } from "./civitai/favorites.js";
+import { groupVersionFiles, renderFilePicker, representativeFiles } from "./civitai/file_picker.js";
 import { t } from "./civitai/i18n.js";
 import {
     createPreviewMedia,
@@ -991,7 +993,7 @@ function finishSearchRender(reset) {
         state.resolution = null;
         const firstVersion = getVersions(autoPick)[0] || {};
         state.selectedVersionId = String(firstVersion.id || "");
-        state.selectedFileName = String(getFiles(firstVersion)[0]?.name || "");
+        state.selectedFileName = defaultFileName(firstVersion);
     }
     render({ preserveScroll: !reset });
     if (reset && state.activeTab === "Discover") animateCardsIn(bodyEl.querySelectorAll(".cmgr-discover .cmgr-results > .cmgr-card[data-model-id]"));
@@ -1071,7 +1073,7 @@ async function selectModel(model) {
     state.resolution = null;
     const firstVersion = getVersions()[0] || {};
     state.selectedVersionId = String(firstVersion.id || "");
-    state.selectedFileName = String(getFiles(firstVersion)[0]?.name || "");
+    state.selectedFileName = defaultFileName(firstVersion);
     renderSelectedModelDetail();
     // Arrow-key browsing selects in quick succession; only fetch where it settles.
     const rapid = performance.now() - lastModelSelectAt < 350;
@@ -1114,6 +1116,14 @@ function getFiles(version = getSelectedVersion()) {
 function getSelectedFile() {
     const files = getFiles();
     return files.find((file) => String(file.name || file.id) === String(state.selectedFileName)) || files[0] || {};
+}
+
+/** First real model file, never a text encoder or VAE component. */
+function defaultFileName(version = getSelectedVersion()) {
+    const files = getFiles(version);
+    const { main } = groupVersionFiles(files, { includeComponents: detailAssetKind() === "checkpoint" });
+    const file = main.find((item) => item.primary) || main[0] || files[0] || {};
+    return String(file.name || file.id || "");
 }
 
 async function resolveSelectedPath(options = {}) {
@@ -1245,6 +1255,40 @@ async function startDownload() {
         state.error = err.message;
         render();
     }
+}
+
+/**
+ * Queues the main file plus one file per component role (text encoder, VAE,
+ * config). Each role already maps to its own model folder on the backend.
+ */
+async function downloadVersionFiles() {
+    const model = state.selectedModel;
+    const version = getSelectedVersion();
+    if (!model || !version) return;
+    const picks = representativeFiles(getFiles(version), state.selectedFileName, {
+        includeComponents: detailAssetKind() === "checkpoint",
+    });
+    if (!picks.length) return;
+    let queued = 0;
+    const failures = [];
+    for (const file of picks) {
+        try {
+            await apiPost("/download", {
+                kind: detailAssetKind(),
+                model,
+                version,
+                file,
+                overrides: {},
+            });
+            queued += 1;
+        } catch (err) {
+            failures.push(`${file.name || file.id}: ${err.message}`);
+        }
+    }
+    await loadDownloads(false);
+    syncLiveDownloadSurfaces();
+    if (queued) showToast(t("Queued {count} downloads", { count: queued }));
+    if (failures.length) showToast(failures[0]);
 }
 
 async function cancelDownload(taskId) {
@@ -1567,7 +1611,7 @@ async function selectFavoriteItem(item) {
         const isCurrent = () => state.activeTab === "Favorites" && state.selectedFavoriteKey === item.key;
         const selectVersion = () => {
             state.selectedVersionId = String(getVersions()[0]?.id || "");
-            state.selectedFileName = String(getFiles(getVersions()[0])[0]?.name || "");
+            state.selectedFileName = defaultFileName(getVersions()[0]);
         };
         state.selectedModel = peekModelDetail(model.id) || model;
         state.selectedAssetId = "";
@@ -2460,21 +2504,9 @@ function renderModelDetail(model) {
                         })}
                     </div>
                 ` : `<input type="hidden" data-field="selected-version" value="${escapeAttr(version.id || "")}" />`}
-                ${files.length > 1 ? `
-                    <div class="cmgr-detail-field-block">
-                        <label class="cmgr-label">${selectorIcon("file")}${escapeHtml(t("File"))}</label>
-                        ${renderSelectMenu({
-                            id: "selected-file",
-                            value: String(file.name || file.id || ""),
-                            options: files.map((item) => ({
-                                value: String(item.name || item.id || ""),
-                                label: `${item.name || "Unnamed file"}${item.sizeKB ? ` · ${formatBytes(item.sizeKB * 1024)}` : ""}`,
-                            })),
-                            inputAttrs: 'data-field="selected-file"',
-                            className: "cmgr-full",
-                        })}
-                    </div>
-                ` : ""}
+                ${renderFilePicker(files, String(file.name || file.id || ""), {
+                    includeComponents: detailAssetKind() === "checkpoint",
+                })}
                 ${findInstalledAssetForModel(model, version) ? "" : renderEarlyAccessNotice(model, version)}
                 ${renderModelActionHub(model, version, file, resolution)}
                 ${renderPathBox()}
@@ -2508,22 +2540,42 @@ function renderEmptyModelDetail() {
     );
 }
 
+function targetKindOptions() {
+    const configured = Array.isArray(state.config?.target_kinds) ? state.config.target_kinds : [];
+    const kinds = configured.length ? configured : DEFAULT_TARGET_KINDS;
+    return kinds
+        .filter((kind) => kind?.id)
+        .map((kind) => ({ value: kind.id, label: t(kind.label || kind.id) }));
+}
+
+function settingsRootEntries(roots = {}) {
+    const configured = Array.isArray(state.config?.target_kinds) ? state.config.target_kinds : [];
+    const entries = configured.length
+        ? configured.map((item) => ({ id: item.id, label: item.label || item.id, path: item.path || roots[item.id] || "" }))
+        : ROOT_KINDS.map((item) => ({ id: item.id, label: item.label, path: roots[item.id] || "" }));
+    return entries.filter((item) => item.path);
+}
+
 function renderPathEditor(resolution) {
+    const rootKind = state.pathOverrides.root_kind || resolution?.root_kind || "";
+    const structured = ["checkpoints", "unet", "loras"].includes(rootKind);
+    const workflow = rootKind === "workflows";
+    const flat = Boolean(rootKind) && !structured && !workflow;
+    const categoryEditable = structured || workflow;
     return `
         <div class="cmgr-path-drawer">
             <div class="cmgr-grid2">
                 <label>${escapeHtml(t("Type"))}${renderSelectMenu({
                     id: "override-root-kind",
-                    value: state.pathOverrides.root_kind || "",
-                    options: ROOT_KINDS
-                        .filter((root) => rootKindsForAssetKind(detailAssetKind()).includes(root.id))
-                        .map((root) => ({ value: root.id, label: t(root.label) })),
+                    value: rootKind,
+                    options: targetKindOptions(),
                     inputAttrs: 'data-override="root_kind"',
                 })}</label>
-                <label>${escapeHtml(t("Base Model"))}<input class="cmgr-input" data-override="base_model_dir" value="${escapeAttr(state.pathOverrides.base_model_dir || "")}" ${state.pathOverrides.root_kind === "workflows" ? "disabled" : ""} /></label>
-                <label>${escapeHtml(t("Category"))}<input class="cmgr-input" data-override="category_dir" value="${escapeAttr(state.pathOverrides.category_dir || "")}" /></label>
+                <label>${escapeHtml(t("Base Model"))}<input class="cmgr-input" data-override="base_model_dir" value="${escapeAttr(state.pathOverrides.base_model_dir || "")}" ${structured ? "" : "disabled"} /></label>
+                <label>${escapeHtml(t("Category"))}<input class="cmgr-input" data-override="category_dir" value="${escapeAttr(state.pathOverrides.category_dir || "")}" ${categoryEditable ? "" : "disabled"} /></label>
                 <label>${escapeHtml(t("Filename"))}<input class="cmgr-input" data-override="filename" value="${escapeAttr(state.pathOverrides.filename || "")}" /></label>
             </div>
+            ${flat ? `<p class="cmgr-path-hint">${escapeHtml(t("This folder keeps files directly, without Base Model or Category subfolders."))}</p>` : ""}
             <div class="cmgr-path">${escapeHtml(resolution.absolute_path || "")}</div>
         </div>
     `;
@@ -2817,10 +2869,10 @@ function renderSettings() {
                             </div>
                         </div>
                         <div class="cmgr-root-list">
-                            ${ROOT_KINDS.map((root) => `
+                            ${settingsRootEntries(roots).map((root) => `
                                 <div class="cmgr-root-row">
                                     <span>${escapeHtml(t(root.label))}</span>
-                                    <b>${escapeHtml(roots[root.id] || "")}</b>
+                                    <b title="${escapeAttr(root.path)}">${escapeHtml(root.path)}</b>
                                 </div>
                             `).join("")}
                         </div>
@@ -3109,7 +3161,7 @@ function bindDiscoverEvents(root) {
     const switchVersion = async (nextVersionId) => {
         if (!nextVersionId || String(state.selectedVersionId) === String(nextVersionId)) return;
         state.selectedVersionId = String(nextVersionId);
-        state.selectedFileName = String(getFiles(getSelectedVersion())[0]?.name || "");
+        state.selectedFileName = defaultFileName(getSelectedVersion());
         state.pathOverrides = {};
         if (state.activeTab === "Favorites") renderSelectedFavoriteDetail();
         else renderSelectedModelDetail();
@@ -3117,12 +3169,23 @@ function bindDiscoverEvents(root) {
     };
     const versionSelect = root.querySelector('[data-field="selected-version"]');
     if (versionSelect) versionSelect.onchange = () => void switchVersion(versionSelect.value);
-    const fileSelect = root.querySelector('[data-field="selected-file"]');
-    if (fileSelect) fileSelect.onchange = async () => {
-        state.selectedFileName = fileSelect.value;
-        state.pathOverrides = {};
-        await resolveSelectedPath({ detailOnly: true, pathOnly: true });
-    };
+    root.querySelectorAll("[data-file-option]").forEach((button) => {
+        button.onclick = async () => {
+            const name = button.dataset.fileOption || "";
+            if (!name || name === state.selectedFileName) return;
+            state.selectedFileName = name;
+            state.pathOverrides = {};
+            const picker = button.closest("[data-file-picker]");
+            picker?.querySelectorAll("[data-file-option]").forEach((other) => {
+                const active = other === button;
+                other.classList.toggle("is-selected", active);
+                other.setAttribute("aria-checked", String(active));
+            });
+            await resolveSelectedPath({ detailOnly: true, pathOnly: true });
+        };
+    });
+    const downloadAll = root.querySelector('[data-action="download-all-files"]');
+    if (downloadAll) downloadAll.onclick = () => void downloadVersionFiles();
     const togglePathBtn = root.querySelector('[data-action="toggle-path-editor"]');
     if (togglePathBtn) {
         togglePathBtn.onclick = () => {
@@ -3530,7 +3593,16 @@ function inferCategoryFromPath(asset) {
 }
 
 function labelForRoot(rootKind) {
-    return t(ROOT_KINDS.find((root) => root.id === rootKind)?.label || rootKind || "Asset");
+    const known = ROOT_KINDS.find((root) => root.id === rootKind)?.label
+        || DEFAULT_TARGET_KINDS.find((root) => root.id === rootKind)?.label;
+    if (known) return t(known);
+    if (!rootKind) return t("Asset");
+    const prettified = String(rootKind)
+        .replace(/[_-]+/g, " ")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/\b\w/g, (char) => char.toUpperCase());
+    return t(prettified);
 }
 
 function modelPreviewMedia(model) {

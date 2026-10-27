@@ -270,6 +270,14 @@ class PathAndConfigTests(unittest.TestCase):
         self.assertEqual(manager._safe_segment("CON"), "_CON")
         self.assertEqual(manager._safe_filename("NUL.safetensors", "model"), "_NUL.safetensors")
 
+    def test_move_validation_keeps_component_folders_separate(self):
+        manager._validate_root_transition("vae", "vae")
+        manager._validate_root_transition("checkpoints", "unet")
+        with self.assertRaisesRegex(ValueError, "Cannot move"):
+            manager._validate_root_transition("vae", "text_encoders")
+        with self.assertRaisesRegex(ValueError, "Cannot move"):
+            manager._validate_root_transition("loras", "workflows")
+
     def test_config_normalizes_boolean_strings_and_absolute_workflow_path(self):
         normalized = manager._normalize_config({
             "allow_nsfw": "false",
@@ -321,7 +329,7 @@ class PathAndConfigTests(unittest.TestCase):
 
         self.assertEqual(resolved, str(asset))
 
-    def test_download_path_restricts_root_family_and_override_extension(self):
+    def test_download_path_allows_any_model_folder_and_override_extension(self):
         model = {"name": "Example", "type": "LORA"}
         version = {"name": "v1", "baseModel": "SDXL 1.0"}
         file_info = {"name": "example.safetensors"}
@@ -330,14 +338,15 @@ class PathAndConfigTests(unittest.TestCase):
             "_root_for_kind",
             return_value=root,
         ):
-            with self.assertRaisesRegex(ValueError, "Cannot move"):
-                manager.resolve_download_path(
-                    model,
-                    version,
-                    file_info,
-                    "lora",
-                    {"root_kind": "workflows"},
-                )
+            resolution = manager.resolve_download_path(
+                model,
+                version,
+                file_info,
+                "lora",
+                {"root_kind": "text_encoders"},
+            )
+            self.assertEqual(resolution["root_kind"], "text_encoders")
+            self.assertEqual(resolution["relative_path"], "example.safetensors")
             with self.assertRaisesRegex(ValueError, "file extension"):
                 manager.resolve_download_path(
                     model,
@@ -346,6 +355,25 @@ class PathAndConfigTests(unittest.TestCase):
                     "lora",
                     {"filename": "example.json"},
                 )
+
+    def test_text_encoder_and_vae_files_default_to_component_folders(self):
+        model = {"name": "Qwen Image", "type": "Checkpoint"}
+        version = {"name": "v1", "baseModel": "Qwen"}
+        with mock.patch.object(manager, "_root_for_kind", return_value="C:/models"):
+            text_encoder = manager.resolve_download_path(
+                model,
+                version,
+                {"name": "qwen_txt_bf16.safetensors", "type": "Text Encoder"},
+            )
+            vae = manager.resolve_download_path(
+                model,
+                version,
+                {"name": "qwen_vae_bf16.safetensors", "type": "VAE"},
+            )
+        self.assertEqual(text_encoder["root_kind"], "text_encoders")
+        self.assertEqual(text_encoder["relative_path"], "qwen_txt_bf16.safetensors")
+        self.assertEqual(vae["root_kind"], "vae")
+        self.assertEqual(vae["relative_path"], "qwen_vae_bf16.safetensors")
 
     def test_workflow_download_normalizes_automatic_filename_to_json(self):
         with tempfile.TemporaryDirectory() as root, mock.patch.object(

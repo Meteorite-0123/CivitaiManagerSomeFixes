@@ -35,8 +35,33 @@ export const CIVITAI_CATEGORY_FILTERS = [
 
 export const ROOT_KINDS = [
     { id: "checkpoints", label: "Checkpoints" },
-    { id: "unet", label: "UNet" },
-    { id: "loras", label: "LoRA" },
+    { id: "unet", label: "UNet / Diffusion Models" },
+    { id: "loras", label: "LoRAs" },
+    { id: "workflows", label: "Workflows" },
+];
+
+// Used until /config answers; keeps the folder picker usable on first render.
+export const DEFAULT_TARGET_KINDS = [
+    { id: "checkpoints", label: "Checkpoints" },
+    { id: "unet", label: "UNet / Diffusion Models" },
+    { id: "loras", label: "LoRAs" },
+    { id: "vae", label: "VAE" },
+    { id: "text_encoders", label: "Text Encoders" },
+    { id: "clip", label: "CLIP" },
+    { id: "clip_vision", label: "CLIP Vision" },
+    { id: "controlnet", label: "ControlNet" },
+    { id: "style_models", label: "Style Models" },
+    { id: "upscale_models", label: "Upscale Models" },
+    { id: "embeddings", label: "Embeddings" },
+    { id: "hypernetworks", label: "Hypernetworks" },
+    { id: "gligen", label: "GLIGEN" },
+    { id: "photomaker", label: "PhotoMaker" },
+    { id: "diffusers", label: "Diffusers" },
+    { id: "vae_approx", label: "VAE Approx" },
+    { id: "model_patches", label: "Model Patches" },
+    { id: "audio_encoders", label: "Audio Encoders" },
+    { id: "configs", label: "Configs" },
+    { id: "classifiers", label: "Classifiers" },
     { id: "workflows", label: "Workflows" },
 ];
 

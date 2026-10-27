@@ -4872,6 +4872,11 @@ export function injectStyles() {
             margin: 0 !important;
             font-size: 10.5px;
         }
+        .cmgr-path-hint {
+            margin: 0 !important;
+            color: var(--cmgr-muted);
+            font-size: 10.5px;
+        }
     `;
     if (!style.isConnected) {
         document.head.appendChild(style);

@@ -35,7 +35,37 @@ const FAILURE_REASONS = {
     network: ["Network error", "Check your connection or proxy, then retry."],
     disk: ["Could not save the file", "Check the folder permissions and free disk space."],
 };
-const KIND_LABELS = { loras: "LoRA", checkpoints: "Checkpoint", unet: "UNet", workflows: "Workflow" };
+const KIND_LABELS = {
+    loras: "LoRA",
+    checkpoints: "Checkpoint",
+    unet: "UNet",
+    workflows: "Workflow",
+    vae: "VAE",
+    text_encoders: "Text Encoder",
+    clip: "CLIP",
+    clip_vision: "CLIP Vision",
+    controlnet: "ControlNet",
+    style_models: "Style Model",
+    upscale_models: "Upscale Model",
+    embeddings: "Embedding",
+    hypernetworks: "Hypernetwork",
+    gligen: "GLIGEN",
+    photomaker: "PhotoMaker",
+    diffusers: "Diffusers",
+    vae_approx: "VAE Approx",
+    model_patches: "Model Patch",
+    audio_encoders: "Audio Encoder",
+    configs: "Config",
+    classifiers: "Classifier",
+};
+
+function kindLabel(job) {
+    const known = KIND_LABELS[job.root_kind];
+    if (known) return known;
+    const raw = String(job.root_kind || "").trim();
+    if (!raw) return job.model_type || "";
+    return raw.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
 // Byte rate per job, smoothed across polls so the speed and ETA do not jitter.
 const rates = new Map();
 const renderedActions = new WeakMap();
@@ -238,7 +268,7 @@ function renderDetails(job) {
         ["Model", modelUrl ? `<a href="${escapeHtml(modelUrl)}" target="_blank" rel="noopener noreferrer">${name}</a>` : name],
         ["Version", escapeHtml(job.version_name)],
         ["Base Model", escapeHtml(job.base_model)],
-        ["Type", escapeHtml(KIND_LABELS[job.root_kind] || job.model_type)],
+        ["Type", escapeHtml(kindLabel(job))],
         ["Size", escapeHtml(size ? formatBytes(size) : "")],
         ["File", job.filename ? `<span class="is-path">${escapeHtml(job.filename)}</span>` : ""],
         ["Saved to", job.target_path ? `<span class="is-path">${escapeHtml(job.target_path)}</span>` : ""],

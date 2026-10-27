@@ -55,9 +55,10 @@ except ImportError:  # Standalone test loading
 API_PREFIX = "/civitai-manager/api"
 CIVITAI_API_BASE = "https://civitai.red/api/v1"
 CIVITAI_DOWNLOAD_BASE = "https://civitai.red/api/download/models"
-MODEL_EXTENSIONS = {".ckpt", ".pt", ".pt2", ".bin", ".pth", ".safetensors", ".pkl", ".sft"}
+MODEL_EXTENSIONS = {".ckpt", ".pt", ".pt2", ".bin", ".pth", ".safetensors", ".pkl", ".sft", ".gguf"}
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
 WORKFLOW_EXTENSIONS = {".json"}
+CONFIG_EXTENSIONS = {".json", ".yaml", ".yml", ".txt"}
 REMOTE_IMAGE_CACHE_WIDTH_DEFAULT = 450
 REMOTE_IMAGE_COMMON_WIDTHS = (96, 320, 450, 512, 800, 1200, 1600, 2200)
 CIVITAI_IMAGE_HOSTS = {"image.civitai.com", "imagecache.civitai.com", "image-b2.civitai.com"}
@@ -92,6 +93,63 @@ ROOT_KIND_FAMILIES = {
     "loras": "lora",
     "workflows": "workflow",
 }
+# Downloads keep the "<Base model>/<Category>/" layout only for the classic
+# model kinds. Every other model folder stores files at its root instead.
+STRUCTURED_ROOT_KINDS = {"checkpoints", "unet", "loras"}
+# Every model folder a download may target, in the order the picker shows them.
+TARGET_ROOT_ORDER = (
+    "checkpoints",
+    "unet",
+    "loras",
+    "vae",
+    "text_encoders",
+    "clip",
+    "clip_vision",
+    "controlnet",
+    "style_models",
+    "upscale_models",
+    "embeddings",
+    "hypernetworks",
+    "gligen",
+    "photomaker",
+    "diffusers",
+    "vae_approx",
+    "model_patches",
+    "audio_encoders",
+    "configs",
+    "classifiers",
+    "workflows",
+)
+TARGET_ROOT_LABELS = {
+    "checkpoints": "Checkpoints",
+    "unet": "UNet / Diffusion Models",
+    "loras": "LoRAs",
+    "vae": "VAE",
+    "text_encoders": "Text Encoders",
+    "clip": "CLIP",
+    "clip_vision": "CLIP Vision",
+    "controlnet": "ControlNet",
+    "style_models": "Style Models",
+    "upscale_models": "Upscale Models",
+    "embeddings": "Embeddings",
+    "hypernetworks": "Hypernetworks",
+    "gligen": "GLIGEN",
+    "photomaker": "PhotoMaker",
+    "diffusers": "Diffusers",
+    "vae_approx": "VAE Approx",
+    "model_patches": "Model Patches",
+    "audio_encoders": "Audio Encoders",
+    "configs": "Configs",
+    "classifiers": "Classifiers",
+    "workflows": "Workflows",
+}
+# Civitai file roles and the model folder each one belongs in.
+FILE_ROLE_ROOT_KINDS = {
+    "vae": "vae",
+    "text_encoder": "text_encoders",
+    "config": "configs",
+}
+MODEL_FOLDERS_CACHE_TTL = 15.0
 WINDOWS_RESERVED_SEGMENTS = {
     "CON", "PRN", "AUX", "NUL",
     *(f"COM{index}" for index in range(1, 10)),
@@ -117,6 +175,8 @@ _MODEL_DETAIL_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _MODEL_DETAIL_CACHE_LOCK = threading.Lock()
 _FAVORITES_LOCK = threading.Lock()
 _LIBRARY_INDEX = LibraryIndex(ttl_seconds=30)
+_MODEL_FOLDERS_LOCK = threading.Lock()
+_MODEL_FOLDERS_CACHE: tuple[float, dict[str, list[str]]] | None = None
 
 
 def _install_windows_proactor_shutdown_guard() -> None:
@@ -238,6 +298,7 @@ def _save_config_unlocked(data: dict[str, Any]) -> dict[str, Any]:
         json.dump(current, handle, indent=2, ensure_ascii=False)
     os.replace(tmp_path, path)
     _CONFIG_CACHE = current
+    _invalidate_model_root_cache()
     with _TAXONOMY_LOCK:
         _TAXONOMY_CACHE.clear()
     with _SEARCH_RESULT_CACHE_LOCK:
@@ -252,6 +313,7 @@ def _public_config(config: dict[str, Any]) -> dict[str, Any]:
     public["civitai_api_key"] = ""
     public["api_key_set"] = bool(config.get("civitai_api_key"))
     public["roots"] = _root_display()
+    public["target_kinds"] = _target_root_kinds()
     return public
 
 
@@ -595,14 +657,20 @@ def _safe_join(root: str, *parts: str) -> str:
 
 def _normalize_root_kind(root_kind: Any) -> str:
     normalized = str(root_kind or "").strip().lower()
-    if normalized not in ASSET_ROOT_KINDS:
+    if not re.fullmatch(r"[a-z0-9_]{1,64}", normalized):
         raise ValueError(f"Unknown asset root: {normalized or '(empty)'}")
+    if normalized not in _model_root_map():
+        raise ValueError(f"Unknown asset root: {normalized}")
     return normalized
 
 
 def _extensions_for_root(root_kind: str) -> set[str]:
     normalized = _normalize_root_kind(root_kind)
-    return WORKFLOW_EXTENSIONS if normalized == "workflows" else MODEL_EXTENSIONS
+    if normalized == "workflows":
+        return WORKFLOW_EXTENSIONS
+    if normalized == "configs":
+        return CONFIG_EXTENSIONS
+    return MODEL_EXTENSIONS
 
 
 def _validate_asset_filename(root_kind: str, filename: str) -> str:
@@ -620,7 +688,8 @@ def _validate_asset_filename(root_kind: str, filename: str) -> str:
 def _validate_root_transition(source_root_kind: str, target_root_kind: str) -> None:
     source = _normalize_root_kind(source_root_kind)
     target = _normalize_root_kind(target_root_kind)
-    if ROOT_KIND_FAMILIES[source] != ROOT_KIND_FAMILIES[target]:
+    # Root kinds outside the classic families can only move inside their own kind.
+    if ROOT_KIND_FAMILIES.get(source, source) != ROOT_KIND_FAMILIES.get(target, target):
         raise ValueError(f"Cannot move an asset from {source} to {target}")
 
 
@@ -650,17 +719,91 @@ def _folder_paths(folder_name: str, fallback: str) -> list[str]:
     return unique or [os.path.abspath(fallback)]
 
 
-def _roots_for_kind(root_kind: str) -> list[str]:
-    root_kind = _normalize_root_kind(root_kind)
-    if root_kind == "loras":
-        return _folder_paths("loras", os.path.join(folder_paths.models_dir, "loras"))
-    if root_kind == "checkpoints":
-        return _folder_paths("checkpoints", os.path.join(folder_paths.models_dir, "checkpoints"))
-    if root_kind == "unet":
-        return _folder_paths("diffusion_models", os.path.join(folder_paths.models_dir, "unet"))
+def _extra_model_folder_roots() -> dict[str, list[str]]:
+    """Folders under ComfyUI's models directory that ComfyUI does not register."""
+    global _MODEL_FOLDERS_CACHE
+    now = time.monotonic()
+    with _MODEL_FOLDERS_LOCK:
+        cached = _MODEL_FOLDERS_CACHE
+        if cached and now - cached[0] < MODEL_FOLDERS_CACHE_TTL:
+            return {kind: list(paths) for kind, paths in cached[1].items()}
+    discovered: dict[str, list[str]] = {}
+    try:
+        base = os.path.abspath(str(folder_paths.models_dir))
+        names = sorted(os.listdir(base))
+    except Exception:
+        names = []
+    for name in names:
+        path = os.path.join(base, name)
+        if not os.path.isdir(path):
+            continue
+        kind = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
+        if not kind or kind in TARGET_ROOT_ORDER:
+            continue
+        discovered[kind] = [path]
+    with _MODEL_FOLDERS_LOCK:
+        _MODEL_FOLDERS_CACHE = (now, discovered)
+    return {kind: list(paths) for kind, paths in discovered.items()}
+
+
+def _target_paths_for(root_kind: str) -> list[str]:
+    models_dir = os.path.abspath(str(folder_paths.models_dir))
     if root_kind == "workflows":
         return [os.path.abspath(str(load_config().get("workflow_dir") or _default_workflow_dir()))]
-    raise ValueError(f"Unknown asset root: {root_kind}")
+    if root_kind == "unet":
+        return _folder_paths("diffusion_models", os.path.join(models_dir, "unet"))
+    return _folder_paths(root_kind, os.path.join(models_dir, root_kind))
+
+
+def _model_root_map() -> dict[str, list[str]]:
+    roots: dict[str, list[str]] = {}
+    known: set[str] = set()
+    for kind in TARGET_ROOT_ORDER:
+        paths = _target_paths_for(kind)
+        roots[kind] = paths
+        known.update(os.path.normcase(os.path.realpath(path)) for path in paths)
+    for kind, paths in _extra_model_folder_roots().items():
+        if kind in roots:
+            continue
+        keys = {os.path.normcase(os.path.realpath(path)) for path in paths}
+        if keys & known:
+            # Same physical folder as a known kind (e.g. models/unet or models/clip).
+            continue
+        roots[kind] = paths
+        known.update(keys)
+    return roots
+
+
+def _prettify_root_kind(root_kind: str) -> str:
+    words = str(root_kind or "").replace("_", " ").split()
+    return " ".join(word[:1].upper() + word[1:] for word in words) or "Models"
+
+
+def _root_kind_label(root_kind: str) -> str:
+    normalized = str(root_kind or "").strip().lower()
+    return TARGET_ROOT_LABELS.get(normalized) or _prettify_root_kind(normalized)
+
+
+def _target_root_kinds() -> list[dict[str, Any]]:
+    return [
+        {
+            "id": kind,
+            "label": _root_kind_label(kind),
+            "path": paths[0] if paths else "",
+            "paths": list(paths),
+        }
+        for kind, paths in _model_root_map().items()
+    ]
+
+
+def _invalidate_model_root_cache() -> None:
+    global _MODEL_FOLDERS_CACHE
+    with _MODEL_FOLDERS_LOCK:
+        _MODEL_FOLDERS_CACHE = None
+
+
+def _roots_for_kind(root_kind: str) -> list[str]:
+    return _target_paths_for(_normalize_root_kind(root_kind))
 
 
 def _root_for_kind(root_kind: str) -> str:
@@ -683,12 +826,7 @@ def _storage_root_for_asset(root_kind: str, storage_root_id: Any = "") -> str:
 
 
 def _root_display() -> dict[str, str]:
-    return {
-        "loras": _root_for_kind("loras"),
-        "checkpoints": _root_for_kind("checkpoints"),
-        "unet": _root_for_kind("unet"),
-        "workflows": _root_for_kind("workflows"),
-    }
+    return {kind: paths[0] for kind, paths in _model_root_map().items() if paths}
 
 
 def _category_name(model: dict[str, Any]) -> str:
@@ -1169,11 +1307,48 @@ def _is_unet_model(model: dict[str, Any], version: dict[str, Any], file_info: di
     return any(token in haystack for token in explicit_tokens)
 
 
+def _file_role(file_info: dict[str, Any]) -> str:
+    """Classify a Civitai file so it lands in the right model folder."""
+    file_type = str(file_info.get("type") or "").strip().lower()
+    if file_type:
+        if "vae" in file_type:
+            return "vae"
+        if "text encoder" in file_type or file_type in {"text_encoder", "textencoder"}:
+            return "text_encoder"
+        if file_type in {"config", "configuration"}:
+            return "config"
+        if file_type in {"training data", "archive"}:
+            return "archive"
+        if file_type in {"model", "diffusion model", "checkpoint"}:
+            return "model"
+    name = os.path.basename(str(file_info.get("name") or "")).lower()
+    stem = os.path.splitext(name)[0]
+    if "vae" in stem or stem in {"ae", "vae2"}:
+        return "vae"
+    if re.search(
+        r"(^|[._\-\s])(t5|umt5|t5xxl|clip|clip_l|clip_g|text[._-]?encoder|llm|"
+        r"qwen3?[._-]?vl|gemma|byt5)([._\-\s]|$)",
+        stem,
+    ):
+        return "text_encoder"
+    if re.search(r"(^|[._\-\s])(config|configs)([._\-\s]|$)", stem):
+        return "config"
+    return "model"
+
+
 def _root_kind_for(model: dict[str, Any], version: dict[str, Any], file_info: dict[str, Any], requested_kind: str = "") -> str:
     if _is_workflow(model, requested_kind):
         return "workflows"
     if _is_lora(model, requested_kind):
         return "loras"
+    role = _file_role(file_info)
+    if role in FILE_ROLE_ROOT_KINDS:
+        return FILE_ROLE_ROOT_KINDS[role]
+    model_type = _model_type(model).lower()
+    if "textencoder" in model_type or "text encoder" in model_type:
+        return "text_encoders"
+    if model_type == "vae":
+        return "vae"
     if _is_unet_model(model, version, file_info):
         return "unet"
     return "checkpoints"
@@ -1184,6 +1359,8 @@ def _file_extension_for(root_kind: str, file_info: dict[str, Any]) -> str:
     ext = os.path.splitext(name)[1].lower()
     if root_kind == "workflows":
         return ".json"
+    if root_kind == "configs":
+        return ext if ext in CONFIG_EXTENSIONS else ".json"
     if ext in MODEL_EXTENSIONS:
         return ext
     return ".safetensors"
@@ -1218,7 +1395,6 @@ def resolve_download_path(
     overrides = overrides or {}
     default_root_kind = _normalize_root_kind(_root_kind_for(model, version, file_info, requested_kind))
     root_kind = _normalize_root_kind(overrides.get("root_kind") or default_root_kind)
-    _validate_root_transition(default_root_kind, root_kind)
 
     base_model_dir = _safe_segment(overrides.get("base_model_dir") or _version_base_model(version, model), "Other")
     category_dir = _safe_segment(overrides.get("category_dir") or _category_name(model), "Other")
@@ -1235,20 +1411,28 @@ def resolve_download_path(
 
     root_dir = _root_for_kind(root_kind)
     if root_kind == "workflows":
+        base_model_dir = ""
         relative_path = os.path.join(category_dir, filename)
-    else:
+    elif root_kind in STRUCTURED_ROOT_KINDS:
         relative_path = os.path.join(base_model_dir, category_dir, filename)
+    else:
+        # Component folders (VAE, text encoders, ...) keep files at their root
+        # so ComfyUI finds them immediately.
+        base_model_dir = ""
+        category_dir = ""
+        relative_path = filename
     absolute_path = _safe_join(root_dir, relative_path)
 
     return {
         "root_kind": root_kind,
         "root_dir": root_dir,
-        "base_model_dir": "" if root_kind == "workflows" else base_model_dir,
+        "base_model_dir": base_model_dir,
         "category_dir": category_dir,
         "filename": filename,
         "relative_path": relative_path.replace("\\", "/"),
         "absolute_path": absolute_path,
         "download_url": _download_url_for(version, file_info),
+        "file_role": _file_role(file_info),
     }
 
 

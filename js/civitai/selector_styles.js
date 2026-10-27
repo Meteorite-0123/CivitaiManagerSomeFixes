@@ -513,6 +513,70 @@ export function injectSelectorStyles() {
         .cmgr-selector-body .cmgr-detail-download-card .cmgr-label { display: flex; align-items: center; gap: 7px; color: var(--selector-accent); font-size: 12px; font-weight: 550; }
         .cmgr-selector-body .cmgr-detail-download-card .cmgr-label svg { width: 15px; height: 15px; }
         .cmgr-selector-body .cmgr-detail-download-card .cmgr-path-box { margin: 0; background: transparent; }
+        .cmgr-selector-body .cmgr-file-picker { display: grid; gap: 12px; margin: 0; }
+        .cmgr-selector-body .cmgr-file-picker-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+        .cmgr-selector-body .cmgr-file-picker-head > div { display: grid; gap: 4px; min-width: 0; }
+        .cmgr-selector-body .cmgr-file-picker-head p { margin: 0; color: var(--selector-muted); font-size: 11px; line-height: 16px; }
+        .cmgr-selector-body .cmgr-file-download-all { flex: 0 0 auto; white-space: nowrap; }
+        .cmgr-selector-body .cmgr-file-components { display: grid; gap: 10px; padding-top: 12px; border-top: 1px dashed var(--selector-line); }
+        .cmgr-selector-body .cmgr-file-components-title { color: var(--selector-text); font-size: 11px; font-weight: 600; }
+        .cmgr-selector-body .cmgr-file-group { display: grid; gap: 5px; }
+        .cmgr-selector-body .cmgr-file-group-head { display: flex; align-items: center; gap: 8px; min-height: 20px; min-width: 0; }
+        .cmgr-selector-body .cmgr-file-group-head > span:not(.cmgr-file-role) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--selector-muted); font-size: 10px; }
+        .cmgr-selector-body .cmgr-file-target { margin-left: auto; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 10px; color: var(--selector-accent); }
+        .cmgr-selector-body .cmgr-file-rows { display: grid; gap: 4px; }
+        .cmgr-selector-body .cmgr-file-row {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 10px;
+            width: 100%;
+            min-height: 38px;
+            padding: 7px 10px;
+            box-sizing: border-box;
+            border: 1px solid transparent;
+            border-radius: 6px;
+            background: var(--selector-field);
+            color: var(--selector-text);
+            font: inherit;
+            text-align: left;
+            cursor: pointer;
+        }
+        .cmgr-selector-body .cmgr-file-row:hover { border-color: var(--selector-line); background: var(--selector-hover); }
+        .cmgr-selector-body .cmgr-file-row.is-selected { border-color: var(--selector-accent); background: var(--selector-selected); }
+        .cmgr-selector-body .cmgr-file-row.is-selected .cmgr-file-name { color: var(--selector-accent); }
+        .cmgr-selector-body .cmgr-file-name {
+            min-width: 0;
+            overflow-wrap: anywhere;
+            word-break: break-word;
+            font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+            font-size: 11.5px;
+            line-height: 15px;
+        }
+        .cmgr-selector-body .cmgr-file-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; flex: 0 0 auto; }
+        .cmgr-selector-body .cmgr-file-meta span { color: var(--selector-muted); font-size: 9.5px; white-space: nowrap; }
+        .cmgr-selector-body .cmgr-file-meta b { font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .cmgr-selector-body .cmgr-file-role {
+            flex: 0 0 auto;
+            padding: 2px 6px;
+            border-radius: 4px;
+            background: var(--selector-rail);
+            color: var(--selector-muted);
+            font-size: 9px;
+            font-weight: 700;
+            letter-spacing: .4px;
+            line-height: 14px;
+            white-space: nowrap;
+        }
+        .cmgr-selector-body .cmgr-file-role.is-model { background: color-mix(in srgb, var(--selector-accent) 16%, var(--selector-surface)); color: var(--selector-accent); }
+        .cmgr-selector-body .cmgr-file-role.is-text_encoder { background: color-mix(in srgb, #38bdf8 18%, var(--selector-surface)); color: #38bdf8; }
+        .cmgr-selector-body .cmgr-file-role.is-vae { background: color-mix(in srgb, #c084fc 18%, var(--selector-surface)); color: #c084fc; }
+        .cmgr-selector-body .cmgr-file-role.is-config { background: color-mix(in srgb, #fbbf24 18%, var(--selector-surface)); color: #fbbf24; }
+        .cmgr-selector-body .cmgr-file-role.is-archive { background: color-mix(in srgb, var(--selector-muted) 16%, var(--selector-surface)); color: var(--selector-muted); }
+        @media (max-width: 560px) {
+            .cmgr-selector-body .cmgr-file-row { grid-template-columns: minmax(0, 1fr) auto; }
+            .cmgr-selector-body .cmgr-file-role { grid-column: 1 / -1; justify-self: start; }
+        }
         .cmgr-selector-body .cmgr-version-pill { min-height: 32px; padding: 6px 9px; border: 1px solid transparent; border-radius: 5px; background: var(--selector-field); color: var(--selector-muted); font-size: 11px; font-weight: 400; }
         .cmgr-selector-body .cmgr-version-pill:hover { border-color: var(--selector-line); color: var(--selector-text); }
         .cmgr-selector-body .cmgr-version-pill.active { border-color: var(--selector-accent); background: var(--selector-selected); color: var(--selector-accent); }
