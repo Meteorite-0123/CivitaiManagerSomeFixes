@@ -60,21 +60,60 @@ test("representativeFiles picks one file per component role", () => {
     ]);
 });
 
-test("renderFilePicker shows roles, full names, sizes and a download-all count", () => {
+test("renderFilePicker checks the representative files by default", () => {
     const html = renderFilePicker(checkpointFiles, "flux1-dev-fp8.safetensors");
-    assert.match(html, /Download all \(4\)/);
+    assert.match(html, /Download selected \(4\)/);
     assert.match(html, /Required components/);
     assert.match(html, /TEXT ENCODER/);
-    assert.match(html, /→ models\/text_encoders/);
-    assert.match(html, /→ models\/vae/);
     assert.match(html, /t5xxl_fp16\.safetensors/);
     assert.match(html, /9 MB/);
     assert.match(html, /ae\.safetensors/);
+    assert.match(html, /Clear selection/);
+});
+
+test("renderFilePicker shows a checkbox and a target folder per file", () => {
+    const targetOptions = [
+        { value: "checkpoints", label: "Checkpoints" },
+        { value: "text_encoders", label: "Text Encoders" },
+        { value: "vae", label: "VAE" },
+    ];
+    const html = renderFilePicker(checkpointFiles, "flux1-dev-fp8.safetensors", {
+        checkedNames: ["flux1-dev-fp8.safetensors", "ae.safetensors"],
+        rowFor: (file, role) => ({
+            rootKind: role === "vae" ? "vae" : role === "text_encoder" ? "text_encoders" : "checkpoints",
+            targetOptions,
+        }),
+    });
+    assert.match(html, /Download selected \(2\)/);
+    assert.match(html, /data-file-check="flux1-dev-fp8\.safetensors" checked/);
+    assert.match(html, /data-file-check="ae\.safetensors" checked/);
+    assert.doesNotMatch(html, /data-file-check="t5xxl_fp16\.safetensors" checked/);
+    assert.match(html, /data-file-target="t5xxl_fp16\.safetensors"/);
+    assert.match(html, /<option value="text_encoders" selected>Text Encoders<\/option>/);
+    assert.match(html, /<option value="vae" selected>VAE<\/option>/);
+});
+
+test("renderFilePicker honours an emptied selection", () => {
+    const html = renderFilePicker(checkpointFiles, "flux1-dev-fp8.safetensors", { checkedNames: [] });
+    assert.match(html, /Download selected \(0\)/);
+    assert.match(html, /data-action="download-selected-files" disabled/);
+    assert.doesNotMatch(html, /data-file-check="[^"]+" checked/);
+});
+
+test("renderFilePicker counts only the rendered files", () => {
+    const html = renderFilePicker(checkpointFiles, "flux1-dev-fp8.safetensors", {
+        includeComponents: false,
+        checkedNames: checkpointFiles.map((file) => file.name),
+        rowFor: () => ({ rootKind: "loras", targetOptions: [{ value: "loras", label: "LoRAs" }] }),
+    });
+    assert.match(html, /Download selected \(1\)/);
+    assert.match(html, /Clear selection/);
+    assert.doesNotMatch(html, /Required components/);
 });
 
 test("renderFilePicker labels a VAE upload as the main file", () => {
     const html = renderFilePicker([{ name: "kl-f8-anime2.safetensors", type: "VAE", sizeKB: 320 }], "");
     assert.match(html, /Main file/);
     assert.doesNotMatch(html, /Required components/);
-    assert.doesNotMatch(html, /Download all/);
+    assert.match(html, /Download selected \(1\)/);
 });

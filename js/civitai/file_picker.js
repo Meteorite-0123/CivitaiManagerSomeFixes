@@ -101,44 +101,63 @@ function fileMeta(file) {
     return [format, precision].filter(Boolean).join(" · ");
 }
 
-function renderFileRow(file, role, selected) {
+function renderFileRow(file, role, selected, options = {}) {
     const size = Number(file?.sizeKB || 0) * 1024;
     const meta = fileMeta(file);
     const name = String(file?.name || t("Unnamed file"));
     const key = fileKey(file);
+    const checked = options.checked !== false;
+    const targetOptions = (Array.isArray(options.targetOptions) ? options.targetOptions : [])
+        .map((item) => ({ value: String(item?.value ?? ""), label: String(item?.label ?? item?.value ?? "") }))
+        .filter((item) => item.value);
+    const targetValue = String(options.rootKind || "");
+    if (targetValue && !targetOptions.some((item) => item.value === targetValue)) {
+        targetOptions.unshift({ value: targetValue, label: targetValue });
+    }
     return `
-        <button class="cmgr-file-row ${selected ? "is-selected" : ""}" type="button" role="radio" aria-checked="${selected}" data-file-option="${escapeAttr(key)}" title="${escapeAttr(name)}">
-            <span class="cmgr-file-role is-${escapeAttr(role)}">${escapeHtml(t(FILE_ROLES[role]?.short || "FILE"))}</span>
-            <span class="cmgr-file-name">${escapeHtml(name)}</span>
-            <span class="cmgr-file-meta">
-                ${meta ? `<span>${escapeHtml(meta)}</span>` : ""}
-                <b>${escapeHtml(size ? formatBytes(size) : t("Unknown size"))}</b>
-            </span>
-        </button>
+        <div class="cmgr-file-row ${selected ? "is-selected" : ""} ${checked ? "is-checked" : ""}" data-file-row="${escapeAttr(key)}" role="group" aria-label="${escapeAttr(name)}">
+            <input class="cmgr-file-check" type="checkbox" data-file-check="${escapeAttr(key)}" ${checked ? "checked" : ""} aria-label="${escapeAttr(t("Include {file} in the download", { file: name }))}" />
+            <button class="cmgr-file-main" type="button" role="radio" aria-checked="${selected}" data-file-option="${escapeAttr(key)}" title="${escapeAttr(name)}">
+                <span class="cmgr-file-role is-${escapeAttr(role)}">${escapeHtml(t(FILE_ROLES[role]?.short || "FILE"))}</span>
+                <span class="cmgr-file-name">${escapeHtml(name)}</span>
+                <span class="cmgr-file-meta">
+                    ${meta ? `<span>${escapeHtml(meta)}</span>` : ""}
+                    <b>${escapeHtml(size ? formatBytes(size) : t("Unknown size"))}</b>
+                </span>
+            </button>
+            ${targetOptions.length ? `
+                <label class="cmgr-file-target" title="${escapeAttr(t("Change the folder for this file"))}">
+                    <span aria-hidden="true">→</span>
+                    <select data-file-target="${escapeAttr(key)}" aria-label="${escapeAttr(t("Folder for {file}", { file: name }))}">
+                        ${targetOptions.map((item) => `<option value="${escapeAttr(item.value)}" ${item.value === targetValue ? "selected" : ""}>${escapeHtml(item.label)}</option>`).join("")}
+                    </select>
+                </label>
+            ` : ""}
+        </div>
     `;
 }
 
-function renderGroup(role, items, selectedName, { title = "" } = {}) {
+function renderGroup(role, items, selectedName, options = {}) {
     const info = FILE_ROLES[role] || FILE_ROLES.model;
     const selected = String(selectedName || "");
+    const rowFor = typeof options.rowFor === "function" ? options.rowFor : () => ({});
     return `
         <div class="cmgr-file-group" data-file-group="${escapeAttr(role)}">
             <div class="cmgr-file-group-head">
                 <span class="cmgr-file-role is-${escapeAttr(role)}">${escapeHtml(t(info.short))}</span>
-                <span>${escapeHtml(title || t(info.label))} · ${items.length}</span>
-                ${info.folder ? `<span class="cmgr-file-target" title="${escapeAttr(t("Saved to {folder}", { folder: `models/${info.folder}` }))}">→ models/${escapeHtml(info.folder)}</span>` : ""}
+                <span>${escapeHtml(options.title || t(info.label))} · ${items.length}</span>
             </div>
             <div class="cmgr-file-rows" role="radiogroup" aria-label="${escapeAttr(t(info.label))}">
-                ${items.map((file) => renderFileRow(file, role, fileKey(file) === selected)).join("")}
+                ${items.map((file) => renderFileRow(file, role, fileKey(file) === selected, rowFor(file, role))).join("")}
             </div>
         </div>
     `;
 }
 
 /**
- * Replaces the old single-line file dropdown: every file gets its role, its
- * full name and a right-aligned size, and required components are separated
- * from the main model file.
+ * Replaces the old single-line file dropdown: every file gets a role, its full
+ * name, a right-aligned size, a checkbox for bulk downloads and an editable
+ * target folder. Required components are separated from the main model file.
  */
 export function renderFilePicker(files, selectedName, options = {}) {
     const list = (Array.isArray(files) ? files : []).filter(Boolean);
@@ -147,21 +166,38 @@ export function renderFilePicker(files, selectedName, options = {}) {
     const { main, mainRole, components } = groupVersionFiles(list, { includeComponents });
     const componentRoles = COMPONENT_ORDER.filter((role) => components.get(role)?.length);
     if (!main.length && !componentRoles.length) return "";
-    const count = (main.length ? 1 : 0) + componentRoles.length;
+    const checkedNames = new Set(
+        Array.isArray(options.checkedNames)
+            ? options.checkedNames.map(String)
+            : representativeFiles(list, selectedName, { includeComponents }).map(fileKey),
+    );
+    const renderedFiles = [
+        ...main.map((file) => [file, mainRole]),
+        ...componentRoles.flatMap((role) => (components.get(role) || []).map((file) => [file, role])),
+    ];
+    const checkedCount = renderedFiles.filter(([file]) => checkedNames.has(fileKey(file))).length;
+    const rowFor = (file, role) => {
+        const extra = typeof options.rowFor === "function" ? options.rowFor(file, role) : {};
+        return { checked: checkedNames.has(fileKey(file)), ...extra };
+    };
+    const rowOptions = { rowFor };
     return `
         <div class="cmgr-file-picker" data-file-picker>
             <div class="cmgr-file-picker-head">
                 <div>
                     <div class="cmgr-label">${selectorIcon("file")}${escapeHtml(t("Files"))}</div>
-                    <p>${escapeHtml(t("Each file is labeled with what it is and the folder it is saved to."))}</p>
+                    <p>${escapeHtml(t("Check the files to download together, then adjust each target folder if needed."))}</p>
                 </div>
-                ${count > 1 ? `<button class="cmgr-selector-button cmgr-file-download-all" type="button" data-action="download-all-files" title="${escapeAttr(t("Download the main file and one file per component"))}">${escapeHtml(t("Download all ({count})", { count }))}</button>` : ""}
+                <div class="cmgr-file-picker-actions">
+                    <button class="cmgr-selector-button cmgr-file-select-all" type="button" data-action="select-all-files">${escapeHtml(renderedFiles.length && checkedCount === renderedFiles.length ? t("Clear selection") : t("Select all"))}</button>
+                    <button class="cmgr-selector-button cmgr-file-download-selected" type="button" data-action="download-selected-files" ${checkedCount ? "" : "disabled"}>${escapeHtml(t("Download selected ({count})", { count: checkedCount }))}</button>
+                </div>
             </div>
-            ${main.length ? renderGroup(mainRole, main, selectedName, { title: t("Main file") }) : ""}
+            ${main.length ? renderGroup(mainRole, main, selectedName, { ...rowOptions, title: t("Main file") }) : ""}
             ${componentRoles.length ? `
                 <div class="cmgr-file-components">
                     <div class="cmgr-file-components-title">${escapeHtml(t("Required components"))}</div>
-                    ${componentRoles.map((role) => renderGroup(role, components.get(role), selectedName)).join("")}
+                    ${componentRoles.map((role) => renderGroup(role, components.get(role), selectedName, rowOptions)).join("")}
                 </div>
             ` : ""}
         </div>

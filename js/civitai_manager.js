@@ -60,7 +60,7 @@ import {
     filterFavoriteItems,
     localAssetForFavorite,
 } from "./civitai/favorites.js";
-import { groupVersionFiles, renderFilePicker, representativeFiles } from "./civitai/file_picker.js";
+import { fileKey, fileRole, groupVersionFiles, renderFilePicker, representativeFiles } from "./civitai/file_picker.js";
 import { t } from "./civitai/i18n.js";
 import {
     createPreviewMedia,
@@ -95,7 +95,7 @@ let lastModelSelectAt = 0;
 const liveMarkup = new WeakMap();
 const SIDEBAR_TAB_ID = "civitai-manager";
 // Discover, Library and Favorites each keep their own detail selection.
-const SELECTION_FIELDS = ["selectedModel", "selectedVersionId", "selectedFileName", "pathOverrides", "resolution", "selectedAssetId"];
+const SELECTION_FIELDS = ["selectedModel", "selectedVersionId", "selectedFileName", "selectedFileNames", "fileOverrides", "pathOverrides", "resolution", "selectedAssetId"];
 const tabSelections = {};
 let libraryMetadataBatch = {
     running: false,
@@ -540,6 +540,8 @@ function switchManagerTab(tab) {
             selectedModel: null,
             selectedVersionId: "",
             selectedFileName: "",
+            selectedFileNames: [],
+            fileOverrides: {},
             pathOverrides: {},
             resolution: null,
             selectedAssetId: "",
@@ -994,6 +996,7 @@ function finishSearchRender(reset) {
         const firstVersion = getVersions(autoPick)[0] || {};
         state.selectedVersionId = String(firstVersion.id || "");
         state.selectedFileName = defaultFileName(firstVersion);
+        resetFileSelection(firstVersion, state.selectedFileName);
     }
     render({ preserveScroll: !reset });
     if (reset && state.activeTab === "Discover") animateCardsIn(bodyEl.querySelectorAll(".cmgr-discover .cmgr-results > .cmgr-card[data-model-id]"));
@@ -1074,6 +1077,7 @@ async function selectModel(model) {
     const firstVersion = getVersions()[0] || {};
     state.selectedVersionId = String(firstVersion.id || "");
     state.selectedFileName = defaultFileName(firstVersion);
+    resetFileSelection(firstVersion, state.selectedFileName);
     renderSelectedModelDetail();
     // Arrow-key browsing selects in quick succession; only fetch where it settles.
     const rapid = performance.now() - lastModelSelectAt < 350;
@@ -1089,6 +1093,7 @@ async function selectModel(model) {
                 state.selectedModel = full;
                 state.selectedVersionId = String(getSelectedVersion()?.id || "");
                 state.selectedFileName = String(getSelectedFile()?.name || "");
+                resetFileSelection(getSelectedVersion(), state.selectedFileName);
                 renderSelectedModelDetail();
             }
         } catch (_) {
@@ -1126,6 +1131,161 @@ function defaultFileName(version = getSelectedVersion()) {
     return String(file.name || file.id || "");
 }
 
+/** Last known target-folder resolution for every file of a version. */
+function fileResolutionCache(version = getSelectedVersion()) {
+    const versionKey = String(version?.id || "");
+    if (!versionKey) return {};
+    if (!state.fileResolutions) state.fileResolutions = {};
+    if (!state.fileResolutions[versionKey]) state.fileResolutions[versionKey] = {};
+    return state.fileResolutions[versionKey];
+}
+
+function fileResolutionFor(file, version = getSelectedVersion()) {
+    const key = fileKey(file);
+    return key ? fileResolutionCache(version)[key] || null : null;
+}
+
+/**
+ * Folder shown for a file row: the user's own pick first, then the folder the
+ * backend resolved for it, and finally a role-based guess while it loads.
+ */
+function fileTargetRootKind(file, role = "", version = getSelectedVersion()) {
+    const key = fileKey(file);
+    const override = key ? state.fileOverrides?.[key] : null;
+    if (override?.root_kind) return String(override.root_kind);
+    const resolution = fileResolutionFor(file, version);
+    if (resolution?.root_kind) return String(resolution.root_kind);
+    const fileRoleName = role || fileRole(file);
+    if (fileRoleName === "text_encoder") return "text_encoders";
+    if (fileRoleName === "vae") return "vae";
+    if (fileRoleName === "config") return "configs";
+    const kind = detailAssetKind();
+    if (kind === "lora") return "loras";
+    if (kind === "workflow") return "workflows";
+    return "checkpoints";
+}
+
+function fileTargetOptions() {
+    return targetKindOptions();
+}
+
+/**
+ * Default bulk selection: the main file plus one file per component role, which
+ * matches what the old "Download all" button did.
+ */
+function resetFileSelection(version = getSelectedVersion(), preferredName = state.selectedFileName) {
+    const files = getFiles(version);
+    const picks = representativeFiles(files, preferredName || defaultFileName(version), {
+        includeComponents: detailAssetKind() === "checkpoint",
+    });
+    state.selectedFileNames = picks.map(fileKey).filter(Boolean);
+    state.fileOverrides = {};
+}
+
+/** Keeps checkboxes, the "select all" label and the download count in sync. */
+function syncFilePickerSelection(root = bodyEl) {
+    const picker = root?.querySelector?.("[data-file-picker]");
+    if (!picker) return;
+    const checked = new Set((state.selectedFileNames || []).map(String));
+    const boxes = [...picker.querySelectorAll("[data-file-check]")];
+    for (const box of boxes) {
+        const isChecked = checked.has(String(box.dataset.fileCheck || ""));
+        box.checked = isChecked;
+        box.closest("[data-file-row]")?.classList.toggle("is-checked", isChecked);
+    }
+    const checkedCount = boxes.filter((box) => box.checked).length;
+    const download = picker.querySelector('[data-action="download-selected-files"]');
+    if (download) {
+        download.disabled = checkedCount === 0;
+        download.textContent = t("Download selected ({count})", { count: checkedCount });
+    }
+    const selectAll = picker.querySelector('[data-action="select-all-files"]');
+    if (selectAll) {
+        selectAll.textContent = boxes.length && checkedCount === boxes.length ? t("Clear selection") : t("Select all");
+    }
+}
+
+/** Applies freshly resolved folders to the picker rows without a re-render. */
+function syncFileTargets(root = bodyEl) {
+    const picker = root?.querySelector?.("[data-file-picker]");
+    if (!picker) return;
+    const files = getFiles();
+    for (const select of picker.querySelectorAll("[data-file-target]")) {
+        const key = String(select.dataset.fileTarget || "");
+        const file = files.find((item) => fileKey(item) === key);
+        if (!file) continue;
+        const target = fileTargetRootKind(file);
+        if (!target) continue;
+        if (![...select.options].some((option) => option.value === target)) {
+            select.insertAdjacentHTML("beforeend", `<option value="${escapeAttr(target)}">${escapeHtml(target)}</option>`);
+        }
+        select.value = target;
+    }
+}
+
+let fileTargetRequestId = 0;
+
+/**
+ * Resolves the folder of every unselected file so each row shows its real
+ * target instead of a role-based guess. These are local API calls.
+ */
+async function resolveOtherFileTargets() {
+    const model = state.selectedModel;
+    const version = getSelectedVersion();
+    if (!model || !version) return;
+    const versionKey = String(version.id || "");
+    const cache = fileResolutionCache(version);
+    const focusedKey = fileKey(getSelectedFile());
+    const pending = getFiles(version).filter((file) => {
+        const key = fileKey(file);
+        return key && key !== focusedKey && !cache[key];
+    });
+    if (!pending.length) return;
+    const requestId = ++fileTargetRequestId;
+    const results = await Promise.all(pending.map(async (file) => {
+        const key = fileKey(file);
+        try {
+            const data = await apiPost("/resolve-path", {
+                kind: detailAssetKind(),
+                model,
+                version,
+                file,
+                overrides: state.fileOverrides?.[key] || {},
+            });
+            return [key, data.resolution];
+        } catch (_) {
+            return null;
+        }
+    }));
+    if (requestId !== fileTargetRequestId) return;
+    if (state.selectedModel !== model || String(state.selectedVersionId) !== versionKey) return;
+    for (const entry of results) if (entry?.[1]) cache[entry[0]] = entry[1];
+    syncFileTargets();
+}
+
+/** Re-resolves one file after its folder was changed in the picker. */
+async function resolveFileTarget(key) {
+    const model = state.selectedModel;
+    const version = getSelectedVersion();
+    const file = getFiles(version).find((item) => fileKey(item) === key);
+    if (!model || !version || !file) return;
+    const versionKey = String(version.id || "");
+    try {
+        const data = await apiPost("/resolve-path", {
+            kind: detailAssetKind(),
+            model,
+            version,
+            file,
+            overrides: state.fileOverrides?.[key] || {},
+        });
+        if (state.selectedModel !== model || String(state.selectedVersionId) !== versionKey) return;
+        fileResolutionCache(version)[key] = data.resolution;
+        syncFileTargets();
+    } catch (err) {
+        state.error = err.message;
+    }
+}
+
 async function resolveSelectedPath(options = {}) {
     const model = state.selectedModel;
     if (!model) return;
@@ -1149,12 +1309,19 @@ async function resolveSelectedPath(options = {}) {
             category_dir: data.resolution.category_dir,
             filename: data.resolution.filename,
         };
+        const key = fileKey(getSelectedFile());
+        if (key) {
+            fileResolutionCache(getSelectedVersion())[key] = data.resolution;
+            state.fileOverrides[key] = { ...state.pathOverrides };
+        }
     } catch (err) {
         if (!isCurrent()) return;
         state.error = err.message;
     }
     state.resolvingPath = false;
     renderSelectionSurface(options);
+    syncFileTargets();
+    void resolveOtherFileTargets();
 }
 
 function renderSelectionSurface(options = {}) {
@@ -1258,17 +1425,20 @@ async function startDownload() {
 }
 
 /**
- * Queues the main file plus one file per component role (text encoder, VAE,
- * config). Each role already maps to its own model folder on the backend.
+ * Queues every checked file with its own target folder. The backend already
+ * accepts one `overrides` object per file, so components can go to different
+ * model folders in a single action.
  */
-async function downloadVersionFiles() {
+async function downloadSelectedVersionFiles() {
     const model = state.selectedModel;
     const version = getSelectedVersion();
     if (!model || !version) return;
-    const picks = representativeFiles(getFiles(version), state.selectedFileName, {
-        includeComponents: detailAssetKind() === "checkpoint",
-    });
-    if (!picks.length) return;
+    const checked = new Set((state.selectedFileNames || []).map(String));
+    const picks = getFiles(version).filter((file) => checked.has(fileKey(file)));
+    if (!picks.length) {
+        showToast(t("Check at least one file first."));
+        return;
+    }
     let queued = 0;
     const failures = [];
     for (const file of picks) {
@@ -1278,7 +1448,7 @@ async function downloadVersionFiles() {
                 model,
                 version,
                 file,
-                overrides: {},
+                overrides: state.fileOverrides?.[fileKey(file)] || {},
             });
             queued += 1;
         } catch (err) {
@@ -1612,6 +1782,7 @@ async function selectFavoriteItem(item) {
         const selectVersion = () => {
             state.selectedVersionId = String(getVersions()[0]?.id || "");
             state.selectedFileName = defaultFileName(getVersions()[0]);
+            resetFileSelection(getVersions()[0], state.selectedFileName);
         };
         state.selectedModel = peekModelDetail(model.id) || model;
         state.selectedAssetId = "";
@@ -2512,6 +2683,11 @@ function renderModelDetail(model) {
                 ` : `<input type="hidden" data-field="selected-version" value="${escapeAttr(version.id || "")}" />`}
                 ${renderFilePicker(files, String(file.name || file.id || ""), {
                     includeComponents: detailAssetKind() === "checkpoint",
+                    checkedNames: Array.isArray(state.selectedFileNames) ? state.selectedFileNames : undefined,
+                    rowFor: (pickerFile, role) => ({
+                        rootKind: fileTargetRootKind(pickerFile, role, version),
+                        targetOptions: fileTargetOptions(),
+                    }),
                 })}
                 ${findInstalledAssetForModel(model, version) ? "" : renderEarlyAccessNotice(model, version)}
                 ${renderModelActionHub(model, version, file, resolution)}
@@ -3173,6 +3349,8 @@ function bindDiscoverEvents(root) {
         state.selectedVersionId = String(nextVersionId);
         state.selectedFileName = defaultFileName(getSelectedVersion());
         state.pathOverrides = {};
+        state.resolution = null;
+        resetFileSelection(getSelectedVersion(), state.selectedFileName);
         if (state.activeTab === "Favorites") renderSelectedFavoriteDetail();
         else renderSelectedModelDetail();
         await resolveSelectedPath({ detailOnly: true, pathOnly: true });
@@ -3184,18 +3362,57 @@ function bindDiscoverEvents(root) {
             const name = button.dataset.fileOption || "";
             if (!name || name === state.selectedFileName) return;
             state.selectedFileName = name;
-            state.pathOverrides = {};
+            // Start from whatever target this file already had so switching the
+            // focused file never discards another row's folder choice.
+            state.pathOverrides = { ...(state.fileOverrides?.[name] || {}) };
             const picker = button.closest("[data-file-picker]");
-            picker?.querySelectorAll("[data-file-option]").forEach((other) => {
-                const active = other === button;
-                other.classList.toggle("is-selected", active);
-                other.setAttribute("aria-checked", String(active));
+            picker?.querySelectorAll("[data-file-row]").forEach((row) => {
+                const active = row.dataset.fileRow === name;
+                row.classList.toggle("is-selected", active);
+                const option = row.querySelector("[data-file-option]");
+                option?.setAttribute("aria-checked", String(active));
             });
             await resolveSelectedPath({ detailOnly: true, pathOnly: true });
         };
     });
-    const downloadAll = root.querySelector('[data-action="download-all-files"]');
-    if (downloadAll) downloadAll.onclick = () => void downloadVersionFiles();
+    root.querySelectorAll("[data-file-check]").forEach((box) => {
+        box.onchange = () => {
+            const key = String(box.dataset.fileCheck || "");
+            if (!key) return;
+            const checked = new Set((state.selectedFileNames || []).map(String));
+            if (box.checked) checked.add(key);
+            else checked.delete(key);
+            state.selectedFileNames = [...checked];
+            syncFilePickerSelection(root);
+        };
+    });
+    root.querySelectorAll("[data-file-target]").forEach((select) => {
+        select.onchange = async () => {
+            const key = String(select.dataset.fileTarget || "");
+            if (!key) return;
+            // A different folder kind invalidates the subfolders of the old one,
+            // so only the kind is kept and the backend fills in the rest.
+            state.fileOverrides[key] = { root_kind: select.value };
+            if (key === fileKey(getSelectedFile())) {
+                state.pathOverrides = { ...state.fileOverrides[key] };
+                await resolveSelectedPath({ detailOnly: true, pathOnly: true });
+            } else {
+                await resolveFileTarget(key);
+            }
+        };
+    });
+    const selectAllFiles = root.querySelector('[data-action="select-all-files"]');
+    if (selectAllFiles) {
+        selectAllFiles.onclick = () => {
+            const picker = selectAllFiles.closest("[data-file-picker]");
+            const boxes = picker ? [...picker.querySelectorAll("[data-file-check]")] : [];
+            const allChecked = boxes.length > 0 && boxes.every((box) => box.checked);
+            state.selectedFileNames = allChecked ? [] : boxes.map((box) => String(box.dataset.fileCheck || "")).filter(Boolean);
+            syncFilePickerSelection(root);
+        };
+    }
+    const downloadSelectedFiles = root.querySelector('[data-action="download-selected-files"]');
+    if (downloadSelectedFiles) downloadSelectedFiles.onclick = () => void downloadSelectedVersionFiles();
     const togglePathBtn = root.querySelector('[data-action="toggle-path-editor"]');
     if (togglePathBtn) {
         togglePathBtn.onclick = () => {

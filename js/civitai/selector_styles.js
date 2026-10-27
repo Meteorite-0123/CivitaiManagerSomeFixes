@@ -517,13 +517,15 @@ export function injectSelectorStyles() {
         .cmgr-selector-body .cmgr-file-picker-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
         .cmgr-selector-body .cmgr-file-picker-head > div { display: grid; gap: 4px; min-width: 0; }
         .cmgr-selector-body .cmgr-file-picker-head p { margin: 0; color: var(--selector-muted); font-size: 11px; line-height: 16px; }
-        .cmgr-selector-body .cmgr-file-download-all { flex: 0 0 auto; white-space: nowrap; }
+        .cmgr-selector-body .cmgr-file-picker-actions { display: flex; align-items: center; justify-content: flex-end; flex: 0 0 auto; flex-wrap: wrap; gap: 6px; }
+        .cmgr-selector-body .cmgr-file-picker-actions .cmgr-selector-button { min-height: 28px; font-size: 11px; }
+        .cmgr-selector-body .cmgr-file-select-all { color: var(--selector-muted); }
+        .cmgr-selector-body .cmgr-file-download-selected:not(:disabled) { background: var(--selector-selected); color: var(--selector-accent); }
         .cmgr-selector-body .cmgr-file-components { display: grid; gap: 10px; padding-top: 12px; border-top: 1px dashed var(--selector-line); }
         .cmgr-selector-body .cmgr-file-components-title { color: var(--selector-text); font-size: 11px; font-weight: 600; }
         .cmgr-selector-body .cmgr-file-group { display: grid; gap: 5px; }
         .cmgr-selector-body .cmgr-file-group-head { display: flex; align-items: center; gap: 8px; min-height: 20px; min-width: 0; }
         .cmgr-selector-body .cmgr-file-group-head > span:not(.cmgr-file-role) { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--selector-muted); font-size: 10px; }
-        .cmgr-selector-body .cmgr-file-target { margin-left: auto; font-family: ui-monospace, "Cascadia Mono", Consolas, monospace; font-size: 10px; color: var(--selector-accent); }
         .cmgr-selector-body .cmgr-file-rows { display: grid; gap: 4px; }
         .cmgr-selector-body .cmgr-file-row {
             display: grid;
@@ -540,11 +542,28 @@ export function injectSelectorStyles() {
             color: var(--selector-text);
             font: inherit;
             text-align: left;
-            cursor: pointer;
         }
         .cmgr-selector-body .cmgr-file-row:hover { border-color: var(--selector-line); background: var(--selector-hover); }
+        .cmgr-selector-body .cmgr-file-row.is-checked { background: color-mix(in srgb, var(--selector-accent) 6%, var(--selector-field)); }
         .cmgr-selector-body .cmgr-file-row.is-selected { border-color: var(--selector-accent); background: var(--selector-selected); }
         .cmgr-selector-body .cmgr-file-row.is-selected .cmgr-file-name { color: var(--selector-accent); }
+        .cmgr-selector-body .cmgr-file-check { width: 14px; height: 14px; margin: 0; accent-color: var(--selector-accent); cursor: pointer; }
+        .cmgr-selector-body .cmgr-file-main {
+            display: grid;
+            grid-template-columns: auto minmax(0, 1fr) auto;
+            align-items: center;
+            gap: 10px;
+            min-width: 0;
+            margin: 0;
+            padding: 0;
+            border: 0;
+            background: transparent;
+            color: inherit;
+            font: inherit;
+            text-align: left;
+            cursor: pointer;
+        }
+        .cmgr-selector-body .cmgr-file-main:focus-visible { outline: 1px solid var(--selector-accent); outline-offset: 3px; border-radius: 4px; }
         .cmgr-selector-body .cmgr-file-name {
             min-width: 0;
             overflow-wrap: anywhere;
@@ -556,6 +575,21 @@ export function injectSelectorStyles() {
         .cmgr-selector-body .cmgr-file-meta { display: flex; flex-direction: column; align-items: flex-end; gap: 1px; flex: 0 0 auto; }
         .cmgr-selector-body .cmgr-file-meta span { color: var(--selector-muted); font-size: 9.5px; white-space: nowrap; }
         .cmgr-selector-body .cmgr-file-meta b { font-size: 11.5px; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .cmgr-selector-body .cmgr-file-target { display: inline-flex; align-items: center; gap: 4px; min-width: 0; margin: 0; color: var(--selector-muted); font-size: 10px; cursor: pointer; }
+        .cmgr-selector-body .cmgr-file-target select {
+            min-height: 24px;
+            max-width: 148px;
+            padding: 2px 4px;
+            border: 1px solid var(--selector-line);
+            border-radius: 5px;
+            background: var(--selector-surface);
+            color: var(--selector-text);
+            font: inherit;
+            font-size: 10px;
+            cursor: pointer;
+        }
+        .cmgr-selector-body .cmgr-file-target select:hover { border-color: var(--selector-accent); }
+        .cmgr-selector-body .cmgr-file-target select:focus-visible { outline: 1px solid var(--selector-accent); outline-offset: 1px; }
         .cmgr-selector-body .cmgr-file-role {
             flex: 0 0 auto;
             padding: 2px 6px;
@@ -574,8 +608,12 @@ export function injectSelectorStyles() {
         .cmgr-selector-body .cmgr-file-role.is-config { background: color-mix(in srgb, #fbbf24 18%, var(--selector-surface)); color: #fbbf24; }
         .cmgr-selector-body .cmgr-file-role.is-archive { background: color-mix(in srgb, var(--selector-muted) 16%, var(--selector-surface)); color: var(--selector-muted); }
         @media (max-width: 560px) {
-            .cmgr-selector-body .cmgr-file-row { grid-template-columns: minmax(0, 1fr) auto; }
-            .cmgr-selector-body .cmgr-file-role { grid-column: 1 / -1; justify-self: start; }
+            .cmgr-selector-body .cmgr-file-picker-head { flex-direction: column; }
+            .cmgr-selector-body .cmgr-file-picker-actions { width: 100%; justify-content: flex-start; }
+            .cmgr-selector-body .cmgr-file-row { grid-template-columns: auto minmax(0, 1fr); }
+            .cmgr-selector-body .cmgr-file-target { grid-column: 1 / -1; justify-self: start; padding-left: 24px; }
+            .cmgr-selector-body .cmgr-file-main { grid-template-columns: auto minmax(0, 1fr); }
+            .cmgr-selector-body .cmgr-file-meta { grid-column: 1 / -1; flex-direction: row; gap: 8px; }
         }
         .cmgr-selector-body .cmgr-version-pill { min-height: 32px; padding: 6px 9px; border: 1px solid transparent; border-radius: 5px; background: var(--selector-field); color: var(--selector-muted); font-size: 11px; font-weight: 400; }
         .cmgr-selector-body .cmgr-version-pill:hover { border-color: var(--selector-line); color: var(--selector-text); }
