@@ -520,7 +520,6 @@ export function injectSelectorStyles() {
         .cmgr-selector-body .cmgr-file-picker-actions { display: flex; align-items: center; justify-content: flex-end; flex: 0 0 auto; flex-wrap: wrap; gap: 6px; }
         .cmgr-selector-body .cmgr-file-picker-actions .cmgr-selector-button { min-height: 28px; font-size: 11px; }
         .cmgr-selector-body .cmgr-file-select-all { color: var(--selector-muted); }
-        .cmgr-selector-body .cmgr-file-download-selected:not(:disabled) { background: var(--selector-selected); color: var(--selector-accent); }
         .cmgr-selector-body .cmgr-file-components { display: grid; gap: 10px; padding-top: 12px; border-top: 1px dashed var(--selector-line); }
         .cmgr-selector-body .cmgr-file-components-title { color: var(--selector-text); font-size: 11px; font-weight: 600; }
         .cmgr-selector-body .cmgr-file-group { display: grid; gap: 5px; }

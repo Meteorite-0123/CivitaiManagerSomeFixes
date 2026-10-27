@@ -60,7 +60,7 @@ import {
     filterFavoriteItems,
     localAssetForFavorite,
 } from "./civitai/favorites.js";
-import { fileKey, fileRole, groupVersionFiles, renderFilePicker, representativeFiles } from "./civitai/file_picker.js";
+import { fileKey, fileRole, groupVersionFiles, renderFilePicker, representativeFiles, selectionSummary } from "./civitai/file_picker.js";
 import { t } from "./civitai/i18n.js";
 import {
     createPreviewMedia,
@@ -1191,8 +1191,37 @@ function setFileChecked(key, checked) {
     state.selectedFileNames = [...selected];
 }
 
-/** Keeps checkboxes, the "select all" label and the download count in sync. */
+/** The ticked files of the current version, in picker order. */
+function selectedVersionFiles(version = getSelectedVersion()) {
+    const checked = new Set((state.selectedFileNames || []).map(String));
+    return getFiles(version).filter((file) => checked.has(fileKey(file)));
+}
+
+function downloadCtaLabel(bytes) {
+    return bytes ? t("Download ({size})", { size: formatBytes(bytes) }) : t("Download Now");
+}
+
+/**
+ * The main download button shows the combined size of the ticked files, so
+ * adding a text encoder or VAE visibly raises the number before downloading.
+ */
+function syncDownloadCta(root = bodyEl) {
+    const cta = root?.querySelector?.("[data-download-selection]");
+    if (!cta) return;
+    const picks = selectedVersionFiles();
+    const focused = getSelectedFile() || {};
+    const bytes = picks.length
+        ? picks.reduce((sum, file) => sum + Number(file.sizeKB || 0) * 1024, 0)
+        : Number(focused.sizeKB || 0) * 1024;
+    const label = cta.querySelector(".cmgr-download-cta-label");
+    if (label) label.textContent = downloadCtaLabel(bytes);
+    cta.disabled = !state.resolution?.download_url;
+    cta.title = picks.length > 1 ? t("{count} files selected", { count: picks.length }) : "";
+}
+
+/** Keeps checkboxes, the "select all" label and the download size in sync. */
 function syncFilePickerSelection(root = bodyEl) {
+    syncDownloadCta(root);
     const picker = root?.querySelector?.("[data-file-picker]");
     if (!picker) return;
     const checked = new Set((state.selectedFileNames || []).map(String));
@@ -1205,11 +1234,6 @@ function syncFilePickerSelection(root = bodyEl) {
         row?.querySelector("[data-file-option]")?.setAttribute("aria-pressed", String(isChecked));
     }
     const checkedCount = boxes.filter((box) => box.checked).length;
-    const download = picker.querySelector('[data-action="download-selected-files"]');
-    if (download) {
-        download.disabled = checkedCount === 0;
-        download.textContent = t("Download selected ({count})", { count: checkedCount });
-    }
     const selectAll = picker.querySelector('[data-action="select-all-files"]');
     if (selectAll) {
         selectAll.textContent = boxes.length && checkedCount === boxes.length ? t("Clear selection") : t("Select all");
@@ -1433,6 +1457,16 @@ async function startDownload() {
         state.error = err.message;
         render();
     }
+}
+
+/**
+ * The main download button follows the ticks: it queues every selected file
+ * (with its own target folder) and falls back to the focused file when the
+ * selection is empty.
+ */
+async function startDownloadFromSelection() {
+    if (selectedVersionFiles().length) return downloadSelectedVersionFiles();
+    return startDownload();
 }
 
 /**
@@ -2596,7 +2630,11 @@ function renderModelActionHub(model, version = {}, file = {}, resolution = state
     const favorite = remoteFavorite(model);
     const activeJob = activeDownloadJobForModel(model, version);
     const installedAsset = findInstalledAssetForModel(model, version);
-    const sizeText = file.sizeKB ? formatBytes(file.sizeKB * 1024) : "";
+    const selection = selectionSummary(getFiles(version), state.selectedFileNames, {
+        includeComponents: detailAssetKind() === "checkpoint",
+    });
+    const totalBytes = selection.count ? selection.totalBytes : Number(file.sizeKB || 0) * 1024;
+    const multiSelected = selection.count > 1;
     const inlineCta = !activeJob && !installedAsset;
     const favoriteHtml = renderFavoriteControls({
         favorite: Boolean(favorite),
@@ -2634,13 +2672,10 @@ function renderModelActionHub(model, version = {}, file = {}, resolution = state
             </div>
         `;
     } else {
-        const label = sizeText
-            ? t("Download ({size})", { size: sizeText })
-            : t("Download Now");
         primaryHtml = `
-            <button class="cmgr-primary cmgr-download-cta" type="button" data-action="download" ${resolution?.download_url ? "" : "disabled"}>
+            <button class="cmgr-primary cmgr-download-cta" type="button" data-action="download" data-download-selection="true" ${resolution?.download_url ? "" : "disabled"}${multiSelected ? ` title="${escapeAttr(t("{count} files selected", { count: selection.count }))}"` : ""}>
                 <span class="cmgr-download-cta-icon" aria-hidden="true">↓</span>
-                <span>${escapeHtml(label)}</span>
+                <span class="cmgr-download-cta-label">${escapeHtml(downloadCtaLabel(totalBytes))}</span>
             </button>
         `;
     }
@@ -3422,8 +3457,6 @@ function bindDiscoverEvents(root) {
             syncFilePickerSelection(root);
         };
     }
-    const downloadSelectedFiles = root.querySelector('[data-action="download-selected-files"]');
-    if (downloadSelectedFiles) downloadSelectedFiles.onclick = () => void downloadSelectedVersionFiles();
     const togglePathBtn = root.querySelector('[data-action="toggle-path-editor"]');
     if (togglePathBtn) {
         togglePathBtn.onclick = () => {
@@ -3438,7 +3471,13 @@ function bindDiscoverEvents(root) {
         };
     });
     const downloadBtn = root.querySelector('[data-action="download"]');
-    if (downloadBtn) downloadBtn.onclick = () => startDownload();
+    if (downloadBtn) {
+        downloadBtn.onclick = () => (
+            downloadBtn.dataset.downloadSelection
+                ? startDownloadFromSelection()
+                : startDownload()
+        );
+    }
     root.querySelectorAll('[data-action="cancel-download"]').forEach((btn) => {
         btn.onclick = () => cancelDownload(btn.dataset.taskId);
     });

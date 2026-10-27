@@ -13,8 +13,8 @@ const context = {
     selectorIcon: () => "<svg></svg>",
 };
 vm.createContext(context);
-const { fileRole, groupVersionFiles, representativeFiles, renderFilePicker } = vm.runInContext(
-    `(() => { ${source}\n return { fileRole, groupVersionFiles, representativeFiles, renderFilePicker }; })()`,
+const { fileRole, groupVersionFiles, representativeFiles, renderFilePicker, selectionSummary } = vm.runInContext(
+    `(() => { ${source}\n return { fileRole, groupVersionFiles, representativeFiles, renderFilePicker, selectionSummary }; })()`,
     context,
 );
 
@@ -62,13 +62,31 @@ test("representativeFiles picks one file per component role", () => {
 
 test("renderFilePicker checks the representative files by default", () => {
     const html = renderFilePicker(checkpointFiles, "flux1-dev-fp8.safetensors");
-    assert.match(html, /Download selected \(4\)/);
     assert.match(html, /Required components/);
     assert.match(html, /TEXT ENCODER/);
     assert.match(html, /t5xxl_fp16\.safetensors/);
     assert.match(html, /9 MB/);
     assert.match(html, /ae\.safetensors/);
     assert.match(html, /Clear selection/);
+    // The download action lives on the main button, not in the picker head.
+    assert.doesNotMatch(html, /data-action="download-selected-files"/);
+});
+
+test("selectionSummary totals the ticked files", () => {
+    const all = selectionSummary(checkpointFiles, checkpointFiles.map((file) => file.name));
+    assert.equal(all.count, 4);
+    assert.equal(all.totalBytes, (10240 + 9200 + 320 + 1) * 1024);
+    const mainOnly = selectionSummary(checkpointFiles, ["flux1-dev-fp8.safetensors"]);
+    assert.equal(mainOnly.count, 1);
+    assert.equal(mainOnly.totalBytes, 10240 * 1024);
+    const withoutComponents = selectionSummary(checkpointFiles, checkpointFiles.map((file) => file.name), {
+        includeComponents: false,
+    });
+    assert.equal(withoutComponents.count, 1);
+    assert.equal(withoutComponents.totalBytes, 10240 * 1024);
+    const none = selectionSummary(checkpointFiles, []);
+    assert.equal(none.count, 0);
+    assert.equal(none.totalBytes, 0);
 });
 
 test("renderFilePicker shows a checkbox and a target folder per file", () => {
@@ -84,7 +102,6 @@ test("renderFilePicker shows a checkbox and a target folder per file", () => {
             targetOptions,
         }),
     });
-    assert.match(html, /Download selected \(2\)/);
     assert.match(html, /data-file-check="flux1-dev-fp8\.safetensors" checked/);
     assert.match(html, /data-file-check="ae\.safetensors" checked/);
     assert.doesNotMatch(html, /data-file-check="t5xxl_fp16\.safetensors" checked/);
@@ -95,8 +112,8 @@ test("renderFilePicker shows a checkbox and a target folder per file", () => {
 
 test("renderFilePicker honours an emptied selection", () => {
     const html = renderFilePicker(checkpointFiles, "flux1-dev-fp8.safetensors", { checkedNames: [] });
-    assert.match(html, /Download selected \(0\)/);
-    assert.match(html, /data-action="download-selected-files" disabled/);
+    assert.match(html, /Select all/);
+    assert.doesNotMatch(html, /Clear selection/);
     assert.doesNotMatch(html, /data-file-check="[^"]+" checked/);
 });
 
@@ -106,7 +123,6 @@ test("renderFilePicker counts only the rendered files", () => {
         checkedNames: checkpointFiles.map((file) => file.name),
         rowFor: () => ({ rootKind: "loras", targetOptions: [{ value: "loras", label: "LoRAs" }] }),
     });
-    assert.match(html, /Download selected \(1\)/);
     assert.match(html, /Clear selection/);
     assert.doesNotMatch(html, /Required components/);
 });
@@ -114,6 +130,6 @@ test("renderFilePicker counts only the rendered files", () => {
 test("renderFilePicker labels a VAE upload as the main file", () => {
     const html = renderFilePicker([{ name: "kl-f8-anime2.safetensors", type: "VAE", sizeKB: 320 }], "");
     assert.match(html, /Main file/);
+    assert.match(html, /Clear selection/);
     assert.doesNotMatch(html, /Required components/);
-    assert.match(html, /Download selected \(1\)/);
 });

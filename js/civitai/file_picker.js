@@ -94,6 +94,25 @@ export function representativeFiles(files, selectedName, { includeComponents = t
     return picks.filter(Boolean);
 }
 
+/**
+ * The files a bulk download would queue, with their combined size. The main
+ * download button uses this so its size always matches the ticked files.
+ */
+export function selectionSummary(files, checkedNames, { includeComponents = true } = {}) {
+    const list = (Array.isArray(files) ? files : []).filter(Boolean);
+    const { main, components } = groupVersionFiles(list, { includeComponents });
+    const rendered = includeComponents
+        ? [...main, ...COMPONENT_ORDER.flatMap((role) => components.get(role) || [])]
+        : main;
+    const checked = new Set((Array.isArray(checkedNames) ? checkedNames : []).map(String));
+    const picked = rendered.filter((file) => checked.has(fileKey(file)));
+    return {
+        files: picked,
+        count: picked.length,
+        totalBytes: picked.reduce((sum, file) => sum + Number(file.sizeKB || 0) * 1024, 0),
+    };
+}
+
 function fileMeta(file) {
     const metadata = file?.metadata || {};
     const format = String(metadata.format || "").trim();
@@ -186,11 +205,10 @@ export function renderFilePicker(files, selectedName, options = {}) {
             <div class="cmgr-file-picker-head">
                 <div>
                     <div class="cmgr-label">${selectorIcon("file")}${escapeHtml(t("Files"))}</div>
-                    <p>${escapeHtml(t("Click a file to select it for the bulk download, then adjust each target folder if needed."))}</p>
+                    <p>${escapeHtml(t("Click a file to include it in the download, then adjust each target folder if needed."))}</p>
                 </div>
                 <div class="cmgr-file-picker-actions">
                     <button class="cmgr-selector-button cmgr-file-select-all" type="button" data-action="select-all-files">${escapeHtml(renderedFiles.length && checkedCount === renderedFiles.length ? t("Clear selection") : t("Select all"))}</button>
-                    <button class="cmgr-selector-button cmgr-file-download-selected" type="button" data-action="download-selected-files" ${checkedCount ? "" : "disabled"}>${escapeHtml(t("Download selected ({count})", { count: checkedCount }))}</button>
                 </div>
             </div>
             ${main.length ? renderGroup(mainRole, main, selectedName, { ...rowOptions, title: t("Main file") }) : ""}
