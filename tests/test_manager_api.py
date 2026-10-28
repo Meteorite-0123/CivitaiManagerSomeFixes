@@ -150,6 +150,172 @@ class ImageFeedTests(unittest.TestCase):
         self.assertEqual([item["kind"] for item in card["resources"]], ["checkpoint", "lora"])
         self.assertEqual(card["resources"][1]["weight"], 0.7)
 
+    def test_feed_requests_the_generation_metadata_that_carries_weights(self):
+        params = manager._images_query_params(
+            "", "", "Most Reactions", 40, "AllTime", "", {"allow_nsfw": True},
+        )
+        self.assertEqual(params["withMeta"], "true")
+
+    def test_weights_come_from_civitai_resources_when_the_free_form_list_is_empty(self):
+        image = self._image(
+            resources=[],
+            meta={
+                "prompt": "a cat",
+                "resources": [],
+                "civitaiResources": [
+                    {"type": "checkpoint", "modelVersionId": 691639},
+                    {"type": "lora", "weight": 0.3, "modelVersionId": 1527024, "modelVersionName": "Cinematic 1940s"},
+                    {"type": "lora", "weight": 0.2, "modelVersionId": 1526912, "modelVersionName": "Cinematic Octane"},
+                ],
+            },
+            modelVersionIds=[691639, 1527024, 1526912],
+        )
+        resources = manager._image_resources(image)
+        self.assertEqual([item["kind"] for item in resources], ["checkpoint", "lora", "lora"])
+        self.assertEqual([item["weight"] for item in resources], [None, 0.3, 0.2])
+        self.assertEqual(resources[1]["version_name"], "Cinematic 1940s")
+
+    def test_a_version_listed_twice_across_the_two_lists_is_kept_once(self):
+        image = self._image(
+            meta={
+                "civitaiResources": [
+                    {"type": "lora", "weight": 0.8, "modelVersionId": 40},
+                ],
+            },
+        )
+        resources = manager._image_resources(image)
+        versions = [item["version_id"] for item in resources]
+        self.assertEqual(versions.count("40"), 1)
+        lora = next(item for item in resources if item["version_id"] == "40")
+        self.assertEqual(lora["weight"], 0.8)
+
+    def test_nested_meta_from_single_image_lookup_is_unwrapped(self):
+        # `?imageId=` returns {"id": ..., "meta": {...}} while the feed is flat.
+        nested = {
+            "id": 900,
+            "meta": {
+                "prompt": "a cat",
+                "civitaiResources": [
+                    {"type": "checkpoint", "modelVersionId": 20, "modelVersionName": "Dev"},
+                    {"type": "lora", "weight": 0.3, "modelVersionId": 1527024, "modelVersionName": "Cinematic 1940s"},
+                    {"type": "lora", "weight": 0.2, "modelVersionId": 1526912, "modelVersionName": "Cinematic Octane"},
+                ],
+            },
+        }
+        card = manager._image_feed_card(self._image(meta=nested, resources=None))
+        self.assertEqual(card["prompt"], "a cat")
+        self.assertEqual([item["kind"] for item in card["resources"]], ["checkpoint", "lora", "lora"])
+        self.assertIsNone(card["resources"][0]["weight"])
+        self.assertEqual([item["weight"] for item in card["resources"][1:]], [0.3, 0.2])
+        self.assertEqual(card["resources"][1]["version_name"], "Cinematic 1940s")
+
+    def test_prompt_tags_supply_missing_loras_and_weights(self):
+        # A1111 images keep the whole stack in the prompt; civitaiResources may
+        # list only some of them, or none at all.
+        image = self._image(
+            resources=None,
+            meta={
+                "prompt": "a cat <lora:Cinematic 1940s:0.35> and <lora:add_detail:0.8> <lora:Extra:1.2>",
+                "civitaiResources": [
+                    {"type": "checkpoint", "modelVersionId": 20, "modelVersionName": "Dev"},
+                    {"type": "lora", "modelVersionId": 1527024, "modelVersionName": "Cinematic 1940s"},
+                ],
+            },
+        )
+        card = manager._image_feed_card(image)
+        loras = [(item["name"] or item["version_name"], item["weight"]) for item in card["resources"] if item["kind"] == "lora"]
+        self.assertEqual(loras[0], ("Cinematic 1940s", 0.35))
+        self.assertIn(("add_detail", 0.8), loras)
+        self.assertIn(("Extra", 1.2), loras)
+        self.assertEqual(len([item for item in card["resources"] if item["kind"] == "lora"]), 3)
+        self.assertTrue(any(item.get("from_prompt") for item in card["resources"]))
+
+    def test_prompt_tags_do_not_override_civitai_weight(self):
+        image = self._image(
+            resources=None,
+            meta={
+                "prompt": "<lora:Style:0.1>",
+                "civitaiResources": [{"type": "lora", "weight": 0.7, "modelVersionId": 40, "modelVersionName": "Style"}],
+            },
+        )
+        card = manager._image_feed_card(image)
+        self.assertEqual(len(card["resources"]), 1)
+        self.assertEqual(card["resources"][0]["weight"], 0.7)
+
+    def test_prompt_only_lora_is_looked_up_by_name(self):
+        model = {
+            "id": 500,
+            "name": "Krea 2 Flat Illustration/Anime Style",
+            "type": "LORA",
+            "modelVersions": [
+                {"id": 700, "name": "v2.0", "baseModel": "Krea 2", "files": [{"id": 1, "name": "flat_v2.safetensors"}]},
+                {"id": 800, "name": "v1.0", "baseModel": "Krea 2", "files": [{"id": 2, "name": "flat_v1.safetensors"}]},
+            ],
+        }
+        with mock.patch.object(manager, "_read_json_url_with_retries", return_value={"items": [model]}) as fetch:
+            entry = manager._resolve_image_resources(
+                [{"kind": "lora", "name": "Flat_anime_Krea_@", "weight": 0.5, "version_id": "", "model_id": ""}],
+                {"civitai_api_key": ""},
+            )[0]
+        self.assertEqual(entry["error"], "")
+        self.assertEqual(entry["weight"], 0.5)
+        self.assertEqual(entry["model_id"], "500")
+        self.assertTrue(entry["version_id"])
+        self.assertIn("/models?", fetch.call_args[0][0])
+
+    def test_prompt_only_lora_keeps_the_matching_version(self):
+        model = {
+            "id": 600,
+            "name": "BArtstyle | Blue Archive Art Style",
+            "type": "LORA",
+            "modelVersions": [
+                {"id": 901, "name": "Krea2-V2", "files": [{"id": 1, "name": "krea2_v2.safetensors"}]},
+                {"id": 902, "name": "REv3-LoRA-CounterFeitV3", "files": [{"id": 2, "name": "rev3.safetensors"}]},
+            ],
+        }
+        with mock.patch.object(manager, "_read_json_url_with_retries", return_value={"items": [model]}):
+            payload = manager._lookup_prompt_lora("BArtstyle-KREA2-V2-1024", {"allow_nsfw": False}, None)
+        self.assertEqual(payload["id"], 901)
+        self.assertEqual(payload["model"]["id"], 600)
+
+    def test_prompt_lora_lookup_rejects_unrelated_names(self):
+        model = {"id": 1, "name": "Something Else Entirely", "type": "LORA", "modelVersions": [{"id": 2, "name": "v1.0"}]}
+        with mock.patch.object(manager, "_read_json_url_with_retries", return_value={"items": [model]}):
+            self.assertIsNone(manager._lookup_prompt_lora("unrelated zzz", {"allow_nsfw": False}, None))
+
+    def test_model_version_ids_are_merged_even_when_resources_exist(self):
+        # Civitai sometimes lists only the checkpoint in `resources` while the
+        # picture actually used seven versions.
+        image = self._image(
+            resources=[{"type": "checkpoint", "modelId": 10, "modelVersionId": 20, "modelName": "Base"}],
+            modelVersionIds=[20, 30, 31, 32, 33, 34, 35],
+            meta={"prompt": "a cat", "resources": []},
+        )
+        card = manager._image_feed_card(image)
+        self.assertEqual(len(card["resources"]), 7)
+        self.assertEqual({item["version_id"] for item in card["resources"]}, {"20", "30", "31", "32", "33", "34", "35"})
+
+    def test_merge_folds_prompt_weights_into_version_rows(self):
+        resolved = [
+            {"version_id": "1", "name": "Base", "kind": "checkpoint", "weight": None},
+            {"version_id": "2", "name": "Purple Graphics || Poster lora", "version_name": "v1.0 Krea 2", "kind": "lora", "weight": None},
+            {"version_id": "3", "name": "Purple Grainy || Photography lora", "version_name": "v2.0 Krea 2", "kind": "lora", "weight": None},
+            {"version_id": "", "name": "Purple_Graphics_KR2", "kind": "lora", "weight": 1.0, "from_prompt": True},
+            {"version_id": "", "name": "Purple_Grainy_KR2_V2_D", "kind": "lora", "weight": 0.65, "from_prompt": True},
+            {"version_id": "", "name": "Unrelated-Thing-XYZ", "kind": "lora", "weight": 0.4, "from_prompt": True},
+        ]
+        merged = manager._merge_resolved_resources(resolved)
+        self.assertEqual(len(merged), 3)
+        self.assertEqual([row["weight"] for row in merged], [None, 1.0, 0.65])
+
+    def test_merge_keeps_prompt_rows_when_no_ids_exist(self):
+        resolved = [
+            {"version_id": "", "name": "Some_LoRA", "kind": "lora", "weight": 0.4, "from_prompt": True},
+        ]
+        merged = manager._merge_resolved_resources(resolved)
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0]["weight"], 0.4)
+
     def test_resource_kinds_map_to_asset_kinds(self):
         self.assertEqual(manager._image_resource_kind("Checkpoint"), "checkpoint")
         self.assertEqual(manager._image_resource_kind("LoCon"), "lora")

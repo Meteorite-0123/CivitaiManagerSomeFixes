@@ -42,11 +42,11 @@ const context = {
 
 vm.createContext(context);
 const images = vm.runInContext(
-    `(() => { ${source}\n return { IMAGE_SORTS, imageState, imageResourceKeys, checkedImageFiles, imageMedia, renderImageDiscover, renderImageFilters, renderImageSort, renderImageDetailAside, imageFileTargetKey, setImageTargets, parseImageLink, imagePeriodValue, loadImageFeed }; })()`,
+    `(() => { ${source}\n return { IMAGE_SORTS, imageResourceWeight, imageWeightsFromText, loraWeightsFromText, imageState, imageResourceKeys, checkedImageFiles, imageMedia, renderImageDiscover, renderImageFilters, renderImageSort, renderImageDetailAside, imageFileTargetKey, setImageTargets, parseImageLink, imagePeriodValue, loadImageFeed }; })()`,
     context,
 );
 
-const { IMAGE_SORTS, imageState, imageResourceKeys, checkedImageFiles, imageMedia, renderImageDiscover, renderImageFilters, renderImageSort, renderImageDetailAside, imageFileTargetKey, setImageTargets, parseImageLink, imagePeriodValue, loadImageFeed } = images;
+const { IMAGE_SORTS, imageResourceWeight, imageWeightsFromText, loraWeightsFromText, imageState, imageResourceKeys, checkedImageFiles, imageMedia, renderImageDiscover, renderImageFilters, renderImageSort, renderImageDetailAside, imageFileTargetKey, setImageTargets, parseImageLink, imagePeriodValue, loadImageFeed } = images;
 
 function resource(files) {
     return { kind: "lora", model: { id: 1, modelVersions: [{ id: 2, files }] } };
@@ -111,6 +111,33 @@ test("detail panel lists resources with ticked files and a bulk button", () => {
     imageState.checked = [];
 });
 
+test("the loras of an image share one card instead of one card each", () => {
+    const entry = (name, kind) => ({
+        kind,
+        name,
+        model: { id: name.length, modelVersions: [{ name: "v1", files: [{ name: `${name}.safetensors`, sizeKB: 10 }] }] },
+    });
+    imageState.selectedImage = { id: 5, url: "https://example.com/a.jpg", username: "bob" };
+    imageState.loadingResources = false;
+    imageState.resourceError = "";
+    imageState.checked = [];
+    imageState.resources = [
+        entry("LoraA", "lora"),
+        entry("LoraB", "lora"),
+        entry("Checkpoint", "checkpoint"),
+        entry("LoraC", "lora"),
+    ];
+    const html = renderImageDetailAside();
+    assert.equal((html.match(/data-image-resource-kind=/g) || []).length, 2);
+    const loraCard = html.split('data-image-resource-kind="lora"')[1].split("</details>")[0];
+    assert.equal((loraCard.match(/data-image-resource=/g) || []).length, 3);
+    assert.ok(html.indexOf('data-image-resource-kind="checkpoint"') < html.indexOf('data-image-resource-kind="lora"'));
+    // The checkpoint card is folded until clicked; the LoRA card is open.
+    assert.ok(!html.split('data-image-resource-kind="checkpoint"')[1].split(">")[0].includes("open"));
+    assert.ok(html.split('data-image-resource-kind="lora"')[1].split(">")[0].includes("open"));
+    imageState.resources = [];
+});
+
 test("each file defaults to the folder of its resource kind", () => {
     imageState.overrides = {};
     assert.equal(imageFileTargetKey({ kind: "lora" }, 0, { name: "a" }), "loras");
@@ -160,6 +187,40 @@ test("the feed request carries the base model and period filters", async () => {
     imageState.period = "AllTime";
     imageState.baseModel = "";
     imageState.sort = "Newest";
+});
+
+test("lora weights are read from air syntax and from json generation data", () => {
+    const air = loraWeightsFromText("a cat <lora:Add-Detail XL:0.65> at night <lora:FilmGrain:0.3>");
+    assert.equal(air.get("add detail xl"), 0.65);
+    assert.equal(air.get("filmgrain"), 0.3);
+
+    const json = loraWeightsFromText(JSON.stringify({ resources: [{ name: "Film Grain", weight: 0.45, type: "lora" }] }));
+    assert.equal(json.get("film grain"), 0.45);
+    assert.equal(loraWeightsFromText("no metadata here").size, 0);
+});
+
+test("a resource weight is rounded and defaults when the api omits it", () => {
+    assert.equal(imageResourceWeight({ weight: 0.654 }), 0.65);
+    assert.equal(imageResourceWeight({ weight: 0.3 }), 0.3);
+    assert.equal(imageResourceWeight({}), 1);
+    // Civitai sends `weight: null` for resources without one; Number(null) is 0.
+    assert.equal(imageResourceWeight({ weight: null }), 1);
+    assert.equal(imageResourceWeight({ weight: null }, 0.5), 0.5);
+    assert.equal(imageResourceWeight({ weight: "" }), 1);
+    assert.equal(imageResourceWeight({ weight: "0.35" }), 0.35);
+    assert.equal(imageResourceWeight({ weight: 0 }), 0);
+    assert.equal(imageResourceWeight({}, 0.5), 0.5);
+});
+
+test("pasted weights land on the matching lora resources only", () => {
+    const resources = [
+        { kind: "lora", name: "Add Detail XL", model: { modelVersions: [{ name: "v1" }] } },
+        { kind: "checkpoint", name: "Krea 2 Turbo", model: { modelVersions: [{ name: "v1" }] } },
+        { kind: "lora", name: "Film Grain", model: { modelVersions: [{ name: "v1" }] } },
+    ];
+    const weights = imageWeightsFromText("<lora:Add-Detail XL:0.6> <lora:FilmGrain.safetensors:0.25>", resources);
+    assert.equal(JSON.stringify(weights), JSON.stringify({ 0: 0.6, 2: 0.25 }));
+    assert.equal(JSON.stringify(imageWeightsFromText("nothing", resources)), "{}");
 });
 
 test("the sort menu offers exactly the five orders the image api accepts", () => {

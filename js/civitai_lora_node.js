@@ -57,6 +57,18 @@ import {
 } from "./civitai/favorites.js";
 import { t } from "./civitai/i18n.js";
 import {
+    IMAGE_PERIODS,
+    IMAGE_SORTS,
+    groupImageResources,
+    imageMedia,
+    imagePeriodValue,
+    imageResourceFiles,
+    imageResourceWeight,
+    imageWeightsFromText,
+    resourceWeightValue,
+    parseImageLink,
+} from "./civitai/images.js";
+import {
     createPreviewMedia,
     findModelPreviewSource,
     isModelPreviewFiltered,
@@ -98,6 +110,27 @@ let localMetadataBatch = {
 const popup = {
     node: null,
     tab: "discover",
+    // Images tab: its own feed so browsing pictures never disturbs LoRA search.
+    images: {
+        items: [],
+        cursor: "",
+        nextCursor: "",
+        query: "",
+        sort: "Most Reactions",
+        period: "AllTime",
+        baseModel: "",
+        loading: false,
+        error: "",
+        selectedId: "",
+        selectedImage: null,
+        resources: [],
+        loadingResources: false,
+        resourceError: "",
+        // Weights the user types in, keyed by resource index. Civitai's public
+        // image API hides generation data, so the value starts at 1.
+        weights: {},
+        applying: "",
+    },
     discoverQuery: "",
     localQuery: "",
     sort: "Highest Rated",
@@ -133,6 +166,7 @@ const popup = {
     scroll: {
         nav: 0,
         discover: 0,
+        images: 0,
         local: 0,
         favorites: 0,
         applied: 0,
@@ -364,7 +398,7 @@ function addLoraToNode(entry) {
     addLoraToTargetNode(popup.node, entry, true);
 }
 
-function addLoraToTargetNode(node, entry, notify = false) {
+function addLoraToTargetNode(node, entry, notify = false, options = {}) {
     if (!node) return;
     const normalized = normalizeLoraEntry(entry);
     if (!normalized) return;
@@ -374,7 +408,11 @@ function addLoraToTargetNode(node, entry, notify = false) {
         next[existingIndex] = {
             ...next[existingIndex],
             ...normalized,
-            strength_model: next[existingIndex].strength_model,
+            // Re-applying a LoRA keeps the strength the user set here, unless the
+            // caller brings a weight of its own (an image's LoRA value).
+            strength_model: options.keepStrength === false
+                ? normalized.strength_model
+                : next[existingIndex].strength_model,
             enabled: true,
         };
         if (notify) showToast(t("LoRA already applied; it has been enabled."));
@@ -714,6 +752,7 @@ function renderNav() {
     overlay.querySelector(".cmgr-selector-node-status").innerHTML = `${selectorIcon("layers")}<span>${escapeHtml(t("Applied to Node"))}</span><b>${navCount("applied")}</b>`;
     const items = [
         ["discover", "Discover"],
+        ["images", "Images"],
         ["local", "Local LoRAs"],
         ["favorites", "Favorites"],
         ["applied", "Applied"],
@@ -733,11 +772,14 @@ function renderNav() {
         const badge = button.querySelector("b");
         if (badge) badge.textContent = navCount(button.dataset.loraTab);
     });
-    const hasFilters = ["discover", "local", "favorites"].includes(popup.tab);
+    const hasFilters = ["discover", "local", "favorites", "images"].includes(popup.tab);
     overlay.querySelector(".cmgr-lora-layout").classList.toggle("has-filters", hasFilters);
     overlay.querySelector('[data-action="toggle-lora-filters"]').hidden = !hasFilters;
     popupBody.setAttribute("aria-labelledby", `cmgr-lora-tab-${popup.tab}`);
     setLoraFiltersOpen(popup.filtersOpen);
+    if (popup.tab === "images") {
+        renderImageNav(nav);
+    } else {
     nav.innerHTML = `
         <div class="cmgr-lora-filter-heading cmgr-selector-filter-heading">
             <h2>${escapeHtml(t(popup.tab === "favorites" ? "Favorites" : "Adjust filters"))}</h2>
@@ -792,6 +834,7 @@ function renderNav() {
         ${popup.tab === "local" ? renderLocalFolderSidebar() : ""}
         ${popup.tab === "favorites" ? renderLoraFavoriteSidebar() : ""}
     `;
+    }
     tabs.querySelectorAll("[data-lora-tab]").forEach((button, index, buttons) => {
         button.onclick = () => {
             switchTab(button.dataset.loraTab);
@@ -1029,6 +1072,13 @@ function switchTab(tab) {
     popup.error = "";
     if (tab === "favorites") void loadFavorites(true);
     renderPopup();
+    if (tab === "images") void (async () => {
+        // The library decides whether a LoRA can be applied right away or has to
+        // be downloaded first, so it has to be in hand before the panel renders.
+        if (!popup.libraryItems.length) await loadLibrary(false);
+        if (!popup.images.items.length) await loadNodeImageFeed(true);
+        else if (popup.tab === "images") renderPopup();
+    })();
     if (tab === "local" && !popup.libraryItems.length) void loadLibrary(false);
     if (tab === "downloads") void loadDownloads(true);
 }
@@ -1157,6 +1207,8 @@ function renderPopup(options = {}) {
         ? renderLocal()
         : popup.tab === "favorites"
             ? renderFavorites()
+        : popup.tab === "images"
+            ? renderImages()
         : popup.tab === "applied"
             ? renderApplied()
             : popup.tab === "downloads"
@@ -2733,8 +2785,11 @@ async function finishPendingApply(job, pending) {
         popup.error = t("Download completed, but the LoRA was not found in the refreshed local library.");
         return;
     }
+    const strength = Number(pending.strength);
     addLoraToTargetNode(pending.node || popup.node, {
         ...entryFromAsset(asset),
+        // An image's LoRA list carries a weight; keep it instead of 1.0.
+        ...(Number.isFinite(strength) ? { strength_model: strength } : {}),
         display_name: pending.displayName || asset.name,
         // Without a saved preview the local URL only serves a placeholder.
         preview_url: (asset.has_preview ? asset.thumb_url : pending.previewUrl || asset.thumb_url) || "",
@@ -2742,6 +2797,8 @@ async function finishPendingApply(job, pending) {
         base_model: asset.base_model || pending.baseModel || "",
     }, false);
     showToast(t("Download completed and LoRA applied."));
+    // The Images tab shows "Will download" until the file lands; repaint it.
+    if (popup.tab === "images" && overlay?.classList.contains("show")) renderPopup();
 }
 
 function hasActiveDownloads() {
@@ -2803,7 +2860,532 @@ async function clearFinishedDownloadRecords() {
     }
 }
 
+/* ------------------------------------------------------------------------- *
+ * Images tab
+ *
+ * Civitai's public image payload hides generation data, so the weights a
+ * picture was made with are not readable by any client. Every LoRA row gets a
+ * weight field instead, seeded from the resource when the API ever sends one,
+ * and the apply actions push that value into the multi LoRA loader node.
+ * ------------------------------------------------------------------------- */
+let imageQueryTimer = 0;
+
+const imagesTab = () => popup.images;
+
+function imageWeight(index) {
+    const state = imagesTab();
+    const typed = state.weights?.[String(index)];
+    if (typed !== undefined && String(typed).trim() !== "") {
+        const value = Number(typed);
+        if (Number.isFinite(value)) return Math.round(value * 100) / 100;
+    }
+    return imageResourceWeight(state.resources?.[index], 1);
+}
+
+function imageFilterChips() {
+    const state = imagesTab();
+    const chips = [];
+    if (state.baseModel) {
+        chips.push({ key: "image-base-model", label: t("Base Model"), value: state.baseModel, clearAction: "clear-image-base-model" });
+    }
+    if (state.period !== "AllTime") {
+        chips.push({
+            key: "image-period",
+            label: t("Period"),
+            value: t(IMAGE_PERIODS.find((item) => item.value === state.period)?.label || ""),
+            clearAction: "clear-image-period",
+        });
+    }
+    return renderActiveFilterChips(chips, "reset-image-filters");
+}
+
+function renderImageSortMenu() {
+    const current = IMAGE_SORTS.find((item) => item.value === imagesTab().sort) || IMAGE_SORTS[0];
+    return `
+        <details class="cmgr-selector-tools cmgr-selector-sort">
+            <summary aria-label="${escapeAttr(t("Sort"))}" aria-haspopup="menu"><span>${escapeHtml(t(current.label))}</span>${selectorIcon("chevron")}</summary>
+            <div class="cmgr-selector-menu" role="menu" aria-label="${escapeAttr(t("Sort"))}">
+                ${IMAGE_SORTS.map((item) => `<button type="button" role="menuitemradio" aria-checked="${imagesTab().sort === item.value}" data-image-sort="${escapeAttr(item.value)}">${escapeHtml(t(item.label))}</button>`).join("")}
+            </div>
+        </details>
+    `;
+}
+
+function renderImageResultCard(image, index) {
+    const selected = String(image.id) === String(imagesTab().selectedId);
+    const count = Array.isArray(image.resources) ? image.resources.length : 0;
+    const media = imageMedia(image, 450);
+    return `
+        <article class="cmgr-card cmgr-image-card ${selected ? "selected" : ""}" data-node-image-id="${escapeAttr(image.id)}" tabindex="0" role="button" aria-label="${escapeAttr(image.username || t("Civitai image"))}">
+            <div class="cmgr-thumb cmgr-image-thumb">
+                ${renderCardMedia(media, { eager: index < 8, priority: index < 4 ? "high" : "auto" })}
+                ${count ? `<span class="cmgr-image-resource-badge">${selectorIcon("layers")}<b>${count}</b></span>` : ""}
+            </div>
+            <div class="cmgr-card-body">
+                <div class="cmgr-card-title">${escapeHtml(image.username ? `@${image.username}` : t("Civitai image"))}</div>
+                <div class="cmgr-image-card-stats"><span>${selectorIcon("heart")}${escapeHtml(formatStatCount(image.stats?.likeCount || 0))}</span></div>
+            </div>
+        </article>
+    `;
+}
+
+function renderImageResults() {
+    const state = imagesTab();
+    if (!state.items.length) {
+        if (state.loading) return renderCardSkeletons(12);
+        return renderCollectionEmptyState({
+            kind: "discover",
+            kicker: t("Images"),
+            title: t("No images found"),
+            description: state.error || t("Search images or paste a Civitai image link"),
+            hints: [t("Change keywords")],
+        });
+    }
+    return state.items.map((image, index) => renderImageResultCard(image, index)).join("");
+}
+
+function renderImages() {
+    const state = imagesTab();
+    const toolbar = renderSelectorToolbar({
+        title: t("Images"),
+        searchHtml: renderSelectorSearch({
+            value: state.query,
+            inputAttrs: 'data-field="node-image-query"',
+            placeholder: t("Search images or paste a Civitai image link"),
+            clearAction: "clear-node-image-search",
+            loading: state.loading,
+        }),
+        actionsHtml: renderImageSortMenu(),
+        filterBarHtml: imageFilterChips(),
+    });
+    return `
+        <section class="cmgr-page cmgr-images">
+            ${toolbar}
+            <div class="cmgr-split has-detail ${state.selectedImage ? "is-detail-open" : ""}">
+                <div class="cmgr-results cmgr-image-results">${renderImageResults()}</div>
+                ${nodeImageDetailAside()}
+            </div>
+        </section>
+    `;
+}
+
+function loraResourcesOfImage() {
+    return imagesTab().resources
+        .map((resource, index) => ({ resource, index }))
+        .filter(({ resource }) => String(resource?.kind || "") === "lora" && resource?.model);
+}
+
+function imageLocalAsset(resource) {
+    const versionId = String(resource?.version_id || resource?.model?.modelVersions?.[0]?.id || "");
+    const modelId = String(resource?.model_id || resource?.model?.id || "");
+    return popup.libraryItems.find((item) => {
+        if (item.root_kind && item.root_kind !== "loras") return false;
+        if (versionId) return String(item.version_id || "") === versionId;
+        return modelId ? String(item.model_id || "") === modelId : false;
+    }) || null;
+}
+
+function imagePendingApply(resource) {
+    const versionId = String(resource?.version_id || resource?.model?.modelVersions?.[0]?.id || "");
+    if (!versionId) return null;
+    for (const [taskId, pending] of popup.pendingApply.entries()) {
+        if (String(pending.versionId || "") !== versionId) continue;
+        const job = popup.downloads[taskId];
+        if (job && ACTIVE_DOWNLOAD_STATUSES.has(job.status)) return { taskId, pending, job };
+    }
+    return null;
+}
+
+function renderImageModelRow(resource, index) {
+    const kind = String(resource?.kind || "");
+    const version = resource?.model?.modelVersions?.[0] || {};
+    const versionLabel = [version.name, version.baseModel].filter(Boolean).join(" · ");
+    const applicable = kind === "lora" && Boolean(resource?.model);
+    const asset = applicable ? imageLocalAsset(resource) : null;
+    const pending = applicable ? imagePendingApply(resource) : null;
+    const status = !applicable ? "" : asset ? t("In library") : pending ? t("Downloading...") : t("Will download");
+    return `
+        <div class="cmgr-image-resource-entry" data-node-image-model="${index}">
+            <div class="cmgr-image-resource-head">
+                <div>
+                    <b>${escapeHtml(resource?.name || versionLabel || t("Unknown model"))}</b>
+                    ${versionLabel ? `<small>${escapeHtml(versionLabel)}</small>` : ""}
+                </div>
+                ${applicable ? `
+                    <label class="cmgr-image-weight" title="${escapeAttr(t("Weight"))}">
+                        <input type="number" step="0.05" min="-4" max="4" value="${escapeAttr(String(imageWeight(index)))}" data-node-image-weight="${index}" aria-label="${escapeAttr(t("Weight"))}" />
+                        <span>×</span>
+                    </label>
+                ` : ""}
+            </div>
+            ${applicable ? `
+                <div class="cmgr-image-model-actions">
+                    <span class="cmgr-image-model-status">${escapeHtml(status)}</span>
+                    <button class="cmgr-secondary cmgr-mini-btn" type="button" data-node-image-apply="${index}" ${pending ? "disabled" : ""}>${escapeHtml(pending ? t("Downloading...") : asset ? t("Apply") : t("Download & apply"))}</button>
+                </div>
+            ` : !resource?.model ? `<p class="cmgr-nav-note">${escapeHtml(t("This model could not be loaded."))}</p>` : ""}
+        </div>
+    `;
+}
+
+function renderImageKindGroup(group) {
+    const countLabel = group.entries.length > 1 ? t("{count} models", { count: group.entries.length }) : "";
+    return `
+        <details class="cmgr-image-resource" data-node-image-kind="${escapeAttr(group.kind)}" ${group.kind === "checkpoint" ? "" : "open"}>
+            <summary class="cmgr-image-resource-head">
+                <span class="cmgr-image-resource-kind">${escapeHtml(group.label)}</span>
+                ${countLabel ? `<b>${escapeHtml(countLabel)}</b>` : ""}
+                ${selectorIcon("chevron")}
+            </summary>
+            <div class="cmgr-image-resource-body">
+                ${group.entries.map(({ resource, index }) => renderImageModelRow(resource, index)).join("")}
+            </div>
+        </details>
+    `;
+}
+
+function renderNodeImageDetail() {
+    const state = imagesTab();
+    const image = state.selectedImage;
+    if (!image) {
+        return `
+            <div class="cmgr-detail-scroll cmgr-empty-detail-scroll">
+                <div class="cmgr-empty-detail">
+                    <div class="cmgr-empty-detail-copy">
+                        <span class="cmgr-empty-detail-kicker">${escapeHtml(t("Details"))}</span>
+                        <h2>${escapeHtml(t("Select an image"))}</h2>
+                        <p>${escapeHtml(t("Pick a picture to apply the LoRAs it was made with to this node."))}</p>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+    return `
+        <div class="cmgr-detail-scroll cmgr-image-detail">
+            ${renderDetailGallery(galleryItemsForUrl(image.url, { preferLegacy: true }), image.username || t("Civitai image"), t("No Preview"))}
+            <div class="cmgr-detail-head">
+                <div>
+                    <a class="cmgr-detail-title-link" href="https://civitai.com/images/${encodeURIComponent(image.id || "")}" target="_blank" rel="noopener noreferrer">
+                        <h2>${escapeHtml(image.username ? `@${image.username}` : t("Civitai image"))}</h2>
+                        <span class="cmgr-external-icon" aria-hidden="true">↗</span>
+                    </a>
+                    <div class="cmgr-detail-meta">
+                        ${image.baseModel ? `<span>${escapeHtml(image.baseModel)}</span>` : ""}
+                        <span>${escapeHtml(t("{count} likes", { count: formatStatCount(image.stats?.likeCount || 0) }))}</span>
+                    </div>
+                </div>
+            </div>
+            ${image.prompt ? `
+                <section class="cmgr-selector-section" data-section="prompt" open>
+                    <div class="cmgr-section-head"><div class="cmgr-section-title">${selectorIcon("file")}${escapeHtml(t("Prompt"))}</div></div>
+                    <div class="cmgr-selector-section-body"><p class="cmgr-image-prompt">${escapeHtml(image.prompt)}</p></div>
+                </section>
+            ` : ""}
+            <section class="cmgr-detail-download-card cmgr-image-resources">
+                <div class="cmgr-section-head">
+                    <div class="cmgr-section-title">${selectorIcon("layers")}${escapeHtml(t("Models in this image"))}</div>
+                    ${loraResourcesOfImage().length ? `
+                        <div class="cmgr-image-apply-actions">
+                            <button class="cmgr-selector-button" type="button" data-action="paste-image-weights">${escapeHtml(t("Paste weights"))}</button>
+                            ${loraResourcesOfImage().length > 1 ? `<button class="cmgr-selector-button" type="button" data-action="apply-all-image-loras">${escapeHtml(t("Apply all"))}</button>` : ""}
+                        </div>
+                    ` : ""}
+                </div>
+                ${loraResourcesOfImage().some(({ resource }) => resourceWeightValue(resource) === null)
+                    ? `<p class="cmgr-nav-note">${escapeHtml(t("This image does not share every LoRA weight; paste its prompt to fill the rest."))}</p>`
+                    : ""}
+                ${state.loadingResources ? `<p class="cmgr-nav-note">${escapeHtml(t("Loading models..."))}</p>` : ""}
+                ${state.resourceError ? `<p class="cmgr-nav-note">${escapeHtml(state.resourceError)}</p>` : ""}
+                ${!state.loadingResources && !state.resources.length && !state.resourceError ? `<p class="cmgr-nav-note">${escapeHtml(t("This image has no linked models."))}</p>` : ""}
+                ${groupImageResources(state.resources).map((group) => renderImageKindGroup(group)).join("")}
+            </section>
+        </div>
+    `;
+}
+
+function nodeImageDetailAside() {
+    return `<aside class="cmgr-detail cmgr-lora-detail cmgr-image-detail" data-detail-subject="image:${escapeAttr(imagesTab().selectedId || "")}">${renderDetailDismiss()}${renderNodeImageDetail()}</aside>`;
+}
+
+function imageFeedParams() {
+    const state = imagesTab();
+    const params = new URLSearchParams({ query: state.query, sort: state.sort, period: state.period, limit: "40" });
+    if (state.baseModel) params.set("base_model", state.baseModel);
+    if (state.nextCursor) params.set("cursor", state.nextCursor);
+    return params;
+}
+
+async function loadNodeImageFeed(reset = true) {
+    const state = imagesTab();
+    if (!reset && (!state.nextCursor || state.loading)) return;
+    state.loading = true;
+    state.error = "";
+    if (reset) state.nextCursor = "";
+    if (overlay?.classList.contains("show") && popup.tab === "images") renderPopup({ preserveScroll: !reset });
+    try {
+        const data = await apiGet(`/images?${imageFeedParams().toString()}`);
+        const items = Array.isArray(data?.items) ? data.items : [];
+        const seen = new Set(reset ? [] : state.items.map((item) => String(item.id)));
+        state.items = reset ? items : [...state.items, ...items.filter((item) => !seen.has(String(item.id)))];
+        state.nextCursor = String(data?.metadata?.nextCursor || "");
+        if (data?.error) state.error = String(data.error);
+    } catch (error) {
+        state.error = error.message;
+    }
+    state.loading = false;
+    if (overlay?.classList.contains("show") && popup.tab === "images") renderPopup({ preserveScroll: !reset });
+}
+
+async function selectNodeImage(image) {
+    const state = imagesTab();
+    if (!image || !image.id) return;
+    state.selectedId = String(image.id);
+    state.selectedImage = image.url ? image : { id: String(image.id), url: "" };
+    state.resources = [];
+    state.resourceError = "";
+    state.weights = {};
+    state.loadingResources = true;
+    openDetailDrawer();
+    renderPopup({ preserveScroll: false });
+    try {
+        const detail = await apiGet(`/image-detail?id=${encodeURIComponent(image.id)}`);
+        if (detail?.image) {
+            state.selectedImage = detail.image;
+            state.selectedId = String(detail.image.id || image.id);
+        }
+        const resources = Array.isArray(state.selectedImage?.resources) ? state.selectedImage.resources : [];
+        if (resources.length) {
+            const resolved = await apiPost("/image-resolve", { resources });
+            state.resources = Array.isArray(resolved?.resources) ? resolved.resources : [];
+            // Civitai records the weight of each LoRA; seed the fields with it so
+            // "apply" uses the picture's own values unless the user edits them.
+            state.weights = {};
+            state.resources.forEach((resource, index) => {
+                if (String(resource?.kind || "") !== "lora") return;
+                const weight = resourceWeightValue(resource);
+                if (weight !== null) state.weights[String(index)] = String(Math.round(weight * 100) / 100);
+            });
+        }
+    } catch (error) {
+        state.resourceError = error.message;
+    }
+    state.loadingResources = false;
+    renderPopup();
+}
+
+async function applyImageLora(resource, index, silent = false) {
+    const state = imagesTab();
+    if (!resource || String(resource?.kind || "") !== "lora" || !resource?.model) return;
+    const weight = imageWeight(index);
+    const asset = imageLocalAsset(resource);
+    if (asset) {
+        addLoraToTargetNode(popup.node, { ...entryFromAsset(asset), strength_model: weight }, true, { keepStrength: false });
+        return;
+    }
+    const version = resource.model?.modelVersions?.[0] || {};
+    const file = imageResourceFiles(resource)[0];
+    if (!version.id || !file) {
+        popup.error = t("This version has no downloadable file.");
+        updatePopupMessages();
+        return;
+    }
+    state.applying = String(index);
+    try {
+        const queued = await apiPost("/download", { kind: "lora", model: resource.model, version, file, overrides: {} });
+        popup.pendingApply.set(queued.task_id, {
+            node: popup.node,
+            modelId: resource.model.id,
+            versionId: version.id,
+            displayName: resource.name || resource.model.name,
+            previewUrl: rawPreview(resource.model, version),
+            trainedWords: Array.isArray(version.trainedWords) ? version.trainedWords : [],
+            baseModel: version.baseModel || "",
+            strength: weight,
+            resolution: queued.resolution || {},
+        });
+        popup.downloads[queued.task_id] = {
+            id: queued.task_id,
+            status: "pending",
+            progress: 0,
+            total: 0,
+            root_kind: "loras",
+            filename: file.name,
+        };
+        showToast(t("Download queued; it will be applied with weight {weight}.", { weight }));
+        startDownloadPolling();
+        updateDownloadNavCount();
+    } catch (error) {
+        popup.error = error.message;
+        updatePopupMessages();
+    } finally {
+        state.applying = "";
+    }
+    if (!silent && popup.tab === "images") renderPopup();
+}
+
+function promptImageWeights() {
+    const state = imagesTab();
+    const text = window.prompt(t("Paste the image prompt or its generation data to read the LoRA weights."), "");
+    if (!text) return;
+    const found = imageWeightsFromText(text, state.resources);
+    const keys = Object.keys(found);
+    if (!keys.length) {
+        showToast(t("No LoRA weight could be matched from that text."));
+        return;
+    }
+    keys.forEach((index) => { state.weights[String(index)] = String(found[index]); });
+    showToast(t("{count} weights filled from the pasted text.", { count: keys.length }));
+    renderPopup();
+}
+
+async function applyAllImageLoras() {
+    const entries = loraResourcesOfImage();
+    for (const { resource, index } of entries) {
+        await applyImageLora(resource, index, true);
+    }
+    if (entries.length && popup.tab === "images") renderPopup();
+}
+
+function renderImageNav(nav) {
+    const state = imagesTab();
+    nav.innerHTML = `
+        <div class="cmgr-lora-filter-heading cmgr-selector-filter-heading">
+            <h2>${escapeHtml(t("Adjust filters"))}</h2>
+            ${state.baseModel || state.period !== "AllTime" ? `<button class="cmgr-lora-reset cmgr-selector-reset" type="button" data-action="reset-node-image-filters">${escapeHtml(t("Reset filters"))}</button>` : ""}
+        </div>
+        <div class="cmgr-nav-group cmgr-category-group cmgr-lora-filter-group">
+            <div class="cmgr-nav-title">${escapeHtml(t("Base Model"))}</div>
+            <div class="cmgr-search-picker">
+                ${renderSelectorCombo({
+                    id: "node-image-base-model",
+                    value: state.baseModel,
+                    items: filterOptions(popup.taxonomy?.baseModels, state.baseModel),
+                    placeholder: t("All base models"),
+                    searchPlaceholder: t("Search base models..."),
+                    emptyText: t("No base models found"),
+                    clearTitle: t("Clear base model"),
+                })}
+            </div>
+        </div>
+        <div class="cmgr-nav-group cmgr-category-group cmgr-lora-filter-group">
+            <div class="cmgr-nav-title">${escapeHtml(t("Period"))}</div>
+            <div class="cmgr-search-picker">
+                ${renderSelectorCombo({
+                    id: "node-image-period",
+                    value: state.period === "AllTime" ? "" : t(IMAGE_PERIODS.find((item) => item.value === state.period)?.label || ""),
+                    items: IMAGE_PERIODS.slice(1).map((item) => t(item.label)),
+                    placeholder: t("All time"),
+                    searchPlaceholder: t("Search"),
+                    emptyText: t("No options found"),
+                    clearTitle: t("Clear"),
+                })}
+            </div>
+        </div>
+    `;
+    const reset = nav.querySelector('[data-action="reset-node-image-filters"]');
+    if (reset) reset.onclick = () => {
+        state.baseModel = "";
+        state.period = "AllTime";
+        void loadNodeImageFeed(true);
+    };
+    bindSearchCombo(nav.querySelector('[data-combo="node-image-base-model"]'), (value) => {
+        state.baseModel = value;
+        void loadNodeImageFeed(true);
+    });
+    bindSearchCombo(nav.querySelector('[data-combo="node-image-period"]'), (value) => {
+        state.period = imagePeriodValue(value);
+        void loadNodeImageFeed(true);
+    });
+    bindSelectorMenus(nav);
+}
+
+function bindImageTabEvents() {
+    if (popup.tab !== "images" || !popupBody) return;
+    const state = imagesTab();
+    const query = popupBody.querySelector('[data-field="node-image-query"]');
+    const clear = popupBody.querySelector('[data-action="clear-node-image-search"]');
+    if (query) {
+        query.oninput = () => {
+            state.query = query.value;
+            if (clear) clear.hidden = !state.query;
+            clearTimeout(imageQueryTimer);
+            imageQueryTimer = setTimeout(() => void loadNodeImageFeed(true), 350);
+        };
+        query.onkeydown = (event) => {
+            if (event.key !== "Enter") return;
+            clearTimeout(imageQueryTimer);
+            const id = parseImageLink(query.value);
+            if (id && /civitai\.(?:com|red)\//i.test(query.value)) {
+                event.preventDefault();
+                void selectNodeImage({ id });
+                return;
+            }
+            void loadNodeImageFeed(true);
+        };
+    }
+    if (clear) clear.onclick = () => {
+        state.query = "";
+        if (query) query.value = "";
+        clear.hidden = true;
+        void loadNodeImageFeed(true);
+    };
+    popupBody.querySelectorAll("[data-image-sort]").forEach((button) => {
+        button.onclick = () => {
+            state.sort = button.dataset.imageSort || "Most Reactions";
+            void loadNodeImageFeed(true);
+        };
+    });
+    popupBody.querySelectorAll("[data-node-image-id]").forEach((card) => {
+        card.onclick = () => {
+            const image = state.items.find((item) => String(item.id) === String(card.dataset.nodeImageId));
+            void selectNodeImage(image || { id: card.dataset.nodeImageId });
+        };
+        card.onkeydown = (event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            card.click();
+        };
+    });
+    popupBody.querySelectorAll("[data-node-image-weight]").forEach((input) => {
+        input.oninput = () => { state.weights[String(input.dataset.nodeImageWeight)] = input.value; };
+        input.onchange = () => {
+            const key = String(input.dataset.nodeImageWeight);
+            const value = Number(input.value);
+            state.weights[key] = Number.isFinite(value) ? Math.round(value * 100) / 100 : 1;
+            input.value = String(imageWeight(key));
+        };
+    });
+    popupBody.querySelectorAll("[data-node-image-apply]").forEach((button) => {
+        button.onclick = () => {
+            const index = Number(button.dataset.nodeImageApply);
+            void applyImageLora(state.resources[index], index);
+        };
+    });
+    const applyAll = popupBody.querySelector('[data-action="apply-all-image-loras"]');
+    if (applyAll) applyAll.onclick = () => void applyAllImageLoras();
+    const pasteWeights = popupBody.querySelector('[data-action="paste-image-weights"]');
+    if (pasteWeights) pasteWeights.onclick = () => promptImageWeights();
+    const clearBase = popupBody.querySelector('[data-action="clear-image-base-model"]');
+    if (clearBase) clearBase.onclick = () => {
+        state.baseModel = "";
+        void loadNodeImageFeed(true);
+    };
+    const clearPeriod = popupBody.querySelector('[data-action="clear-image-period"]');
+    if (clearPeriod) clearPeriod.onclick = () => {
+        state.period = "AllTime";
+        void loadNodeImageFeed(true);
+    };
+    const resetFilters = popupBody.querySelector('[data-action="reset-image-filters"]');
+    if (resetFilters) resetFilters.onclick = () => {
+        state.baseModel = "";
+        state.period = "AllTime";
+        void loadNodeImageFeed(true);
+    };
+    bindSelectorMenus(popupBody);
+}
+
 function bindPopupEvents() {
+    bindImageTabEvents();
     bindLocalFolderControls(popupBody);
     popupBody?.querySelectorAll("[data-favorite-key]").forEach((card) => {
         card.onclick = () => {

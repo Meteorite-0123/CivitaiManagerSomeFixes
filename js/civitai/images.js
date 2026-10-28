@@ -196,6 +196,23 @@ export async function resolveImageResources() {
     }
 }
 
+/**
+ * The raw weight a resource carries, or null when Civitai did not send one.
+ * `Number(null)` is 0, so the empty case has to be checked before converting.
+ */
+export function resourceWeightValue(resource) {
+    const raw = resource?.weight;
+    if (raw === null || raw === undefined || raw === "") return null;
+    const value = Number(raw);
+    return Number.isFinite(value) ? value : null;
+}
+
+/** The weight Civitai recorded for this resource, or the fallback when absent. */
+export function imageResourceWeight(resource, fallback = 1) {
+    const value = resourceWeightValue(resource);
+    return value === null ? fallback : Math.round(value * 100) / 100;
+}
+
 export function imageResourceFiles(resource) {
     const version = resource?.model?.modelVersions?.[0];
     return Array.isArray(version?.files) ? version.files : [];
@@ -203,6 +220,69 @@ export function imageResourceFiles(resource) {
 
 export function imageResourceKeys(resource, index) {
     return imageResourceFiles(resource).map((file) => `${index}::${fileKey(file)}`);
+}
+
+/**
+ * Reads LoRA weights out of Air syntax (`<lora:name:0.7>`) or a JSON metadata
+ * blob. Civitai's public image API returns `meta: null` for every picture, so a
+ * pasted prompt or "copy generation data" blob is the only way to learn the
+ * weights a picture was actually made with.
+ */
+export function loraWeightsFromText(text) {
+    const weights = new Map();
+    const body = String(text || "");
+    for (const match of body.matchAll(/<lora:\s*([^:>]+?)\s*:\s*(-?\d+(?:\.\d+)?)\s*>/gi)) {
+        weights.set(normalizeWeightName(match[1]), Number(match[2]));
+    }
+    if (!weights.size && body.trim().startsWith("{")) {
+        try {
+            const data = JSON.parse(body);
+            const resources = Array.isArray(data?.resources) ? data.resources : [];
+            resources.forEach((item) => {
+                const weight = resourceWeightValue(item);
+                const name = String(item?.name || item?.modelName || item?.model_name || item?.modelVersionName || "").trim();
+                if (name && weight !== null) weights.set(normalizeWeightName(name), weight);
+            });
+        } catch (_) {
+            // Not JSON; the Air pattern above is the only source.
+        }
+    }
+    return weights;
+}
+
+function normalizeWeightName(value) {
+    return String(value || "")
+        .toLowerCase()
+        .replace(/\.(safetensors|ckpt|pt|pth|bin|onnx)$/, "")
+        .replace(/[^a-z0-9]+/g, " ")
+        .trim();
+}
+
+/** Maps parsed weights onto the LoRA resources of one image, keyed by index. */
+export function imageWeightsFromText(text, resources) {
+    const found = loraWeightsFromText(text);
+    const result = {};
+    if (!found.size) return result;
+    (Array.isArray(resources) ? resources : []).forEach((resource, index) => {
+        if (String(resource?.kind || "") !== "lora") return;
+        const version = resource?.model?.modelVersions?.[0] || {};
+        const candidates = [resource?.name, version.name, resource?.model?.name, resource?.modelName]
+            .map(normalizeWeightName)
+            .filter(Boolean);
+        for (const [name, weight] of found) {
+            if (!name) continue;
+            // Prompts write "FilmGrain" where the model is called "Film Grain".
+            const flat = name.replace(/\s+/g, "");
+            if (candidates.some((candidate) => candidate === name
+                || candidate.includes(name)
+                || name.includes(candidate)
+                || candidate.replace(/\s+/g, "") === flat)) {
+                result[index] = weight;
+                break;
+            }
+        }
+    });
+    return result;
 }
 
 export function imageFileTargetKey(resource, index, file) {
@@ -419,22 +499,60 @@ function resourceFileRow(resource, resourceIndex, file, checked) {
     `;
 }
 
-function renderResourceCard(resource, index) {
+// Kinds an image can use, in the order they are shown. Anything else keeps
+// its own group at the end so no model can silently disappear.
+const RESOURCE_GROUP_ORDER = [
+    { kind: "checkpoint", label: "Checkpoint/UNet" },
+    { kind: "lora", label: "LoRA" },
+    { kind: "workflow", label: "Workflow" },
+];
+
+function resourceKindLabel(kind) {
+    const known = RESOURCE_GROUP_ORDER.find((group) => group.kind === kind);
+    if (known) return t(known.label);
+    return kind ? t(kind) : t("Resource");
+}
+
+/**
+ * One group per kind. An image usually uses a checkpoint plus several LoRAs,
+ * and giving every LoRA its own card pushed the rest of the list out of sight;
+ * they belong together under a single heading.
+ */
+export function groupImageResources(resources) {
+    const groups = [];
+    const byKind = new Map();
+    (Array.isArray(resources) ? resources : []).forEach((resource, index) => {
+        const kind = String(resource?.kind || "");
+        let group = byKind.get(kind);
+        if (!group) {
+            group = { kind, label: resourceKindLabel(kind), entries: [] };
+            byKind.set(kind, group);
+            groups.push(group);
+        }
+        group.entries.push({ resource, index });
+    });
+    const rank = (kind) => {
+        const position = RESOURCE_GROUP_ORDER.findIndex((group) => group.kind === kind);
+        return position < 0 ? RESOURCE_GROUP_ORDER.length : position;
+    };
+    groups.sort((left, right) => rank(left.kind) - rank(right.kind));
+    return groups;
+}
+
+function renderResourceEntry(resource, index, checked) {
     const kind = String(resource?.kind || "");
     const supported = DOWNLOADABLE_KINDS.has(kind) && resource?.model;
     const version = resource?.model?.modelVersions?.[0] || {};
     const files = imageResourceFiles(resource);
-    const checked = new Set((imageState.checked || []).map(String));
-    const kindLabel = kind === "checkpoint" ? t("Checkpoint/UNet") : kind === "workflow" ? t("Workflow") : kind === "lora" ? t("LoRA") : kind ? t(kind) : t("Resource");
     const versionLabel = version.name ? `${version.name}${version.baseModel ? ` · ${version.baseModel}` : ""}` : "";
     const modelId = resource?.model_id || resource?.model?.id || "";
     return `
-        <article class="cmgr-image-resource ${supported ? "" : "is-unsupported"}" data-image-resource="${index}">
+        <div class="cmgr-image-resource-entry ${supported ? "" : "is-unsupported"}" data-image-resource="${index}">
             <div class="cmgr-image-resource-head">
                 <div>
-                    <span class="cmgr-image-resource-kind">${escapeHtml(kindLabel)}</span>
                     <b>${escapeHtml(resource?.name || versionLabel || t("Unknown model"))}</b>
                     ${versionLabel ? `<small>${escapeHtml(versionLabel)}</small>` : ""}
+                    ${resourceWeightValue(resource) !== null ? `<small class="cmgr-image-weight-chip">× ${escapeHtml(String(imageResourceWeight(resource)))}</small>` : ""}
                 </div>
                 ${modelId ? `<a class="cmgr-secondary cmgr-mini-btn" href="https://civitai.red/models/${encodeURIComponent(modelId)}" target="_blank" rel="noopener noreferrer">${escapeHtml(t("Civitai"))}</a>` : ""}
             </div>
@@ -446,7 +564,28 @@ function renderResourceCard(resource, index) {
                         : `<p class="cmgr-nav-note">${escapeHtml(t("This version has no downloadable file."))}</p>`}
                 </div>
             ` : `<p class="cmgr-nav-note">${escapeHtml(!resource?.model && resource?.error && resource.error !== "unsupported" ? t("This model could not be loaded.") : t("This resource kind cannot be downloaded from here."))}</p>`}
-        </article>
+        </div>
+    `;
+}
+
+function renderResourceGroup(group, checked) {
+    const downloadable = group.entries.filter(({ resource }) => DOWNLOADABLE_KINDS.has(String(resource?.kind || "")) && resource?.model);
+    // "1 models" reads badly, and a lone model needs no count to make sense of.
+    const countLabel = group.entries.length > 1 ? t("{count} models", { count: group.entries.length }) : "";
+    // The checkpoint is one model the user rarely needs to inspect, so its card
+    // starts folded; the LoRA stack is the reason the panel exists and stays open.
+    const folded = group.kind === "checkpoint";
+    return `
+        <details class="cmgr-image-resource ${downloadable.length ? "" : "is-unsupported"}" data-image-resource-kind="${escapeAttr(group.kind)}" ${folded ? "" : "open"}>
+            <summary class="cmgr-image-resource-head">
+                <span class="cmgr-image-resource-kind">${escapeHtml(group.label)}</span>
+                ${countLabel ? `<b>${escapeHtml(countLabel)}</b>` : ""}
+                ${selectorIcon("chevron")}
+            </summary>
+            <div class="cmgr-image-resource-body">
+                ${group.entries.map(({ resource, index }) => renderResourceEntry(resource, index, checked)).join("")}
+            </div>
+        </details>
     `;
 }
 
@@ -468,6 +607,7 @@ function renderImageDetailBody() {
     const picks = checkedImageFiles();
     const totalBytes = picks.reduce((sum, { file }) => sum + Number(file?.sizeKB || 0) * 1024, 0);
     const resources = imageState.resources;
+    const checkedSet = new Set((imageState.checked || []).map(String));
     return `
         <div class="cmgr-detail-scroll cmgr-image-detail">
             ${renderDetailGallery(galleryItemsForUrl(image.url, { preferLegacy: true }), image.username || t("Civitai image"), t("No Preview"))}
@@ -498,7 +638,7 @@ function renderImageDetailBody() {
                 ${imageState.loadingResources ? `<p class="cmgr-nav-note">${escapeHtml(t("Loading models..."))}</p>` : ""}
                 ${imageState.resourceError ? `<p class="cmgr-nav-note">${escapeHtml(imageState.resourceError)}</p>` : ""}
                 ${!imageState.loadingResources && !resources.length && !imageState.resourceError ? `<p class="cmgr-nav-note">${escapeHtml(t("This image has no linked models."))}</p>` : ""}
-                ${resources.map((resource, index) => renderResourceCard(resource, index)).join("")}
+                ${groupImageResources(resources).map((group) => renderResourceGroup(group, checkedSet)).join("")}
                 ${resources.length ? `
                     <button class="cmgr-primary cmgr-download-cta" type="button" data-action="download-image-files" ${picks.length && !imageState.downloading ? "" : "disabled"}>
                         <span class="cmgr-download-cta-icon" aria-hidden="true">↓</span>

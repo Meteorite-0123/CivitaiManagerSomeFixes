@@ -2137,43 +2137,147 @@ def _image_resource_entry(resource: Any) -> dict[str, Any] | None:
     }
 
 
+def _image_meta(image: dict[str, Any]) -> dict[str, Any]:
+    """The generation data of one image.
+
+    The feed returns it flat, while a single-image lookup (`?imageId=`) nests it
+    one level deeper (`{"id": ..., "meta": {...}}`), so both shapes are read.
+    """
+    meta = image.get("meta")
+    if not isinstance(meta, dict):
+        return {}
+    inner = meta.get("meta")
+    if isinstance(inner, dict):
+        return {**meta, **inner}
+    return meta
+
+
+def _resource_name_key(value: Any) -> str:
+    """A comparison key for resource names: `FilmGrain XL.safetensors` == `film grain xl`."""
+    clean = str(value or "").strip().lower()
+    clean = re.sub(r"\.(safetensors|ckpt|pt|pth|bin|onnx|yaml|json)$", "", clean)
+    return re.sub(r"[^a-z0-9]+", " ", clean).strip()
+
+
+LORA_PROMPT_TAG_RE = re.compile(r"<(?:lora|lyco):\s*([^:>]+?)\s*:\s*(-?\d+(?:\.\d+)?)\s*>", re.I)
+
+
+def _prompt_lora_weights(prompt: Any) -> list[tuple[str, float]]:
+    """LoRAs written into a prompt as `<lora:name:0.7>`.
+
+    A1111-style images carry their whole LoRA stack in the prompt while
+    `civitaiResources` is empty, so this is the only place their weights exist.
+    """
+    found: list[tuple[str, float]] = []
+    for name, weight in LORA_PROMPT_TAG_RE.findall(str(prompt or "")):
+        clean = name.strip()
+        if not clean:
+            continue
+        try:
+            found.append((clean, float(weight)))
+        except ValueError:
+            continue
+    return found
+
+
 def _image_resources(image: dict[str, Any]) -> list[dict[str, Any]]:
+    meta = _image_meta(image)
     raw = image.get("resources")
     if not isinstance(raw, list):
-        raw = (image.get("meta") or {}).get("resources") if isinstance(image.get("meta"), dict) else None
+        raw = meta.get("resources") if isinstance(meta.get("resources"), list) else None
     entries = [entry for entry in (_image_resource_entry(item) for item in (raw or [])) if entry]
-    if not entries:
-        # The public images endpoint sends neither `resources` nor `meta`, only
-        # the version ids the picture was made with. Keep them as unresolved
-        # entries so the detail panel can turn them into real models.
-        for version_id in image.get("modelVersionIds") or []:
-            clean = str(version_id or "").strip()
-            if not clean:
+    # `resources` is free-form and often empty, while `civitaiResources` is the
+    # structured one that carries the weight of every LoRA the picture used.
+    civitai_entries = [
+        entry for entry in (_image_resource_entry(item) for item in (meta.get("civitaiResources") or [])) if entry
+    ]
+    civitai_by_version = {entry["version_id"]: entry for entry in civitai_entries if entry.get("version_id")}
+    for entry in entries:
+        extra = civitai_by_version.get(entry.get("version_id") or "")
+        if not extra:
+            continue
+        # Civitai's own record wins over the free-form weight a generator wrote.
+        if extra.get("weight") is not None:
+            entry["weight"] = extra.get("weight")
+        if not entry.get("kind"):
+            entry["kind"] = extra.get("kind") or ""
+        if not entry.get("version_name"):
+            entry["version_name"] = extra.get("version_name") or ""
+    known_versions = {str(entry.get("version_id") or "") for entry in entries}
+    entries.extend(entry for entry in civitai_entries if str(entry.get("version_id") or "") not in known_versions)
+    # Prompt tags fill two gaps: the weight of a known LoRA, and LoRAs that
+    # `civitaiResources` leaves out entirely (an eight-LoRA picture that only
+    # lists five). They are kept unresolved and looked up by name later.
+    prompt_weights = _prompt_lora_weights(meta.get("prompt"))
+    if prompt_weights:
+        by_name: dict[str, dict[str, Any]] = {}
+        for entry in entries:
+            for candidate in (entry.get("name"), entry.get("version_name"), entry.get("model_name")):
+                key = _resource_name_key(candidate)
+                if key:
+                    by_name.setdefault(key, entry)
+        for name, weight in prompt_weights:
+            key = _resource_name_key(name)
+            flat = key.replace(" ", "")
+            match = by_name.get(key)
+            if match is None and flat:
+                match = next(
+                    (entry for candidate, entry in by_name.items() if candidate.replace(" ", "") == flat),
+                    None,
+                )
+            if match is not None:
+                if match.get("weight") is None:
+                    match["weight"] = weight
                 continue
-            entries.append({
-                "kind": "",
-                "type": "",
+            entry = {
+                "kind": "lora",
+                "type": "LoRA",
                 "model_id": "",
-                "version_id": clean,
-                "name": "",
+                "version_id": "",
+                "name": name,
                 "version_name": "",
                 "base_model": "",
-                "weight": None,
-            })
+                "weight": weight,
+                "from_prompt": True,
+            }
+            entries.append(entry)
+            if key:
+                by_name.setdefault(key, entry)
+    # `modelVersionIds` is the complete list of versions the picture used, while
+    # `resources` is often just the checkpoint. Both are merged, otherwise a
+    # seven-LoRA picture shows a single entry.
+    known_versions_all = {str(entry.get("version_id") or "") for entry in entries if entry.get("version_id")}
+    for version_id in image.get("modelVersionIds") or []:
+        clean = str(version_id or "").strip()
+        if not clean or clean in known_versions_all:
+            continue
+        known_versions_all.add(clean)
+        entries.append({
+            "kind": "",
+            "type": "",
+            "model_id": "",
+            "version_id": clean,
+            "name": "",
+            "version_name": "",
+            "base_model": "",
+            "weight": None,
+            "from_ids": True,
+        })
     # A resource can appear twice (base model plus the checkpoint alias); keep one.
-    seen: set[tuple[str, str]] = set()
+    seen: set[str] = set()
     unique: list[dict[str, Any]] = []
     for entry in entries:
-        key = (entry["kind"], entry["version_id"] or entry["model_id"])
-        if key in seen:
+        key = str(entry.get("version_id") or entry.get("model_id") or "")
+        if key and key in seen:
             continue
-        seen.add(key)
+        if key:
+            seen.add(key)
         unique.append(entry)
     return unique
 
 
 def _image_feed_card(image: dict[str, Any]) -> dict[str, Any]:
-    meta = image.get("meta") if isinstance(image.get("meta"), dict) else {}
+    meta = _image_meta(image)
     stats = image.get("stats") if isinstance(image.get("stats"), dict) else {}
     username = str(image.get("username") or "").strip()
     if not username and isinstance(image.get("user"), dict):
@@ -2212,6 +2316,9 @@ def _images_query_params(
         "sort": str(sort or "Newest"),
         "period": str(period or "AllTime"),
         "nsfw": "true" if config.get("allow_nsfw") else "false",
+        # The generation data (and with it every LoRA weight) is only attached
+        # when the caller asks for it; without this the feed returns meta: null.
+        "withMeta": "true",
     }
     if query.strip():
         params["query"] = query.strip()
@@ -2270,8 +2377,8 @@ def _image_detail(image_id: str, config: dict[str, Any]) -> dict[str, Any]:
     # Both are tried so a pasted link resolves either way.
     attempts: list[dict[str, str]] = []
     if config.get("allow_nsfw"):
-        attempts.append({"imageId": str(image_id), "nsfw": "true", "limit": "1"})
-    attempts.append({"imageId": str(image_id), "limit": "1"})
+        attempts.append({"imageId": str(image_id), "nsfw": "true", "limit": "1", "withMeta": "true"})
+    attempts.append({"imageId": str(image_id), "limit": "1", "withMeta": "true"})
     last_error = ""
     for params in attempts:
         url = f"{IMAGES_URL}?{urllib.parse.urlencode(params)}"
@@ -2320,17 +2427,103 @@ def _image_version_card(version_payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _name_match_score(candidate: Any, wanted: str) -> float:
+    """How well a model or version name matches a prompt's LoRA tag, as 0..1."""
+    key = _resource_name_key(candidate)
+    if not key or not wanted:
+        return 0.0
+    if key == wanted:
+        return 1.0
+    flat_key = key.replace(" ", "")
+    flat_wanted = wanted.replace(" ", "")
+    if flat_key == flat_wanted:
+        return 0.99
+    # Prompts carry file names, so a model or version name often sits inside
+    # them ("BArtstyle-KREA2-V2-1024" holds the version "Krea2-V2").
+    if len(flat_key) >= 5 and flat_key in flat_wanted:
+        return 0.92
+    if len(flat_wanted) >= 5 and flat_wanted in flat_key:
+        return 0.9
+    # Reordered words still name the same model ("Flat_anime_Krea_@" is
+    # "Krea 2 Flat Illustration/Anime Style").
+    tokens = set(key.split())
+    wanted_tokens = set(wanted.split())
+    shared = len(tokens & wanted_tokens)
+    if not shared:
+        return 0.0
+    coverage = shared / len(wanted_tokens)
+    if coverage >= 0.6:
+        return 0.85 * coverage
+    reverse = shared / len(tokens)
+    if reverse >= 0.6:
+        return 0.8 * reverse
+    return 0.0
+
+
+def _lookup_prompt_lora(name: str, config: dict[str, Any], api_key: str | None) -> dict[str, Any] | None:
+    """Finds the model a prompt's `<lora:name:0.7>` tag points at.
+
+    Prompt-only stacks have no version ids, so the name is searched among LoRAs
+    and the closest model wins; its first version is used as the pinned one.
+    """
+    wanted = _resource_name_key(name)
+    if not wanted:
+        return None
+    params = {
+        "query": wanted,
+        "types": "LORA",
+        "limit": "8",
+        "nsfw": "true" if config.get("allow_nsfw") else "false",
+    }
+    url = f"{CIVITAI_API_BASE}/models?{urllib.parse.urlencode(params)}"
+    result = _read_json_url_with_retries(url, api_key=api_key, timeout=30, retries=1, quiet=True)
+    items = result.get("items") if isinstance(result, dict) else None
+    if not isinstance(items, list):
+        return None
+    def score_candidate(candidate: Any) -> float:
+        return _name_match_score(candidate, wanted)
+
+    best_model: dict[str, Any] | None = None
+    best_version: dict[str, Any] | None = None
+    best_score = 0.0
+    for model in items:
+        if not isinstance(model, dict):
+            continue
+        versions = [item for item in (model.get("modelVersions") or []) if isinstance(item, dict)]
+        model_score = score_candidate(model.get("name"))
+        if model_score > best_score:
+            best_model, best_version, best_score = model, (versions[0] if versions else None), model_score
+        # A version name may match even when the model title does not; the
+        # matching version is the one the picture actually loaded.
+        for version in versions:
+            version_score = score_candidate(version.get("name"))
+            if version_score > best_score:
+                best_model, best_version, best_score = model, version, version_score
+    if best_model is None or best_score <= 0 or not best_version:
+        return None
+    version = dict(best_version)
+    version["modelId"] = version.get("modelId") or best_model.get("id")
+    version["model"] = {
+        "id": best_model.get("id"),
+        "name": str(best_model.get("name") or ""),
+        "type": str(best_model.get("type") or "LORA"),
+    }
+    return version
+
+
 def _resolve_image_resource(
     resource: dict[str, Any],
     api_key: str | None,
     selected_version_ids: dict[str, str],
+    config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Resolves one image resource into a model card holding its files."""
     entry: dict[str, Any] = {**resource, "supported": False, "model": None, "error": ""}
     kind = str(resource.get("kind") or "")
     version_id = str(resource.get("version_id") or "")
     model_id = str(resource.get("model_id") or "")
-    if not model_id and not version_id:
+    name = str(resource.get("name") or "").strip()
+    if not model_id and not version_id and not name:
         entry["error"] = "missing ids"
         return entry
     if kind and kind not in DOWNLOADABLE_IMAGE_RESOURCE_KINDS:
@@ -2347,6 +2540,9 @@ def _resolve_image_resource(
             )
             if version_payload and version_payload.get("error"):
                 version_payload = None
+        if version_payload is None and not target_version_id and name:
+            # A LoRA that only exists as a prompt tag has no id to look up.
+            version_payload = _lookup_prompt_lora(name, config or {}, api_key)
         if isinstance(version_payload, dict):
             model_info = version_payload.get("model") if isinstance(version_payload.get("model"), dict) else {}
             kind = kind or _image_resource_kind(model_info.get("type"))
@@ -2355,6 +2551,7 @@ def _resolve_image_resource(
             entry["version_id"] = str(version_payload.get("id") or target_version_id)
             entry["type"] = str(model_info.get("type") or entry.get("type") or "")
             entry["name"] = str(model_info.get("name") or entry.get("name") or "")
+            entry["version_name"] = str(version_payload.get("name") or entry.get("version_name") or "")
             entry["base_model"] = str(version_payload.get("baseModel") or entry.get("base_model") or "")
             entry["supported"] = kind in DOWNLOADABLE_IMAGE_RESOURCE_KINDS
             if not entry["supported"]:
@@ -2415,10 +2612,93 @@ def _resolve_image_resources(
     if not items:
         return []
     if len(items) == 1:
-        return [_resolve_image_resource(items[0], api_key, selected_version_ids)]
+        return [_resolve_image_resource(items[0], api_key, selected_version_ids, config)]
     workers = min(len(items), IMAGE_RESOURCE_FETCH_WORKERS)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        return list(pool.map(lambda item: _resolve_image_resource(item, api_key, selected_version_ids), items))
+        resolved = list(pool.map(lambda item: _resolve_image_resource(item, api_key, selected_version_ids, config), items))
+    return _merge_resolved_resources(resolved)
+
+
+def _weight_match_score(row: dict[str, Any], wanted: str) -> float:
+    """How likely a prompt tag names this row; used to move a weight across."""
+    if not wanted:
+        return 0.0
+    # A prompt tag is a LoRA file name, and Civitai lists the file names of the
+    # pinned version, so this is the most exact match available.
+    versions = (row.get("model") or {}).get("modelVersions") or []
+    for version in versions[:1]:
+        for file in (version.get("files") or [])[:4] if isinstance(version, dict) else []:
+            if isinstance(file, dict) and _resource_name_key(file.get("name")) == wanted:
+                return 1.0
+    score = max(
+        _name_match_score(row.get("name"), wanted),
+        _name_match_score(row.get("version_name"), wanted),
+    )
+    if score:
+        return score
+    # A model title and a LoRA file name share only part of their words
+    # ("Purple_Grainy_KR2_V2_D" against "Purple Grainy || Photography lora").
+    row_tokens = set(_resource_name_key(row.get("name")).split()) | set(_resource_name_key(row.get("version_name")).split())
+    wanted_tokens = set(wanted.split())
+    shared = len(row_tokens & wanted_tokens)
+    if shared < 2:
+        return 0.0
+    return 0.5 * (shared / max(1, min(len(row_tokens), len(wanted_tokens))))
+
+
+def _merge_resolved_resources(resolved: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Folds rows that describe the same model into one.
+
+    The same LoRA arrives twice when it is both a prompt tag (its weight) and a
+    known version id (its files); matching them by name keeps the count equal to
+    what Civitai lists while keeping the weight.
+    """
+    id_rows: list[dict[str, Any]] = []
+    prompt_rows: list[dict[str, Any]] = []
+    by_version: dict[str, dict[str, Any]] = {}
+    for entry in resolved:
+        if entry.get("from_prompt"):
+            prompt_rows.append(entry)
+            continue
+        key = str(entry.get("version_id") or "")
+        kept = by_version.get(key) if key else None
+        if kept is not None:
+            if entry.get("weight") is not None and kept.get("weight") is None:
+                kept["weight"] = entry["weight"]
+            continue
+        if key:
+            by_version[key] = entry
+        id_rows.append(entry)
+    used: set[int] = set()
+    for prompt_row in prompt_rows:
+        wanted = _resource_name_key(prompt_row.get("name"))
+        # The name search may have landed on the exact version already listed.
+        direct = by_version.get(str(prompt_row.get("version_id") or ""))
+        if direct is not None and direct in id_rows:
+            index = id_rows.index(direct)
+            used.add(index)
+            if direct.get("weight") is None:
+                direct["weight"] = prompt_row.get("weight")
+            continue
+        best: dict[str, Any] | None = None
+        best_score = 0.2
+        for index, row in enumerate(id_rows):
+            if index in used:
+                continue
+            score = _weight_match_score(row, wanted)
+            if score > best_score:
+                best, best_score = row, score
+                best_index = index
+        if best is None:
+            # `modelVersionIds` is the picture's complete list, so an unmatched
+            # prompt tag must not become an extra row; it only carries a weight.
+            if not id_rows:
+                id_rows.append(prompt_row)
+            continue
+        used.add(best_index)
+        if best.get("weight") is None:
+            best["weight"] = prompt_row.get("weight")
+    return id_rows
 
 
 def _search_base_model_text_fallback(

@@ -4947,6 +4947,28 @@ export function injectStyles() {
             justify-content: space-between;
             gap: 8px;
         }
+        /* A group header is the fold control: the chevron turns as it opens. */
+        .cmgr-image-resource > summary.cmgr-image-resource-head {
+            align-items: center;
+            list-style: none;
+            cursor: pointer;
+            user-select: none;
+        }
+        .cmgr-image-resource > summary::-webkit-details-marker {
+            display: none;
+        }
+        .cmgr-image-resource > summary .cmgr-selector-icon {
+            margin-left: auto;
+            color: var(--cmgr-muted);
+            transition: transform .18s ease;
+        }
+        .cmgr-image-resource[open] > summary .cmgr-selector-icon {
+            transform: rotate(180deg);
+        }
+        .cmgr-image-resource-body {
+            display: grid;
+            gap: 8px;
+        }
         .cmgr-image-resource-head > div {
             display: grid;
             gap: 2px;
@@ -4968,9 +4990,60 @@ export function injectStyles() {
             text-transform: uppercase;
             color: var(--cmgr-muted);
         }
+        /* One card holds a whole kind, so its models are separated by a rule
+           instead of each getting a card of its own. */
+        .cmgr-image-resource-entry {
+            display: grid;
+            gap: 8px;
+            padding-top: 8px;
+            border-top: 1px solid var(--cmgr-border);
+        }
+        .cmgr-image-resource-entry.is-unsupported {
+            opacity: .68;
+        }
         .cmgr-image-resource-files {
             display: grid;
             gap: 4px;
+        }
+        /* The weight an image was made with, editable before applying. */
+        .cmgr-image-weight {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            color: var(--cmgr-muted);
+            font-size: 10.5px;
+        }
+        .cmgr-image-weight input {
+            width: 62px;
+            padding: 3px 6px;
+            border: 1px solid var(--cmgr-border);
+            border-radius: 8px;
+            background: transparent;
+            color: inherit;
+            font: inherit;
+            font-size: 11.5px;
+        }
+        .cmgr-image-model-actions {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .cmgr-image-weight-chip {
+            justify-self: start;
+            padding: 1px 6px;
+            border: 1px solid var(--cmgr-border);
+            border-radius: 999px;
+            font-size: 10px !important;
+        }
+        .cmgr-image-apply-actions {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .cmgr-image-model-status {
+            color: var(--cmgr-muted);
+            font-size: 10.5px;
         }
         .cmgr-image-resource .cmgr-file-row {
             padding: 6px 8px;
