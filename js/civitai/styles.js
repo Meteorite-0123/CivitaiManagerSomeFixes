@@ -4877,6 +4877,136 @@ export function injectStyles() {
             color: var(--cmgr-muted);
             font-size: 10.5px;
         }
+        /* Discover → Images: a masonry-ish picture grid with a resource panel. */
+        .cmgr-images .cmgr-image-results {
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            align-content: start;
+        }
+        .cmgr-image-card {
+            cursor: pointer;
+        }
+        /* A picture feed keeps each photo's own shape instead of the 2:3 model
+           card box; a very wide or tall image is capped so rows stay even. */
+        .cmgr-selector-body .cmgr-card.cmgr-image-card {
+            aspect-ratio: var(--cmgr-image-ratio, 1) !important;
+            max-height: 340px;
+            min-height: 140px;
+        }
+        .cmgr-image-thumb {
+            position: relative;
+            overflow: hidden;
+        }
+        .cmgr-image-thumb .cmgr-card-media {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+        .cmgr-image-resource-badge {
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+            padding: 3px 7px;
+            border-radius: 999px;
+            background: color-mix(in srgb, #0b0d12 72%, transparent);
+            color: #fff;
+            font-size: 10.5px;
+            line-height: 1;
+        }
+        .cmgr-image-resource-badge svg {
+            width: 12px;
+            height: 12px;
+        }
+        .cmgr-image-card-stats {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--cmgr-muted);
+            font-size: 10.5px;
+        }
+        .cmgr-image-card-stats span {
+            display: inline-flex;
+            align-items: center;
+            gap: 3px;
+        }
+        .cmgr-image-card-stats svg {
+            width: 12px;
+            height: 12px;
+        }
+        .cmgr-image-link-bar {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 8px;
+            padding: 0 14px 10px;
+        }
+        .cmgr-image-link-form {
+            display: flex;
+            flex: 1 1 260px;
+            gap: 8px;
+        }
+        .cmgr-image-link-form .cmgr-input {
+            flex: 1 1 auto;
+            min-width: 0;
+        }
+        .cmgr-image-resources {
+            display: grid;
+            gap: 10px;
+        }
+        .cmgr-image-resource {
+            display: grid;
+            gap: 8px;
+            padding: 10px;
+            border: 1px solid var(--cmgr-border);
+            border-radius: 12px;
+            background: var(--cmgr-surface);
+        }
+        .cmgr-image-resource.is-unsupported {
+            opacity: .68;
+        }
+        .cmgr-image-resource-head {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 8px;
+        }
+        .cmgr-image-resource-head > div {
+            display: grid;
+            gap: 2px;
+            min-width: 0;
+        }
+        .cmgr-image-resource-head b {
+            font-size: 12px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .cmgr-image-resource-head small {
+            color: var(--cmgr-muted);
+            font-size: 10.5px;
+        }
+        .cmgr-image-resource-kind {
+            font-size: 9.5px;
+            letter-spacing: .06em;
+            text-transform: uppercase;
+            color: var(--cmgr-muted);
+        }
+        .cmgr-image-resource-files {
+            display: grid;
+            gap: 4px;
+        }
+        .cmgr-image-resource .cmgr-file-row {
+            padding: 6px 8px;
+        }
+        .cmgr-image-prompt {
+            margin: 0 !important;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-size: 11.5px;
+            line-height: 1.55;
+        }
     `;
     if (!style.isConnected) {
         document.head.appendChild(style);

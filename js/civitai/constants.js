@@ -13,6 +13,8 @@ export const ASSET_KINDS = [
     { id: "checkpoint", label: "Checkpoint/UNet", rootKinds: ["checkpoints", "unet"] },
     { id: "lora", label: "LoRA", rootKinds: ["loras"] },
     { id: "workflow", label: "Workflow", rootKinds: ["workflows"] },
+    // Discover-only feed: Civitai images and the models they were made with.
+    { id: "images", label: "Images", rootKinds: [], discoverOnly: true },
 ];
 
 // Library-only tab that collects every model folder outside the classic kinds.

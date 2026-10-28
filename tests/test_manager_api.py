@@ -120,6 +120,166 @@ class RemoteImageVariantTests(unittest.TestCase):
         self.assertEqual(manager._civitai_media_cache_url(video, 450), video)
 
 
+class ImageFeedTests(unittest.TestCase):
+    def _image(self, **overrides):
+        image = {
+            "id": 900,
+            "url": "https://image.civitai.com/xG1nkqKTMzGDvpLrqFT7WA/04a43bd2-a6f2-493f-ba86-c677fe642f00/width=450/900.jpeg",
+            "width": 832,
+            "height": 1216,
+            "username": "alice",
+            "baseModel": "SDXL 1.0",
+            "meta": {"prompt": "a cat", "resources": []},
+            "stats": {"likeCount": 12, "heartCount": 4},
+            "resources": [
+                {"type": "checkpoint", "modelId": 10, "modelVersionId": 20, "modelName": "Base"},
+                {"type": "lora", "modelId": 30, "modelVersionId": 40, "modelName": "Style", "weight": 0.7},
+                {"type": "lora", "modelId": 30, "modelVersionId": 40, "modelName": "Style"},
+            ],
+        }
+        image.update(overrides)
+        return image
+
+    def test_feed_card_keeps_only_downloadable_metadata(self):
+        card = manager._image_feed_card(self._image())
+        self.assertEqual(card["id"], 900)
+        self.assertEqual(card["username"], "alice")
+        self.assertEqual(card["prompt"], "a cat")
+        self.assertEqual(card["stats"]["likeCount"], 12)
+        # The duplicated LoRA resource is collapsed, the checkpoint is kept.
+        self.assertEqual([item["kind"] for item in card["resources"]], ["checkpoint", "lora"])
+        self.assertEqual(card["resources"][1]["weight"], 0.7)
+
+    def test_resource_kinds_map_to_asset_kinds(self):
+        self.assertEqual(manager._image_resource_kind("Checkpoint"), "checkpoint")
+        self.assertEqual(manager._image_resource_kind("LoCon"), "lora")
+        self.assertEqual(manager._image_resource_kind("DoRA"), "lora")
+        self.assertEqual(manager._image_resource_kind("Workflows"), "workflow")
+        self.assertEqual(manager._image_resource_kind("Embedding"), "embed")
+        self.assertEqual(manager._image_resource_kind("Mystery"), "")
+
+    def test_image_id_parses_links_and_bare_ids(self):
+        self.assertEqual(manager._parse_image_id("12345"), "12345")
+        self.assertEqual(manager._parse_image_id("https://civitai.com/images/777"), "777")
+        self.assertEqual(manager._parse_image_id("https://civitai.red/images/888?foo=1"), "888")
+        self.assertEqual(manager._parse_image_id("https://civitai.com/models/5"), "")
+
+    def test_image_query_params_respect_content_setting(self):
+        params = manager._images_query_params(
+            "cat", "", "Newest", 40, "AllTime", "SDXL 1.0", {"allow_nsfw": False},
+        )
+        self.assertEqual(params["query"], "cat")
+        self.assertEqual(params["nsfw"], "false")
+        self.assertEqual(params["baseModels"], "SDXL 1.0")
+        self.assertNotIn("cursor", params)
+
+    def test_resource_resolution_pins_the_image_version(self):
+        model = {
+            "id": 30,
+            "name": "Style LoRA",
+            "type": "LORA",
+            "modelVersions": [
+                {"id": 41, "name": "new", "baseModel": "SDXL 1.0", "files": [{"name": "new.safetensors"}]},
+                {"id": 40, "name": "old", "baseModel": "SDXL 1.0", "files": [{"name": "old.safetensors"}]},
+            ],
+        }
+        with mock.patch.object(manager, "_read_json_url_with_retries", return_value=model):
+            entries = manager._resolve_image_resources(
+                [{"type": "lora", "kind": "lora", "model_id": "30", "version_id": "40", "name": "Style"}],
+                {"civitai_api_key": ""},
+            )
+        self.assertEqual(entries[0]["error"], "")
+        self.assertEqual(entries[0]["model"]["modelVersions"][0]["id"], 40)
+        self.assertEqual(entries[0]["model"]["modelVersions"][0]["files"][0]["name"], "old.safetensors")
+
+    def test_unsupported_resources_are_reported_not_fetched(self):
+        with mock.patch.object(manager, "_read_json_url_with_retries") as fetch:
+            entries = manager._resolve_image_resources(
+                [{"type": "embed", "kind": "embed", "model_id": "1", "version_id": "2"}],
+                {},
+            )
+        fetch.assert_not_called()
+        self.assertEqual(entries[0]["error"], "unsupported")
+
+
+class ImagesApiTests(unittest.TestCase):
+    def setUp(self):
+        manager._IMAGE_FEED_CACHE.clear()
+
+    def tearDown(self):
+        manager._IMAGE_FEED_CACHE.clear()
+
+    def test_images_api_returns_cards_and_caches_the_page(self):
+        request = _QueryRequest({"query": "cat", "sort": "Newest", "limit": "20"})
+        payload = {
+            "items": [{"id": 1, "url": "https://image.civitai.com/x/y.jpeg", "resources": []}],
+            "metadata": {"nextCursor": "abc"},
+        }
+        with (
+            mock.patch.object(manager, "load_config", return_value={"allow_nsfw": False}),
+            mock.patch.object(manager, "_read_json_url_with_retries", return_value=payload) as fetch,
+        ):
+            first = asyncio.run(manager.images_api(request))
+            second = asyncio.run(manager.images_api(request))
+
+        self.assertEqual(len(first.body["items"]), 1)
+        self.assertEqual(first.body["metadata"]["nextCursor"], "abc")
+        self.assertTrue(first.body["content_filter_active"])
+        self.assertEqual(second.body, first.body)
+        self.assertEqual(fetch.call_count, 1)
+
+    def test_images_api_reports_upstream_errors_without_caching(self):
+        request = _QueryRequest({"query": "cat"})
+        with (
+            mock.patch.object(manager, "load_config", return_value={"allow_nsfw": True}),
+            mock.patch.object(manager, "_read_json_url_with_retries", return_value={"error": "boom"}),
+        ):
+            response = asyncio.run(manager.images_api(request))
+        self.assertEqual(response.body["items"], [])
+        self.assertEqual(response.body["error"], "boom")
+        self.assertEqual(manager._IMAGE_FEED_CACHE, {})
+
+    def test_image_detail_api_rejects_a_missing_id(self):
+        response = asyncio.run(manager.image_detail_api(_QueryRequest({"id": "not-a-link"})))
+        self.assertEqual(response.status, 400)
+        self.assertFalse(response.body["success"])
+
+    def test_image_detail_api_resolves_a_link(self):
+        payload = {"items": [{"id": 55, "url": "https://image.civitai.com/x/y.jpeg", "meta": {"prompt": "hi"}}]}
+        with (
+            mock.patch.object(manager, "load_config", return_value={"allow_nsfw": True}),
+            mock.patch.object(manager, "_read_json_url_with_retries", return_value=payload),
+        ):
+            response = asyncio.run(manager.image_detail_api(_QueryRequest({"id": "https://civitai.com/images/55"})))
+        self.assertTrue(response.body["success"])
+        self.assertEqual(response.body["image"]["id"], 55)
+        self.assertEqual(response.body["image"]["prompt"], "hi")
+
+    def test_image_resolve_api_requires_an_object_payload(self):
+        class _BadRequest:
+            async def json(self):
+                return []
+
+        response = asyncio.run(manager.image_resolve_api(_BadRequest()))
+        self.assertEqual(response.status, 400)
+
+    def test_image_resolve_api_passes_selected_versions_through(self):
+        class _Request:
+            async def json(self):
+                return {
+                    "resources": [{"type": "lora", "kind": "lora", "model_id": "1", "version_id": "2"}],
+                    "selected_versions": {"2": "3"},
+                }
+
+        with (
+            mock.patch.object(manager, "load_config", return_value={}),
+            mock.patch.object(manager, "_resolve_image_resources", return_value=[]) as resolve,
+        ):
+            response = asyncio.run(manager.image_resolve_api(_Request()))
+        self.assertTrue(response.body["success"])
+        self.assertEqual(resolve.call_args.args[2], {"2": "3"})
+
+
 class KeepAliveFetchTests(unittest.TestCase):
     def setUp(self):
         self.ports = []

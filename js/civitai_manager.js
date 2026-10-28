@@ -61,6 +61,21 @@ import {
     localAssetForFavorite,
 } from "./civitai/favorites.js";
 import { fileKey, fileRole, groupVersionFiles, renderFilePicker, representativeFiles, selectionSummary } from "./civitai/file_picker.js";
+import {
+    IMAGES_KIND,
+    imageState,
+    loadImageFeed,
+    openImageById,
+    renderImageDetailAside,
+    renderImageDiscover,
+    resetImageFeed,
+    checkedImageFiles,
+    downloadCheckedImageFiles,
+    imageResourceKeys,
+    renderImageCard,
+    resolveImageResources,
+    setImageTargets,
+} from "./civitai/images.js";
 import { t } from "./civitai/i18n.js";
 import {
     createPreviewMedia,
@@ -85,6 +100,7 @@ let themeObserver = null;
 let themeSyncQueued = false;
 let themeColorProbe = null;
 let responsiveSearchTimer = null;
+let imageSearchTimer = null;
 let pendingResponsiveSearch = false;
 let lastResponsiveSearchKey = "";
 let lastDownloadNavCount = -1;
@@ -550,14 +566,20 @@ function switchManagerTab(tab) {
         state.resolvingPath = false;
     }
     state.activeTab = tab;
+    // The image feed only exists in Discover; other tabs need a real model kind.
+    if (tab !== "Discover" && state.assetKind === IMAGES_KIND) state.assetKind = "lora";
     const needsPath = ["Discover", "Favorites"].includes(tab) && state.selectedModel && !state.resolution;
     if (tab === "Library") void loadLibrary();
     if (tab === "Favorites") void loadFavorites(true);
     if (tab === "Downloads") void loadDownloads();
     if (tab === "Discover") {
-        void loadTaxonomy(state.assetKind, { silent: true });
-        if (!state.searchItems.length) void search(true, { silent: true });
-        else if (!state.selectedModel) void selectModel(state.searchItems[0]);
+        if (state.assetKind === IMAGES_KIND) {
+            if (!imageState.items.length) void loadImageFeed({ reset: true }).then(() => render());
+        } else {
+            void loadTaxonomy(state.assetKind, { silent: true });
+            if (!state.searchItems.length) void search(true, { silent: true });
+            else if (!state.selectedModel) void selectModel(state.searchItems[0]);
+        }
     }
     render();
     if (needsPath) void resolveSelectedPath({ detailOnly: true, pathOnly: true });
@@ -565,7 +587,9 @@ function switchManagerTab(tab) {
 
 async function hydrateInitialData() {
     const tasks = [loadConfig(), loadLibrary(), loadFavorites(false), loadDownloads(false), loadTaxonomy(state.assetKind, { silent: true })];
-    if (state.activeTab === "Discover" && state.searchItems.length === 0 && !state.loadingSearch) {
+    if (state.activeTab === "Discover" && state.assetKind === IMAGES_KIND && imageState.items.length === 0) {
+        tasks.push(loadImageFeed({ reset: true }));
+    } else if (state.activeTab === "Discover" && state.searchItems.length === 0 && !state.loadingSearch) {
         tasks.push(search(true, { silent: true }));
     }
     const results = await Promise.allSettled(tasks);
@@ -2081,18 +2105,23 @@ function renderNav(nav) {
             buttons[next].click();
         };
     });
-    const hasFilters = ["Discover", "Library", "Favorites"].includes(state.activeTab);
+    const imagesMode = state.activeTab === "Discover" && state.assetKind === IMAGES_KIND;
+    const hasFilters = ["Discover", "Library", "Favorites"].includes(state.activeTab) && !imagesMode;
     overlay.querySelector('.cmgr-selector-layout').classList.toggle("has-filters", hasFilters);
     overlay.querySelector('[data-action="toggle-manager-filters"]').hidden = !hasFilters;
     bodyEl.setAttribute("aria-labelledby", `cmgr-manager-tab-${state.activeTab}`);
     overlay.querySelector('[data-action="view-library"]').innerHTML = `${selectorIcon("layers")}<span>${escapeHtml(t("Library"))}</span><b>${state.libraryItems.length}</b>`;
     setManagerFiltersOpen(filtersOpen);
+    if (imagesMode) {
+        nav.innerHTML = "";
+        return;
+    }
     nav.innerHTML = `
         <div class="cmgr-selector-filter-heading">
             <h2>${escapeHtml(t(state.activeTab === "Favorites" ? "Favorites" : "Adjust filters"))}</h2>
             ${["Discover", "Library"].includes(state.activeTab) && (state.selectedBaseModel || state.selectedTag || (state.activeTab === "Library" ? state.selectedCategory : state.selectedCivitaiCategory)) ? `<button class="cmgr-selector-reset" type="button" data-action="reset-manager-filters">${escapeHtml(t("Reset filters"))}</button>` : ""}
         </div>
-        ${["Discover", "Library"].includes(state.activeTab) ? renderAssetSidebar() : ""}
+        ${["Discover", "Library"].includes(state.activeTab) && !imagesMode ? renderAssetSidebar() : ""}
         ${state.activeTab === "Favorites" ? renderFavoritesSidebar() : ""}
     `;
     const reset = nav.querySelector('[data-action="reset-manager-filters"]');
@@ -2499,6 +2528,14 @@ function selectAssetKind(kind) {
     state.cursor = "";
     state.scroll.discoverResults = 0;
     state.scroll.libraryResults = 0;
+    if (kind === IMAGES_KIND) {
+        resetImageFeed();
+        if (state.activeTab === "Discover") {
+            void loadImageFeed({ reset: true });
+            render();
+            return;
+        }
+    }
     if (kind !== OTHER_LIBRARY_KIND) loadTaxonomy(kind, { silent: true });
     if (state.activeTab === "Discover") {
         search(true, { silent: true });
@@ -2512,12 +2549,16 @@ function renderActiveTab() {
     if (state.activeTab === "Favorites") return renderFavorites();
     if (state.activeTab === "Downloads") return renderDownloads();
     if (state.activeTab === "Settings") return renderSettings();
+    if (state.activeTab === "Discover" && state.assetKind === IMAGES_KIND) {
+        setImageTargets(targetKindOptions());
+        return renderImageDiscover(renderToolbarKindTabs());
+    }
     return renderDiscover();
 }
 
 function libraryAssetKinds() {
     return state.activeTab === "Library"
-        ? [...ASSET_KINDS, { id: OTHER_LIBRARY_KIND, label: "Other" }]
+        ? [...ASSET_KINDS.filter((kind) => !kind.discoverOnly), { id: OTHER_LIBRARY_KIND, label: "Other" }]
         : ASSET_KINDS;
 }
 
@@ -3213,6 +3254,11 @@ function showInLibrary(assetId) {
 }
 
 function bindActiveTabEvents(root) {
+    if (state.activeTab === "Discover" && state.assetKind === IMAGES_KIND) {
+        bindImageEvents(root);
+        observeCardMedia(root);
+        return;
+    }
     if (state.activeTab === "Discover") bindDiscoverEvents(root);
     if (state.activeTab === "Library") bindLibraryEvents(root);
     if (state.activeTab === "Favorites") bindFavoritesEvents(root);
@@ -3351,6 +3397,184 @@ function bindFavoritesSidebar(root) {
         onSave: (editor) => void saveFavoriteFolder(editor),
         onDelete: (folderId) => void deleteFavoriteFolder(folderId),
     });
+}
+
+function refreshImageDetail() {
+    const split = bodyEl?.querySelector(".cmgr-images .cmgr-split");
+    if (!split) return;
+    split.classList.toggle("is-detail-open", Boolean(imageState.selectedImage));
+    const aside = split.querySelector(":scope > .cmgr-detail");
+    if (aside) aside.outerHTML = renderImageDetailAside();
+    else split.insertAdjacentHTML("beforeend", renderImageDetailAside());
+    bindCommonEvents(bodyEl);
+    bindImageEvents(bodyEl);
+    observeCardMedia(split.querySelector(".cmgr-detail"));
+}
+
+function syncImageCardSelection() {
+    bodyEl?.querySelectorAll("[data-image-id]").forEach((card) => {
+        card.classList.toggle("selected", String(card.dataset.imageId) === String(imageState.selectedId));
+    });
+}
+
+async function selectImage(image) {
+    if (!image) return;
+    imageState.selectedId = String(image.id || "");
+    imageState.selectedImage = image;
+    imageState.resources = [];
+    imageState.checked = [];
+    imageState.overrides = {};
+    imageState.resourceError = "";
+    openDetailDrawer();
+    syncImageCardSelection();
+    refreshImageDetail();
+    await resolveImageResourcesFromSelection();
+}
+
+async function resolveImageResourcesFromSelection() {
+    imageState.loadingResources = true;
+    refreshImageDetail();
+    await resolveImageResources();
+    imageState.loadingResources = false;
+    refreshImageDetail();
+}
+
+function bindImageEvents(root) {
+    const queryInput = root.querySelector('[data-field="image-query"]');
+    const clearSearch = root.querySelector('[data-action="clear-image-search"]');
+    if (queryInput) {
+        queryInput.oninput = () => {
+            imageState.query = queryInput.value;
+            if (clearSearch) clearSearch.hidden = !imageState.query;
+            if (imageSearchTimer) clearTimeout(imageSearchTimer);
+            imageSearchTimer = setTimeout(async () => {
+                imageSearchTimer = null;
+                if (state.activeTab !== "Discover" || state.assetKind !== IMAGES_KIND) return;
+                await loadImageFeed({ reset: true });
+                render();
+            }, 350);
+        };
+        queryInput.onkeydown = (event) => {
+            if (event.key !== "Enter") return;
+            if (imageSearchTimer) clearTimeout(imageSearchTimer);
+            imageSearchTimer = null;
+            void loadImageFeed({ reset: true }).then(() => render());
+        };
+    }
+    if (clearSearch) clearSearch.onclick = () => {
+        imageState.query = "";
+        if (queryInput) queryInput.value = "";
+        clearSearch.hidden = true;
+        void loadImageFeed({ reset: true }).then(() => render());
+    };
+    const refresh = root.querySelector('[data-action="refresh-images"]');
+    if (refresh) refresh.onclick = () => void loadImageFeed({ reset: true }).then(() => render());
+    const linkToggle = root.querySelector('[data-action="toggle-image-link"]');
+    if (linkToggle) linkToggle.onclick = () => {
+        imageState.linkOpen = !imageState.linkOpen;
+        render();
+        bodyEl.querySelector('[data-field="image-link"]')?.focus({ preventScroll: true });
+    };
+    const openLink = root.querySelector('[data-action="open-image-link"]');
+    if (openLink) openLink.onclick = () => {
+        const value = bodyEl.querySelector('[data-field="image-link"]')?.value || "";
+        const match = String(value).match(/(\d{3,})/);
+        if (!match) {
+            showToast(t("Paste a Civitai image link or its id."));
+            return;
+        }
+        void openImageLink(match[1]);
+    };
+    const linkInput = root.querySelector('[data-field="image-link"]');
+    if (linkInput) linkInput.onkeydown = (event) => {
+        if (event.key === "Enter") openLink?.click();
+    };
+    const results = root.querySelector(".cmgr-image-results");
+    if (results) {
+        results.onscroll = () => {
+            const remaining = results.scrollHeight - results.scrollTop - results.clientHeight;
+            if (remaining > 600 || imageState.loading || imageState.loadingMore || !imageState.nextCursor) return;
+            void loadMoreImages();
+        };
+    }
+    root.querySelectorAll("[data-image-id]").forEach((card) => {
+        card.onclick = () => void selectImage(imageState.items.find((item) => String(item.id) === String(card.dataset.imageId)));
+        card.onkeydown = (event) => {
+            if (event.key !== "Enter" && event.key !== " ") return;
+            event.preventDefault();
+            card.click();
+        };
+    });
+    root.querySelectorAll("[data-image-file-check]").forEach((box) => {
+        box.onchange = () => {
+            const key = String(box.dataset.imageFileCheck || "");
+            const set = new Set((imageState.checked || []).map(String));
+            if (box.checked) set.add(key);
+            else set.delete(key);
+            imageState.checked = [...set];
+            box.closest("[data-image-file-row]")?.classList.toggle("is-checked", box.checked);
+            refreshImageDetail();
+        };
+    });
+    root.querySelectorAll("[data-image-file-target]").forEach((select) => {
+        select.onchange = () => {
+            imageState.overrides = { ...(imageState.overrides || {}), [select.dataset.imageFileTarget]: select.value };
+        };
+    });
+    const selectAll = root.querySelector('[data-action="select-all-image-files"]');
+    if (selectAll) selectAll.onclick = () => {
+        const all = [];
+        imageState.resources.forEach((resource, index) => {
+            imageResourceKeys(resource, index).forEach((key) => all.push(key));
+        });
+        imageState.checked = checkedImageFiles().length ? [] : all;
+        refreshImageDetail();
+    };
+    const download = root.querySelector('[data-action="download-image-files"]');
+    if (download) download.onclick = async () => {
+        download.disabled = true;
+        try {
+            const { queued, failures } = await downloadCheckedImageFiles();
+            await loadDownloads(false);
+            syncLiveDownloadSurfaces();
+            if (queued) showToast(t("Queued {count} downloads", { count: queued }));
+            if (failures.length) showToast(failures[0]);
+        } catch (err) {
+            showToast(err.message);
+        }
+        refreshImageDetail();
+    };
+}
+
+async function loadMoreImages() {
+    const results = bodyEl?.querySelector(".cmgr-image-results");
+    const startIndex = imageState.items.length;
+    results?.insertAdjacentHTML("beforeend", renderCardSkeletons(6, { loadMore: true }));
+    await loadImageFeed({ reset: false });
+    if (!results?.isConnected) return;
+    results.querySelectorAll(".cmgr-load-more-skeleton").forEach((item) => item.remove());
+    const fresh = imageState.items.slice(startIndex);
+    if (fresh.length) {
+        results.insertAdjacentHTML("beforeend", fresh.map((image, index) => renderImageCard(image, startIndex + index)).join(""));
+        bindImageEvents(bodyEl);
+        observeCardMedia(results);
+    }
+}
+
+async function openImageLink(imageId) {
+    imageState.loadingResources = true;
+    imageState.resourceError = "";
+    imageState.resources = [];
+    imageState.checked = [];
+    imageState.overrides = {};
+    imageState.selectedImage = { id: imageId, url: "" };
+    imageState.selectedId = String(imageId);
+    openDetailDrawer();
+    refreshImageDetail();
+    await openImageById(imageId);
+    imageState.loadingResources = false;
+    if (imageState.resourceError) showToast(imageState.resourceError);
+    render();
 }
 
 function bindDiscoverEvents(root) {

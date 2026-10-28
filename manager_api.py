@@ -78,6 +78,25 @@ SEARCH_VERSION_FIELDS = ("id", "name", "baseModel", "baseModelType", "publishedA
 SEARCH_FILE_FIELDS = ("id", "name", "sizeKB", "type", "primary", "metadata", "hashes", "downloadUrl")
 SEARCH_IMAGE_FIELDS = ("url", "type", "nsfwLevel", "width", "height")
 SEARCH_PRIMARY_IMAGE_LIMIT = 12
+# Civitai's image feed and the resources each image was generated with.
+IMAGES_URL = f"{CIVITAI_API_BASE}/images"
+IMAGE_FEED_PAGE_SIZE = 40
+IMAGE_FEED_CACHE_TTL = 60
+IMAGE_FEED_CACHE_LIMIT = 64
+IMAGE_RESOURCE_KINDS = {
+    "checkpoint": "checkpoint",
+    "lora": "lora",
+    "locon": "lora",
+    "lycoris": "lora",
+    "dora": "lora",
+    "embed": "embed",
+    "embedding": "embed",
+    "vae": "vae",
+    "workflow": "workflow",
+    "unet": "checkpoint",
+    "diffusion model": "checkpoint",
+}
+CIVITAI_IMAGE_URL_RE = re.compile(r"civitai\.(?:com|red)/(?:images|i)/(\d+)", re.IGNORECASE)
 SEARCH_FALLBACK_CURSOR_PREFIX = "fallback:"
 SEARCH_ATTEMPT_CURSOR_PREFIX = "attempt:"
 SEARCH_FALLBACK_MAX_PAGES = 8
@@ -173,6 +192,8 @@ _SEARCH_RESULT_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
 _SEARCH_RESULT_CACHE_LOCK = threading.Lock()
 _MODEL_DETAIL_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
 _MODEL_DETAIL_CACHE_LOCK = threading.Lock()
+_IMAGE_FEED_CACHE: dict[tuple[Any, ...], dict[str, Any]] = {}
+_IMAGE_FEED_CACHE_LOCK = threading.Lock()
 _FAVORITES_LOCK = threading.Lock()
 _LIBRARY_INDEX = LibraryIndex(ttl_seconds=30)
 _MODEL_FOLDERS_LOCK = threading.Lock()
@@ -2083,6 +2104,242 @@ def _cache_dir(name: str) -> str:
     return path
 
 
+def _image_resource_kind(value: Any) -> str:
+    """Map a Civitai resource type to the Discover asset kind it belongs to."""
+    clean = str(value or "").strip().lower()
+    if clean in IMAGE_RESOURCE_KINDS:
+        return IMAGE_RESOURCE_KINDS[clean]
+    for token, kind in IMAGE_RESOURCE_KINDS.items():
+        if token in clean:
+            return kind
+    return ""
+
+
+def _image_resource_entry(resource: Any) -> dict[str, Any] | None:
+    if not isinstance(resource, dict):
+        return None
+    kind = _image_resource_kind(resource.get("type"))
+    version_id = resource.get("modelVersionId") or resource.get("versionId") or resource.get("model_version_id")
+    model_id = resource.get("modelId") or resource.get("model_id")
+    if not version_id and not model_id:
+        return None
+    return {
+        "kind": kind,
+        "type": str(resource.get("type") or ""),
+        "model_id": str(model_id or ""),
+        "version_id": str(version_id or ""),
+        "name": str(resource.get("modelName") or resource.get("name") or ""),
+        "version_name": str(resource.get("modelVersionName") or resource.get("versionName") or ""),
+        "base_model": str(resource.get("baseModel") or ""),
+        "weight": resource.get("weight") if isinstance(resource.get("weight"), (int, float)) else None,
+    }
+
+
+def _image_resources(image: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = image.get("resources")
+    if not isinstance(raw, list):
+        raw = (image.get("meta") or {}).get("resources") if isinstance(image.get("meta"), dict) else None
+    entries = [entry for entry in (_image_resource_entry(item) for item in (raw or [])) if entry]
+    # A resource can appear twice (base model plus the checkpoint alias); keep one.
+    seen: set[tuple[str, str]] = set()
+    unique: list[dict[str, Any]] = []
+    for entry in entries:
+        key = (entry["kind"], entry["version_id"] or entry["model_id"])
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(entry)
+    return unique
+
+
+def _image_feed_card(image: dict[str, Any]) -> dict[str, Any]:
+    meta = image.get("meta") if isinstance(image.get("meta"), dict) else {}
+    stats = image.get("stats") if isinstance(image.get("stats"), dict) else {}
+    username = str(image.get("username") or "").strip()
+    if not username and isinstance(image.get("user"), dict):
+        username = str(image.get("user", {}).get("username") or "")
+    return {
+        "id": image.get("id"),
+        "url": str(image.get("url") or ""),
+        "width": image.get("width"),
+        "height": image.get("height"),
+        "nsfwLevel": image.get("nsfwLevel") or meta.get("nsfwLevel") or 0,
+        "type": str(image.get("type") or "image"),
+        "username": username,
+        "baseModel": str(image.get("baseModel") or meta.get("baseModel") or ""),
+        "prompt": str(meta.get("prompt") or ""),
+        "stats": {
+            "likeCount": stats.get("likeCount") or stats.get("heartCount") or 0,
+            "heartCount": stats.get("heartCount") or 0,
+            "commentCount": stats.get("commentCount") or 0,
+        },
+        "resources": _image_resources(image),
+    }
+
+
+def _images_query_params(
+    query: str = "",
+    cursor: str = "",
+    sort: str = "Newest",
+    limit: int = IMAGE_FEED_PAGE_SIZE,
+    period: str = "AllTime",
+    base_model: str = "",
+    config: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    config = config or load_config()
+    params: dict[str, str] = {
+        "limit": str(max(1, min(int(limit or IMAGE_FEED_PAGE_SIZE), 100))),
+        "sort": str(sort or "Newest"),
+        "period": str(period or "AllTime"),
+        "nsfw": "true" if config.get("allow_nsfw") else "false",
+    }
+    if query.strip():
+        params["query"] = query.strip()
+    if cursor.strip():
+        params["cursor"] = cursor.strip()
+    if base_model.strip():
+        params["baseModels"] = base_model.strip()
+    return params
+
+
+def _read_images_json(params: dict[str, str], api_key: str | None, timeout: int = 30) -> dict[str, Any] | None:
+    url = f"{IMAGES_URL}?{urllib.parse.urlencode(params)}"
+    return _read_json_url_with_retries(url, api_key=api_key, timeout=timeout, retries=1)
+
+
+def _image_feed(
+    query: str,
+    cursor: str,
+    sort: str,
+    limit: int,
+    period: str,
+    base_model: str,
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    api_key = str(config.get("civitai_api_key") or "").strip() or None
+    params = _images_query_params(query, cursor, sort, limit, period, base_model, config)
+    result = _read_images_json(params, api_key)
+    if not result or result.get("error"):
+        return {
+            "items": [],
+            "metadata": {},
+            "error": (result or {}).get("error") or "No response from Civitai images",
+            "content_filter_active": not bool(config.get("allow_nsfw", False)),
+        }
+    items = [item for item in (result.get("items") if isinstance(result.get("items"), list) else []) if isinstance(item, dict)]
+    metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+    return {
+        "items": [_image_feed_card(item) for item in items[:limit]],
+        "metadata": metadata,
+        "content_filter_active": not bool(config.get("allow_nsfw", False)),
+    }
+
+
+def _parse_image_id(value: str) -> str:
+    clean = str(value or "").strip()
+    if clean.isdigit():
+        return clean
+    match = CIVITAI_IMAGE_URL_RE.search(clean)
+    return match.group(1) if match else ""
+
+
+def _image_detail(image_id: str, config: dict[str, Any]) -> dict[str, Any]:
+    api_key = str(config.get("civitai_api_key") or "").strip() or None
+    url = f"{IMAGES_URL}?imageId={urllib.parse.quote(str(image_id))}&nsfw=true&limit=1"
+    result = _read_json_url_with_retries(url, api_key=api_key, timeout=30, retries=1)
+    if not result or result.get("error"):
+        return {"error": (result or {}).get("error") or "Image not found"}
+    items = [item for item in (result.get("items") if isinstance(result.get("items"), list) else []) if isinstance(item, dict)]
+    match = next((item for item in items if str(item.get("id") or "") == str(image_id)), None)
+    if not match:
+        return {"error": "Image not found"}
+    return {"image": _image_feed_card(match)}
+
+
+def _resource_search_item(model: dict[str, Any]) -> dict[str, Any]:
+    """A search card built from a full model payload, so image resources match Discover.
+
+    Every version is kept: the image pins one of them first, but the picker still
+    needs the others so a different version can be chosen.
+    """
+    item = _search_card(model)
+    item["description"] = model.get("description") or ""
+    item["civitai_url"] = f"https://civitai.red/models/{model.get('id')}" if model.get("id") else ""
+    return item
+
+
+def _resolve_image_resources(
+    resources: list[dict[str, Any]],
+    config: dict[str, Any],
+    selected_version_ids: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Turns image resources into full model cards with every file of a version.
+
+    The image payload only carries ids, so each resource is fetched and pinned to
+    the version the image was generated with; that version keeps the full file
+    list, which is what the tick-box bulk download needs.
+    """
+    api_key = str(config.get("civitai_api_key") or "").strip() or None
+    selected_version_ids = selected_version_ids or {}
+    entries: list[dict[str, Any]] = []
+    for resource in resources:
+        if not isinstance(resource, dict):
+            continue
+        kind = str(resource.get("kind") or "")
+        version_id = str(resource.get("version_id") or "")
+        model_id = str(resource.get("model_id") or "")
+        entry = {
+            **resource,
+            "supported": kind in {"checkpoint", "lora", "workflow"},
+            "model": None,
+            "error": "",
+        }
+        if not entry["supported"]:
+            entry["error"] = "unsupported"
+            entries.append(entry)
+            continue
+        if not model_id and not version_id:
+            entry["error"] = "missing ids"
+            entries.append(entry)
+            continue
+        target_version_id = str(selected_version_ids.get(version_id or model_id) or version_id)
+        try:
+            if not model_id:
+                version_payload = _read_json_url_with_retries(
+                    f"{CIVITAI_API_BASE}/model-versions/{urllib.parse.quote(version_id)}",
+                    api_key=api_key, timeout=30, retries=1, quiet=True,
+                )
+                if version_payload and not version_payload.get("error"):
+                    model_id = str(version_payload.get("modelId") or (version_payload.get("model") or {}).get("id") or "")
+            if not model_id:
+                entry["error"] = "Model not found"
+                entries.append(entry)
+                continue
+            model = _read_json_url_with_retries(
+                f"{CIVITAI_API_BASE}/models/{urllib.parse.quote(model_id)}",
+                api_key=api_key, timeout=30, retries=1, quiet=True,
+            )
+            if not model or model.get("error"):
+                entry["error"] = str((model or {}).get("error") or "Model not found")
+                entries.append(entry)
+                continue
+            card = _resource_search_item(model)
+            versions = card.get("modelVersions") if isinstance(card.get("modelVersions"), list) else []
+            pinned = next((item for item in versions if str(item.get("id") or "") == target_version_id), None)
+            if pinned:
+                card["modelVersions"] = [pinned, *[item for item in versions if item is not pinned]]
+            entry["model"] = card
+            entry["model_id"] = model_id
+            entry["version_id"] = str((pinned or {}).get("id") or target_version_id or "")
+            entry["name"] = card.get("name") or entry.get("name") or ""
+            entry["base_model"] = str((pinned or {}).get("baseModel") or entry.get("base_model") or "")
+            entry["type"] = str(card.get("type") or entry.get("type") or "")
+        except Exception as exc:
+            entry["error"] = str(exc)
+        entries.append(entry)
+    return entries
+
+
 def _search_base_model_text_fallback(
     kind: str,
     query: str,
@@ -2476,6 +2733,76 @@ async def model_detail_api(request: web.Request) -> web.Response:
                 _MODEL_DETAIL_CACHE.pop(min(_MODEL_DETAIL_CACHE, key=lambda key: _MODEL_DETAIL_CACHE[key]["timestamp"]), None)
             _MODEL_DETAIL_CACHE[cache_key] = {"timestamp": now, "model": data}
         return web.json_response({"success": True, "model": data})
+    except Exception as exc:
+        return web.json_response({"success": False, "error": str(exc)}, status=500)
+
+
+async def images_api(request: web.Request) -> web.Response:
+    try:
+        config = load_config()
+        query = request.query.get("query", "")
+        cursor = request.query.get("cursor", "")
+        sort = request.query.get("sort", "Newest") or "Newest"
+        period = request.query.get("period", "AllTime") or "AllTime"
+        base_model = request.query.get("base_model") or request.query.get("baseModels") or ""
+        limit = max(1, min(int(request.query.get("limit", str(IMAGE_FEED_PAGE_SIZE))), 100))
+        cache_key = (
+            query.strip(),
+            cursor.strip(),
+            sort,
+            period,
+            limit,
+            base_model.strip(),
+            bool(config.get("allow_nsfw", True)),
+            _api_key_cache_part(str(config.get("civitai_api_key") or "").strip() or None),
+        )
+        now = _now()
+        with _IMAGE_FEED_CACHE_LOCK:
+            cached = _IMAGE_FEED_CACHE.get(cache_key)
+            if cached and now - int(cached.get("timestamp") or 0) < IMAGE_FEED_CACHE_TTL:
+                return web.json_response(cached["data"])
+        result = await asyncio.to_thread(
+            _image_feed, query, cursor, sort, limit, period, base_model, config,
+        )
+        if isinstance(result, dict) and not result.get("error"):
+            with _IMAGE_FEED_CACHE_LOCK:
+                if len(_IMAGE_FEED_CACHE) >= IMAGE_FEED_CACHE_LIMIT:
+                    _IMAGE_FEED_CACHE.pop(
+                        min(_IMAGE_FEED_CACHE, key=lambda key: int(_IMAGE_FEED_CACHE[key].get("timestamp") or 0)),
+                        None,
+                    )
+                _IMAGE_FEED_CACHE[cache_key] = {"timestamp": now, "data": result}
+        return web.json_response(result)
+    except Exception as exc:
+        return web.json_response({"items": [], "metadata": {}, "error": str(exc)}, status=500)
+
+
+async def image_detail_api(request: web.Request) -> web.Response:
+    try:
+        image_id = _parse_image_id(request.query.get("id", ""))
+        if not image_id:
+            return web.json_response({"success": False, "error": "Missing image id or link"}, status=400)
+        data = await asyncio.to_thread(_image_detail, image_id, load_config())
+        if data.get("error"):
+            return web.json_response({"success": False, "error": data["error"]}, status=404)
+        return web.json_response({"success": True, "image": data["image"]})
+    except Exception as exc:
+        return web.json_response({"success": False, "error": str(exc)}, status=500)
+
+
+async def image_resolve_api(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise ValueError("Image payload must be an object")
+        resources = body.get("resources") if isinstance(body.get("resources"), list) else []
+        selected = body.get("selected_versions") if isinstance(body.get("selected_versions"), dict) else {}
+        entries = await asyncio.to_thread(
+            _resolve_image_resources, resources, load_config(), {str(key): str(value) for key, value in selected.items()},
+        )
+        return web.json_response({"success": True, "resources": entries})
+    except ValueError as exc:
+        return web.json_response({"success": False, "error": str(exc)}, status=400)
     except Exception as exc:
         return web.json_response({"success": False, "error": str(exc)}, status=500)
 
