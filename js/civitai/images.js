@@ -1,15 +1,45 @@
 import { apiGet, apiPost } from "./api.js";
 import { renderCardMedia, renderCardSkeletons } from "./card_media.js";
-import { renderCollectionEmptyState } from "./components.js";
+import { renderActiveFilterChips, renderCollectionEmptyState } from "./components.js";
 import { formatBytes, formatStatCount, galleryItemsForUrl, isEarlyAccess, renderDetailDismiss, renderDetailGallery, renderEarlyAccessNotice } from "./detail.js";
 import { fileKey, fileRole } from "./file_picker.js";
 import { t } from "./i18n.js";
 import { createPreviewMedia } from "./media.js";
-import { renderSelectorSearch, renderSelectorToolbar, selectorIcon } from "./selector_ui.js";
+import { renderSelectorCombo, renderSelectorSearch, renderSelectorToolbar, selectorIcon } from "./selector_ui.js";
 
 export const IMAGES_KIND = "images";
 const PAGE_SIZE = 40;
 const DOWNLOADABLE_KINDS = new Set(["checkpoint", "lora", "workflow"]);
+// Civitai's image feed only sorts these ways, and only filters base model and
+// period; the model categories and tags have no image counterpart there.
+// These five values are the ones the endpoint accepts; anything else is a 400.
+export const IMAGE_SORTS = [
+    { value: "Most Reactions", label: "Most Reactions" },
+    { value: "Most Comments", label: "Most Comments" },
+    { value: "Most Collected", label: "Most Collected" },
+    { value: "Newest", label: "Newest" },
+    { value: "Oldest", label: "Oldest" },
+];
+export const IMAGE_PERIODS = [
+    { value: "AllTime", label: "All time" },
+    { value: "Year", label: "Past year" },
+    { value: "Month", label: "Past month" },
+    { value: "Week", label: "Past week" },
+    { value: "Day", label: "Past day" },
+];
+
+/** Reads an image id out of a pasted Civitai link, or a bare id. */
+export function parseImageLink(value) {
+    const text = String(value || "").trim();
+    if (!text) return "";
+    if (/^\d{4,}$/.test(text)) return text;
+    const match = text.match(/civitai\.(?:com|red)\/(?:images|i)\/(\d+)/i);
+    return match ? match[1] : "";
+}
+
+export function imagePeriodValue(label) {
+    return IMAGE_PERIODS.find((item) => t(item.label) === label)?.value || "AllTime";
+}
 
 // The image feed keeps its own list so switching between Discover kinds never
 // throws away the pictures the user was looking at.
@@ -18,7 +48,9 @@ export const imageState = {
     cursor: "",
     nextCursor: "",
     query: "",
-    sort: "Newest",
+    sort: "Most Reactions",
+    period: "AllTime",
+    baseModel: "",
     loading: false,
     loadingMore: false,
     error: "",
@@ -33,7 +65,6 @@ export const imageState = {
     overrides: {},
     targets: [],
     downloading: false,
-    linkOpen: false,
 };
 
 /** Folder choices offered next to every file, mirroring the model download picker. */
@@ -63,9 +94,16 @@ function escapeAttr(value) {
 }
 
 export function imageMedia(image, width = 450) {
-    const media = createPreviewMedia({ url: image?.url || "", type: "image" }, width);
+    // The feed hands out `original=true` URLs, whose B2 variant is often still
+    // missing; the legacy transformer answers with a ~25 KB thumbnail instead
+    // of the multi-megabyte original.
+    const media = createPreviewMedia({ url: image?.url || "", type: "image" }, width, { preferLegacy: true });
     return { ...media, emptyText: t("No Preview") };
 }
+
+// A newer load always wins, so switching kinds mid-request can never leave the
+// grid showing an older page (or nothing at all).
+let feedToken = 0;
 
 export function resetImageFeed() {
     imageState.items = [];
@@ -77,25 +115,34 @@ export function resetImageFeed() {
     imageState.resources = [];
     imageState.checked = [];
     imageState.overrides = {};
+    // Any page still on its way belongs to the feed that was just dropped.
+    feedToken += 1;
+    imageState.loading = false;
+    imageState.loadingMore = false;
 }
 
 export async function loadImageFeed({ reset = true, silent = false } = {}) {
-    if (imageState.loading || imageState.loadingMore) return;
     if (reset) {
+        feedToken += 1;
         imageState.loading = true;
+        imageState.loadingMore = false;
         if (!silent) imageState.error = "";
     } else {
-        if (!imageState.nextCursor) return;
+        if (imageState.loading || imageState.loadingMore || !imageState.nextCursor) return;
         imageState.loadingMore = true;
     }
+    const token = feedToken;
     const params = new URLSearchParams({
         query: imageState.query,
         sort: imageState.sort,
+        period: imageState.period,
         limit: String(PAGE_SIZE),
     });
+    if (imageState.baseModel) params.set("base_model", imageState.baseModel);
     if (!reset && imageState.nextCursor) params.set("cursor", imageState.nextCursor);
     try {
         const data = await apiGet(`/images?${params.toString()}`);
+        if (token !== feedToken) return;
         const items = Array.isArray(data?.items) ? data.items : [];
         const seen = new Set(reset ? [] : imageState.items.map((item) => String(item.id)));
         imageState.items = reset ? items : [...imageState.items, ...items.filter((item) => !seen.has(String(item.id)))];
@@ -103,10 +150,13 @@ export async function loadImageFeed({ reset = true, silent = false } = {}) {
         imageState.contentFilterActive = data?.content_filter_active === true;
         if (data?.error) imageState.error = String(data.error);
     } catch (err) {
+        if (token !== feedToken) return;
         imageState.error = err.message || String(err);
     } finally {
-        imageState.loading = false;
-        imageState.loadingMore = false;
+        if (token === feedToken) {
+            imageState.loading = false;
+            imageState.loadingMore = false;
+        }
     }
 }
 
@@ -206,11 +256,8 @@ export function renderImageCard(image, index = 0) {
     const selected = String(image.id) === String(imageState.selectedId);
     const resourceCount = Array.isArray(image.resources) ? image.resources.length : 0;
     const media = imageMedia(image, 450);
-    const width = Number(image.width);
-    const height = Number(image.height);
-    const ratio = width > 0 && height > 0 ? (width / height).toFixed(3) : "1";
     return `
-        <article class="cmgr-card cmgr-image-card ${selected ? "selected" : ""}" data-image-id="${escapeAttr(image.id)}" tabindex="0" role="button" aria-label="${escapeAttr(image.username || t("Civitai image"))}" style="--cmgr-image-ratio:${ratio}">
+        <article class="cmgr-card cmgr-image-card ${selected ? "selected" : ""}" data-image-id="${escapeAttr(image.id)}" tabindex="0" role="button" aria-label="${escapeAttr(image.username || t("Civitai image"))}">
             <div class="cmgr-thumb cmgr-image-thumb">
                 ${renderCardMedia(media, { eager: index < 8, priority: index < 4 ? "high" : "auto" })}
                 ${resourceCount ? `<span class="cmgr-image-resource-badge">${selectorIcon("layers")}<b>${resourceCount}</b></span>` : ""}
@@ -233,22 +280,84 @@ function renderImageEmpty() {
         kicker: t("Images"),
         title: t("No images found"),
         description: imageState.error || t("Try another keyword, or paste a Civitai image link above."),
-        hints: [t("Change keywords"), t("Open from link")],
+        hints: [t("Change keywords"), t("Paste a link")],
     });
 }
 
-function renderImageLinkBar() {
+export function renderImageSort() {
+    const current = IMAGE_SORTS.find((item) => item.value === imageState.sort) || IMAGE_SORTS[0];
     return `
-        <div class="cmgr-image-link-bar ${imageState.linkOpen ? "is-open" : ""}">
-            <button class="cmgr-selector-button" type="button" data-action="toggle-image-link" aria-expanded="${imageState.linkOpen ? "true" : "false"}">${selectorIcon("tag")}<span>${escapeHtml(t("Open from link"))}</span></button>
-            ${imageState.linkOpen ? `
-                <div class="cmgr-image-link-form">
-                    <input class="cmgr-input" data-field="image-link" placeholder="${escapeAttr(t("Paste a civitai.com/images/... link"))}" aria-label="${escapeAttr(t("Paste a civitai.com/images/... link"))}" autocomplete="off" />
-                    <button class="cmgr-primary" type="button" data-action="open-image-link">${escapeHtml(t("Open"))}</button>
-                </div>
-            ` : ""}
+        <details class="cmgr-selector-tools cmgr-selector-sort">
+            <summary aria-label="${escapeAttr(t("Sort"))}" aria-haspopup="menu"><span>${escapeHtml(t(current.label))}</span>${selectorIcon("chevron")}</summary>
+            <div class="cmgr-selector-menu" role="menu" aria-label="${escapeAttr(t("Sort"))}">
+                ${IMAGE_SORTS.map((item) => `<button type="button" role="menuitemradio" aria-checked="${imageState.sort === item.value}" data-image-sort="${escapeAttr(item.value)}">${escapeHtml(t(item.label))}</button>`).join("")}
+            </div>
+        </details>
+    `;
+}
+
+/** The Images sidebar: the only two filters Civitai's image feed accepts. */
+export function renderImageFilters(baseModels = [], options = {}) {
+    const loading = options.loading === true;
+    // Taxonomy rows are `{ name, count }` records; accepting both shapes keeps
+    // this working no matter which one the caller hands over.
+    const names = (Array.isArray(baseModels) ? baseModels : [])
+        .map((item) => String(item?.name || item || "").trim())
+        .filter(Boolean);
+    const selected = imageState.baseModel;
+    const items = selected && !names.includes(selected) ? [selected, ...names] : names;
+    return `
+        <div class="cmgr-nav-group cmgr-category-group">
+            <div class="cmgr-nav-title">${escapeHtml(t("Base Model"))}</div>
+            <div class="cmgr-search-picker">
+                ${renderSelectorCombo({
+                    id: "image-base-model",
+                    value: selected,
+                    items,
+                    placeholder: t("All base models"),
+                    searchPlaceholder: t("Search base models..."),
+                    emptyText: t("No base models found"),
+                    clearTitle: t("Clear base model"),
+                })}
+            </div>
+            ${!items.length ? `<div class="cmgr-nav-note">${escapeHtml(t(loading ? "Loading base models..." : "Base models appear from Civitai data."))}</div>` : ""}
+        </div>
+        <div class="cmgr-nav-group cmgr-category-group">
+            <div class="cmgr-nav-title">${escapeHtml(t("Period"))}</div>
+            <div class="cmgr-search-picker">
+                ${renderSelectorCombo({
+                    id: "image-period",
+                    value: imageState.period === "AllTime" ? "" : t(IMAGE_PERIODS.find((item) => item.value === imageState.period)?.label || ""),
+                    items: IMAGE_PERIODS.slice(1).map((item) => t(item.label)),
+                    placeholder: t("All time"),
+                    searchPlaceholder: t("Search"),
+                    emptyText: t("No options found"),
+                    clearTitle: t("Clear"),
+                })}
+            </div>
         </div>
     `;
+}
+
+function renderImageFilterBar() {
+    const chips = [];
+    if (imageState.baseModel) {
+        chips.push({
+            key: "image-base-model",
+            label: t("Base Model"),
+            value: imageState.baseModel,
+            clearAction: "clear-image-base-model",
+        });
+    }
+    if (imageState.period !== "AllTime") {
+        chips.push({
+            key: "image-period",
+            label: t("Period"),
+            value: t(IMAGE_PERIODS.find((item) => item.value === imageState.period)?.label || ""),
+            clearAction: "clear-image-period",
+        });
+    }
+    return renderActiveFilterChips(chips, "reset-image-filters");
 }
 
 export function renderImageDiscover(headingHtml = "") {
@@ -258,18 +367,19 @@ export function renderImageDiscover(headingHtml = "") {
         searchHtml: renderSelectorSearch({
             value: imageState.query,
             inputAttrs: 'data-field="image-query"',
-            placeholder: t("Search Civitai images..."),
+            placeholder: t("Search images or paste a Civitai image link"),
             clearAction: "clear-image-search",
             loading: imageState.loading,
         }),
         actionsHtml: `
-            <button class="cmgr-selector-button" type="button" data-action="refresh-images" title="${escapeAttr(t("Refresh"))}" aria-label="${escapeAttr(t("Refresh"))}">${selectorIcon("refresh")}</button>
+            ${renderImageSort()}
+            <button class="cmgr-selector-button is-icon" type="button" data-action="refresh-images" title="${escapeAttr(t("Refresh"))}" aria-label="${escapeAttr(t("Refresh"))}">${selectorIcon("refresh")}</button>
         `,
+        filterBarHtml: renderImageFilterBar(),
     });
     return `
         <section class="cmgr-page cmgr-images">
             ${toolbar}
-            ${renderImageLinkBar()}
             <div class="cmgr-split has-detail ${imageState.selectedImage ? "is-detail-open" : ""}">
                 <div class="cmgr-results cmgr-image-results">
                     ${imageState.items.length ? imageState.items.map((image, index) => renderImageCard(image, index)).join("") : renderImageEmpty()}
@@ -335,7 +445,7 @@ function renderResourceCard(resource, index) {
                         ? files.map((file) => resourceFileRow(resource, index, file, checked.has(`${index}::${fileKey(file)}`))).join("")
                         : `<p class="cmgr-nav-note">${escapeHtml(t("This version has no downloadable file."))}</p>`}
                 </div>
-            ` : `<p class="cmgr-nav-note">${escapeHtml(t("This resource kind cannot be downloaded from here."))}</p>`}
+            ` : `<p class="cmgr-nav-note">${escapeHtml(!resource?.model && resource?.error && resource.error !== "unsupported" ? t("This model could not be loaded.") : t("This resource kind cannot be downloaded from here."))}</p>`}
         </article>
     `;
 }
@@ -360,7 +470,7 @@ function renderImageDetailBody() {
     const resources = imageState.resources;
     return `
         <div class="cmgr-detail-scroll cmgr-image-detail">
-            ${renderDetailGallery(galleryItemsForUrl(image.url), image.username || t("Civitai image"), t("No Preview"))}
+            ${renderDetailGallery(galleryItemsForUrl(image.url, { preferLegacy: true }), image.username || t("Civitai image"), t("No Preview"))}
             <div class="cmgr-detail-head">
                 <div>
                     <a class="cmgr-detail-title-link" href="https://civitai.com/images/${encodeURIComponent(image.id || "")}" target="_blank" rel="noopener noreferrer">

@@ -96,6 +96,8 @@ IMAGE_RESOURCE_KINDS = {
     "unet": "checkpoint",
     "diffusion model": "checkpoint",
 }
+DOWNLOADABLE_IMAGE_RESOURCE_KINDS = {"checkpoint", "lora", "workflow"}
+IMAGE_RESOURCE_FETCH_WORKERS = 4
 CIVITAI_IMAGE_URL_RE = re.compile(r"civitai\.(?:com|red)/(?:images|i)/(\d+)", re.IGNORECASE)
 SEARCH_FALLBACK_CURSOR_PREFIX = "fallback:"
 SEARCH_ATTEMPT_CURSOR_PREFIX = "attempt:"
@@ -2140,6 +2142,24 @@ def _image_resources(image: dict[str, Any]) -> list[dict[str, Any]]:
     if not isinstance(raw, list):
         raw = (image.get("meta") or {}).get("resources") if isinstance(image.get("meta"), dict) else None
     entries = [entry for entry in (_image_resource_entry(item) for item in (raw or [])) if entry]
+    if not entries:
+        # The public images endpoint sends neither `resources` nor `meta`, only
+        # the version ids the picture was made with. Keep them as unresolved
+        # entries so the detail panel can turn them into real models.
+        for version_id in image.get("modelVersionIds") or []:
+            clean = str(version_id or "").strip()
+            if not clean:
+                continue
+            entries.append({
+                "kind": "",
+                "type": "",
+                "model_id": "",
+                "version_id": clean,
+                "name": "",
+                "version_name": "",
+                "base_model": "",
+                "weight": None,
+            })
     # A resource can appear twice (base model plus the checkpoint alias); keep one.
     seen: set[tuple[str, str]] = set()
     unique: list[dict[str, Any]] = []
@@ -2245,15 +2265,25 @@ def _parse_image_id(value: str) -> str:
 
 def _image_detail(image_id: str, config: dict[str, Any]) -> dict[str, Any]:
     api_key = str(config.get("civitai_api_key") or "").strip() or None
-    url = f"{IMAGES_URL}?imageId={urllib.parse.quote(str(image_id))}&nsfw=true&limit=1"
-    result = _read_json_url_with_retries(url, api_key=api_key, timeout=30, retries=1)
-    if not result or result.get("error"):
-        return {"error": (result or {}).get("error") or "Image not found"}
-    items = [item for item in (result.get("items") if isinstance(result.get("items"), list) else []) if isinstance(item, dict)]
-    match = next((item for item in items if str(item.get("id") or "") == str(image_id)), None)
-    if not match:
-        return {"error": "Image not found"}
-    return {"image": _image_feed_card(match)}
+    # An `imageId` lookup only returns pictures of the browsing level it asks
+    # for: `nsfw=true` hides safe images and the bare request hides NSFW ones.
+    # Both are tried so a pasted link resolves either way.
+    attempts: list[dict[str, str]] = []
+    if config.get("allow_nsfw"):
+        attempts.append({"imageId": str(image_id), "nsfw": "true", "limit": "1"})
+    attempts.append({"imageId": str(image_id), "limit": "1"})
+    last_error = ""
+    for params in attempts:
+        url = f"{IMAGES_URL}?{urllib.parse.urlencode(params)}"
+        result = _read_json_url_with_retries(url, api_key=api_key, timeout=30, retries=1, quiet=True)
+        if not result or result.get("error"):
+            last_error = str((result or {}).get("error") or "Image not found")
+            continue
+        items = [item for item in (result.get("items") if isinstance(result.get("items"), list) else []) if isinstance(item, dict)]
+        match = next((item for item in items if str(item.get("id") or "") == str(image_id)), None)
+        if match:
+            return {"image": _image_feed_card(match)}
+    return {"error": last_error or "Image not found"}
 
 
 def _resource_search_item(model: dict[str, Any]) -> dict[str, Any]:
@@ -2268,76 +2298,127 @@ def _resource_search_item(model: dict[str, Any]) -> dict[str, Any]:
     return item
 
 
+def _image_version_card(version_payload: dict[str, Any]) -> dict[str, Any]:
+    """A single-version model card built straight from a model-version payload.
+
+    The image only pins one version, and `/model-versions/{id}` already carries
+    its files, so there is no model request to make.
+    """
+    version = _pick(version_payload, SEARCH_VERSION_FIELDS)
+    version["files"] = [
+        _pick(file, SEARCH_FILE_FIELDS) for file in version_payload.get("files") or [] if isinstance(file, dict)
+    ]
+    version["images"] = [
+        _pick(image, SEARCH_IMAGE_FIELDS) for image in (version_payload.get("images") or [])[:2] if isinstance(image, dict)
+    ]
+    model_info = version_payload.get("model") if isinstance(version_payload.get("model"), dict) else {}
+    return {
+        "id": str(version_payload.get("modelId") or ""),
+        "name": str(model_info.get("name") or ""),
+        "type": str(model_info.get("type") or ""),
+        "modelVersions": [version],
+    }
+
+
+def _resolve_image_resource(
+    resource: dict[str, Any],
+    api_key: str | None,
+    selected_version_ids: dict[str, str],
+) -> dict[str, Any]:
+    """Resolves one image resource into a model card holding its files."""
+    entry: dict[str, Any] = {**resource, "supported": False, "model": None, "error": ""}
+    kind = str(resource.get("kind") or "")
+    version_id = str(resource.get("version_id") or "")
+    model_id = str(resource.get("model_id") or "")
+    if not model_id and not version_id:
+        entry["error"] = "missing ids"
+        return entry
+    if kind and kind not in DOWNLOADABLE_IMAGE_RESOURCE_KINDS:
+        # Embeds, VAEs and anything else this panel cannot download need no lookup.
+        entry["error"] = "unsupported"
+        return entry
+    target_version_id = str(selected_version_ids.get(version_id or model_id) or version_id)
+    try:
+        version_payload = None
+        if target_version_id:
+            version_payload = _read_json_url_with_retries(
+                f"{CIVITAI_API_BASE}/model-versions/{urllib.parse.quote(target_version_id)}",
+                api_key=api_key, timeout=30, retries=1, quiet=True,
+            )
+            if version_payload and version_payload.get("error"):
+                version_payload = None
+        if isinstance(version_payload, dict):
+            model_info = version_payload.get("model") if isinstance(version_payload.get("model"), dict) else {}
+            kind = kind or _image_resource_kind(model_info.get("type"))
+            entry["kind"] = kind
+            entry["model_id"] = model_id or str(version_payload.get("modelId") or "")
+            entry["version_id"] = str(version_payload.get("id") or target_version_id)
+            entry["type"] = str(model_info.get("type") or entry.get("type") or "")
+            entry["name"] = str(model_info.get("name") or entry.get("name") or "")
+            entry["base_model"] = str(version_payload.get("baseModel") or entry.get("base_model") or "")
+            entry["supported"] = kind in DOWNLOADABLE_IMAGE_RESOURCE_KINDS
+            if not entry["supported"]:
+                entry["error"] = "unsupported"
+                return entry
+            entry["model"] = _image_version_card(version_payload)
+            return entry
+        if kind and kind not in DOWNLOADABLE_IMAGE_RESOURCE_KINDS:
+            entry["error"] = "unsupported"
+            return entry
+        if not model_id:
+            entry["error"] = "Model not found"
+            return entry
+        model = _read_json_url_with_retries(
+            f"{CIVITAI_API_BASE}/models/{urllib.parse.quote(model_id)}",
+            api_key=api_key, timeout=30, retries=1, quiet=True,
+        )
+        if not model or model.get("error"):
+            entry["error"] = str((model or {}).get("error") or "Model not found")
+            return entry
+        card = _resource_search_item(model)
+        kind = kind or _image_resource_kind(card.get("type"))
+        entry["kind"] = kind
+        entry["supported"] = kind in DOWNLOADABLE_IMAGE_RESOURCE_KINDS
+        if not entry["supported"]:
+            entry["error"] = "unsupported"
+            return entry
+        versions = card.get("modelVersions") if isinstance(card.get("modelVersions"), list) else []
+        pinned = next((item for item in versions if str(item.get("id") or "") == target_version_id), None)
+        if pinned:
+            card["modelVersions"] = [pinned, *[item for item in versions if item is not pinned]]
+        entry["model"] = card
+        entry["model_id"] = model_id
+        entry["version_id"] = str((pinned or {}).get("id") or target_version_id or "")
+        entry["name"] = card.get("name") or entry.get("name") or ""
+        entry["base_model"] = str((pinned or {}).get("baseModel") or entry.get("base_model") or "")
+        entry["type"] = str(card.get("type") or entry.get("type") or "")
+    except Exception as exc:
+        entry["error"] = str(exc)
+    return entry
+
+
 def _resolve_image_resources(
     resources: list[dict[str, Any]],
     config: dict[str, Any],
     selected_version_ids: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Turns image resources into full model cards with every file of a version.
+    """Turns image resources into model cards with every file of their version.
 
-    The image payload only carries ids, so each resource is fetched and pinned to
-    the version the image was generated with; that version keeps the full file
-    list, which is what the tick-box bulk download needs.
+    The image payload only carries ids, so each resource is fetched on its own
+    and pinned to the version the image was generated with; that version keeps
+    the full file list, which is what the tick-box bulk download needs. Lookups
+    run in parallel because one picture can reference a whole LoRA stack.
     """
     api_key = str(config.get("civitai_api_key") or "").strip() or None
     selected_version_ids = selected_version_ids or {}
-    entries: list[dict[str, Any]] = []
-    for resource in resources:
-        if not isinstance(resource, dict):
-            continue
-        kind = str(resource.get("kind") or "")
-        version_id = str(resource.get("version_id") or "")
-        model_id = str(resource.get("model_id") or "")
-        entry = {
-            **resource,
-            "supported": kind in {"checkpoint", "lora", "workflow"},
-            "model": None,
-            "error": "",
-        }
-        if not entry["supported"]:
-            entry["error"] = "unsupported"
-            entries.append(entry)
-            continue
-        if not model_id and not version_id:
-            entry["error"] = "missing ids"
-            entries.append(entry)
-            continue
-        target_version_id = str(selected_version_ids.get(version_id or model_id) or version_id)
-        try:
-            if not model_id:
-                version_payload = _read_json_url_with_retries(
-                    f"{CIVITAI_API_BASE}/model-versions/{urllib.parse.quote(version_id)}",
-                    api_key=api_key, timeout=30, retries=1, quiet=True,
-                )
-                if version_payload and not version_payload.get("error"):
-                    model_id = str(version_payload.get("modelId") or (version_payload.get("model") or {}).get("id") or "")
-            if not model_id:
-                entry["error"] = "Model not found"
-                entries.append(entry)
-                continue
-            model = _read_json_url_with_retries(
-                f"{CIVITAI_API_BASE}/models/{urllib.parse.quote(model_id)}",
-                api_key=api_key, timeout=30, retries=1, quiet=True,
-            )
-            if not model or model.get("error"):
-                entry["error"] = str((model or {}).get("error") or "Model not found")
-                entries.append(entry)
-                continue
-            card = _resource_search_item(model)
-            versions = card.get("modelVersions") if isinstance(card.get("modelVersions"), list) else []
-            pinned = next((item for item in versions if str(item.get("id") or "") == target_version_id), None)
-            if pinned:
-                card["modelVersions"] = [pinned, *[item for item in versions if item is not pinned]]
-            entry["model"] = card
-            entry["model_id"] = model_id
-            entry["version_id"] = str((pinned or {}).get("id") or target_version_id or "")
-            entry["name"] = card.get("name") or entry.get("name") or ""
-            entry["base_model"] = str((pinned or {}).get("baseModel") or entry.get("base_model") or "")
-            entry["type"] = str(card.get("type") or entry.get("type") or "")
-        except Exception as exc:
-            entry["error"] = str(exc)
-        entries.append(entry)
-    return entries
+    items = [resource for resource in resources if isinstance(resource, dict)]
+    if not items:
+        return []
+    if len(items) == 1:
+        return [_resolve_image_resource(items[0], api_key, selected_version_ids)]
+    workers = min(len(items), IMAGE_RESOURCE_FETCH_WORKERS)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        return list(pool.map(lambda item: _resolve_image_resource(item, api_key, selected_version_ids), items))
 
 
 def _search_base_model_text_fallback(

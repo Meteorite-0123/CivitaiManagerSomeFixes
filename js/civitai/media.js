@@ -78,7 +78,7 @@ function civitaiMediaParts(rawUrl) {
  * The direct B2 URL avoids the legacy redirect; the legacy transformer remains
  * first fallback so newly uploaded media can be generated on demand.
  */
-export function createPreviewMedia(image, width = 450) {
+export function createPreviewMedia(image, width = 450, options = {}) {
     const rawUrl = sourceUrl(image);
     if (!rawUrl) return { url: "", rawUrl: "", type: "image", fallbackUrls: [] };
 
@@ -108,10 +108,13 @@ export function createPreviewMedia(image, width = 450) {
 
     const directImage = `${CIVITAI_B2_MEDIA_ROOT}/${mediaId}/${snappedWidth}x%3Cauto%3E_so`;
     const legacyImage = `${CIVITAI_LEGACY_MEDIA_ROOT}/${mediaId}/width=${snappedWidth},optimized=true/${mediaId}.jpeg`;
+    // Freshly uploaded media has no pre-generated B2 variant yet, so a caller
+    // that knows it is showing raw originals asks the legacy transformer first.
+    const first = options.preferLegacy ? legacyImage : directImage;
     return {
-        url: directImage,
+        url: first,
         rawUrl,
         type,
-        fallbackUrls: uniqueUrls([legacyImage, rawUrl]).filter((url) => url !== directImage),
+        fallbackUrls: uniqueUrls([options.preferLegacy ? directImage : legacyImage, rawUrl]).filter((url) => url !== first),
     };
 }

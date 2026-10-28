@@ -132,11 +132,11 @@ function urlList(primary, fallbacks) {
     return [primary, ...(Array.isArray(fallbacks) ? fallbacks : [])].filter(Boolean);
 }
 
-function galleryEntry(source) {
-    const view = createPreviewMedia(source, 450);
+function galleryEntry(source, options = {}) {
+    const view = createPreviewMedia(source, 450, options);
     if (!view.url) return null;
-    const thumb = createPreviewMedia(source, 96);
-    const full = createPreviewMedia(source, 1200);
+    const thumb = createPreviewMedia(source, 96, options);
+    const full = createPreviewMedia(source, 1200, options);
     const video = view.type === "video";
     return {
         type: view.type,
@@ -160,8 +160,8 @@ export function galleryItemsForModel(model, version) {
     return fallback ? [fallback] : [];
 }
 
-export function galleryItemsForUrl(url) {
-    const entry = url ? galleryEntry(url) : null;
+export function galleryItemsForUrl(url, options = {}) {
+    const entry = url ? galleryEntry(url, options) : null;
     return entry ? [entry] : [];
 }
 

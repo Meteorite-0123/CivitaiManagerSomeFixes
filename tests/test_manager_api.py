@@ -173,24 +173,73 @@ class ImageFeedTests(unittest.TestCase):
         self.assertEqual(params["baseModels"], "SDXL 1.0")
         self.assertNotIn("cursor", params)
 
-    def test_resource_resolution_pins_the_image_version(self):
-        model = {
-            "id": 30,
-            "name": "Style LoRA",
-            "type": "LORA",
-            "modelVersions": [
-                {"id": 41, "name": "new", "baseModel": "SDXL 1.0", "files": [{"name": "new.safetensors"}]},
-                {"id": 40, "name": "old", "baseModel": "SDXL 1.0", "files": [{"name": "old.safetensors"}]},
-            ],
+    def test_resource_resolution_reads_the_pinned_version(self):
+        version = {
+            "id": 40,
+            "modelId": 30,
+            "name": "old",
+            "baseModel": "SDXL 1.0",
+            "trainedWords": ["style"],
+            "files": [{"id": 7, "name": "old.safetensors", "sizeKB": 100}],
+            "model": {"name": "Style LoRA", "type": "LORA"},
         }
-        with mock.patch.object(manager, "_read_json_url_with_retries", return_value=model):
+        with mock.patch.object(manager, "_read_json_url_with_retries", return_value=version) as fetch:
             entries = manager._resolve_image_resources(
                 [{"type": "lora", "kind": "lora", "model_id": "30", "version_id": "40", "name": "Style"}],
                 {"civitai_api_key": ""},
             )
         self.assertEqual(entries[0]["error"], "")
+        self.assertEqual(fetch.call_args[0][0], "https://civitai.red/api/v1/model-versions/40")
+        self.assertEqual(entries[0]["model"]["name"], "Style LoRA")
         self.assertEqual(entries[0]["model"]["modelVersions"][0]["id"], 40)
         self.assertEqual(entries[0]["model"]["modelVersions"][0]["files"][0]["name"], "old.safetensors")
+
+    def test_bare_version_ids_resolve_into_a_kind_and_card(self):
+        version = {
+            "id": 40,
+            "modelId": 30,
+            "name": "v1.0",
+            "baseModel": "SDXL 1.0",
+            "files": [{"id": 7, "name": "lora.safetensors", "sizeKB": 100}],
+            "model": {"name": "Style LoRA", "type": "LORA"},
+        }
+        # The feed only ships `modelVersionIds`, so the kind stays empty until the
+        # version payload names it.
+        with mock.patch.object(manager, "_read_json_url_with_retries", return_value=version):
+            entries = manager._resolve_image_resources(
+                [{"kind": "", "model_id": "", "version_id": "40"}],
+                {},
+            )
+        self.assertEqual(entries[0]["error"], "")
+        self.assertEqual(entries[0]["kind"], "lora")
+        self.assertTrue(entries[0]["supported"])
+        self.assertEqual(entries[0]["model"]["modelVersions"][0]["files"][0]["name"], "lora.safetensors")
+
+    def test_feed_cards_fall_back_to_model_version_ids(self):
+        card = manager._image_feed_card({"id": 9, "url": "u", "modelVersionIds": [40, 41]})
+        self.assertEqual([item["version_id"] for item in card["resources"]], ["40", "41"])
+        self.assertEqual([item["kind"] for item in card["resources"]], ["", ""])
+
+    def test_image_detail_tries_both_browsing_levels(self):
+        calls = []
+
+        def fake(url, **_kwargs):
+            calls.append(url)
+            if "nsfw=true" in url:
+                return {"items": []}
+            return {"items": [{"id": 55, "url": "u", "modelVersionIds": [7]}]}
+
+        with mock.patch.object(manager, "_read_json_url_with_retries", side_effect=fake):
+            detail = manager._image_detail("55", {"allow_nsfw": True})
+        self.assertEqual(detail["image"]["id"], 55)
+        self.assertEqual(len(calls), 2)
+
+    def test_image_detail_only_asks_publicly_when_nsfw_is_off(self):
+        with mock.patch.object(manager, "_read_json_url_with_retries", return_value={"items": []}) as fetch:
+            detail = manager._image_detail("55", {})
+        self.assertEqual(detail["error"], "Image not found")
+        self.assertEqual(fetch.call_count, 1)
+        self.assertNotIn("nsfw", fetch.call_args[0][0])
 
     def test_unsupported_resources_are_reported_not_fetched(self):
         with mock.patch.object(manager, "_read_json_url_with_retries") as fetch:

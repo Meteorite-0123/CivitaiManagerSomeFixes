@@ -72,7 +72,10 @@ import {
     checkedImageFiles,
     downloadCheckedImageFiles,
     imageResourceKeys,
+    imagePeriodValue,
+    parseImageLink,
     renderImageCard,
+    renderImageFilters,
     resolveImageResources,
     setImageTargets,
 } from "./civitai/images.js";
@@ -588,7 +591,9 @@ function switchManagerTab(tab) {
 async function hydrateInitialData() {
     const tasks = [loadConfig(), loadLibrary(), loadFavorites(false), loadDownloads(false), loadTaxonomy(state.assetKind, { silent: true })];
     if (state.activeTab === "Discover" && state.assetKind === IMAGES_KIND && imageState.items.length === 0) {
-        tasks.push(loadImageFeed({ reset: true }));
+        tasks.push(loadImageFeed({ reset: true }).then(() => {
+            if (state.activeTab === "Discover" && state.assetKind === IMAGES_KIND) render();
+        }));
     } else if (state.activeTab === "Discover" && state.searchItems.length === 0 && !state.loadingSearch) {
         tasks.push(search(true, { silent: true }));
     }
@@ -2106,14 +2111,25 @@ function renderNav(nav) {
         };
     });
     const imagesMode = state.activeTab === "Discover" && state.assetKind === IMAGES_KIND;
-    const hasFilters = ["Discover", "Library", "Favorites"].includes(state.activeTab) && !imagesMode;
+    const hasFilters = ["Discover", "Library", "Favorites"].includes(state.activeTab);
     overlay.querySelector('.cmgr-selector-layout').classList.toggle("has-filters", hasFilters);
     overlay.querySelector('[data-action="toggle-manager-filters"]').hidden = !hasFilters;
     bodyEl.setAttribute("aria-labelledby", `cmgr-manager-tab-${state.activeTab}`);
     overlay.querySelector('[data-action="view-library"]').innerHTML = `${selectorIcon("layers")}<span>${escapeHtml(t("Library"))}</span><b>${state.libraryItems.length}</b>`;
     setManagerFiltersOpen(filtersOpen);
     if (imagesMode) {
-        nav.innerHTML = "";
+        const imageFiltered = Boolean(imageState.baseModel) || imageState.period !== "AllTime";
+        nav.innerHTML = `
+            <div class="cmgr-selector-filter-heading">
+                <h2>${escapeHtml(t("Adjust filters"))}</h2>
+                ${imageFiltered ? `<button class="cmgr-selector-reset" type="button" data-action="reset-image-filters">${escapeHtml(t("Reset filters"))}</button>` : ""}
+            </div>
+            ${renderImageFilters(currentTaxonomy().baseModels, { loading: state.taxonomyLoading })}
+        `;
+        const resetImages = nav.querySelector('[data-action="reset-image-filters"]');
+        if (resetImages) resetImages.onclick = resetImageFilters;
+        bindSearchCombo(nav.querySelector('[data-combo="image-base-model"]'), (value) => setImageBaseModel(value));
+        bindSearchCombo(nav.querySelector('[data-combo="image-period"]'), (value) => setImagePeriod(imagePeriodValue(value)));
         return;
     }
     nav.innerHTML = `
@@ -2530,8 +2546,12 @@ function selectAssetKind(kind) {
     state.scroll.libraryResults = 0;
     if (kind === IMAGES_KIND) {
         resetImageFeed();
+        // Civitai has no image taxonomy, so the sidebar reuses the model enums;
+        // fetch them once per session or Base Model stays empty.
+        if (!state.taxonomyByKind[IMAGES_KIND]) void loadTaxonomy(IMAGES_KIND, { silent: true });
         if (state.activeTab === "Discover") {
-            void loadImageFeed({ reset: true });
+            // Skeletons now, the pictures as soon as the page lands.
+            void loadImageFeed({ reset: true }).then(() => render());
             render();
             return;
         }
@@ -3439,6 +3459,54 @@ async function resolveImageResourcesFromSelection() {
     refreshImageDetail();
 }
 
+function reloadImageFeed() {
+    if (state.activeTab !== "Discover" || state.assetKind !== IMAGES_KIND) return;
+    imageState.nextCursor = "";
+    // Drop the old page and paint the skeletons before the request leaves. Waiting
+    // for the network kept the previous pictures (and the open menu) on screen, so
+    // a filter click looked like the panel had frozen.
+    imageState.items = [];
+    imageState.loading = true;
+    render();
+    void loadImageFeed({ reset: true }).then(() => render());
+}
+
+function setImageBaseModel(baseModel) {
+    const next = String(baseModel || "");
+    if (imageState.baseModel === next) return;
+    imageState.baseModel = next;
+    reloadImageFeed();
+}
+
+function setImagePeriod(period) {
+    const next = String(period || "AllTime");
+    if (imageState.period === next) return;
+    imageState.period = next;
+    reloadImageFeed();
+}
+
+function setImageSort(sort) {
+    const next = String(sort || "Newest");
+    if (imageState.sort === next) return;
+    imageState.sort = next;
+    reloadImageFeed();
+}
+
+function resetImageFilters() {
+    imageState.baseModel = "";
+    imageState.period = "AllTime";
+    reloadImageFeed();
+}
+
+function openImageFromQuery(value) {
+    const imageId = parseImageLink(value);
+    if (!imageId) return false;
+    if (imageSearchTimer) clearTimeout(imageSearchTimer);
+    imageSearchTimer = null;
+    void openImageLink(imageId);
+    return true;
+}
+
 function bindImageEvents(root) {
     const queryInput = root.querySelector('[data-field="image-query"]');
     const clearSearch = root.querySelector('[data-action="clear-image-search"]');
@@ -3447,6 +3515,12 @@ function bindImageEvents(root) {
             imageState.query = queryInput.value;
             if (clearSearch) clearSearch.hidden = !imageState.query;
             if (imageSearchTimer) clearTimeout(imageSearchTimer);
+            // A pasted Civitai link opens that image instead of searching text.
+            // Bare ids only open on Enter so a numeric search stays a search.
+            if (/civitai\.(?:com|red)\//i.test(queryInput.value) && parseImageLink(queryInput.value)) {
+                imageSearchTimer = setTimeout(() => openImageFromQuery(queryInput.value), 250);
+                return;
+            }
             imageSearchTimer = setTimeout(async () => {
                 imageSearchTimer = null;
                 if (state.activeTab !== "Discover" || state.assetKind !== IMAGES_KIND) return;
@@ -3454,8 +3528,14 @@ function bindImageEvents(root) {
                 render();
             }, 350);
         };
+        queryInput.onpaste = () => {
+            setTimeout(() => {
+                if (queryInput.value !== imageState.query) queryInput.oninput();
+            }, 0);
+        };
         queryInput.onkeydown = (event) => {
             if (event.key !== "Enter") return;
+            if (openImageFromQuery(queryInput.value)) return;
             if (imageSearchTimer) clearTimeout(imageSearchTimer);
             imageSearchTimer = null;
             void loadImageFeed({ reset: true }).then(() => render());
@@ -3469,26 +3549,15 @@ function bindImageEvents(root) {
     };
     const refresh = root.querySelector('[data-action="refresh-images"]');
     if (refresh) refresh.onclick = () => void loadImageFeed({ reset: true }).then(() => render());
-    const linkToggle = root.querySelector('[data-action="toggle-image-link"]');
-    if (linkToggle) linkToggle.onclick = () => {
-        imageState.linkOpen = !imageState.linkOpen;
-        render();
-        bodyEl.querySelector('[data-field="image-link"]')?.focus({ preventScroll: true });
-    };
-    const openLink = root.querySelector('[data-action="open-image-link"]');
-    if (openLink) openLink.onclick = () => {
-        const value = bodyEl.querySelector('[data-field="image-link"]')?.value || "";
-        const match = String(value).match(/(\d{3,})/);
-        if (!match) {
-            showToast(t("Paste a Civitai image link or its id."));
-            return;
-        }
-        void openImageLink(match[1]);
-    };
-    const linkInput = root.querySelector('[data-field="image-link"]');
-    if (linkInput) linkInput.onkeydown = (event) => {
-        if (event.key === "Enter") openLink?.click();
-    };
+    root.querySelectorAll('[data-image-sort]').forEach((button) => {
+        button.onclick = () => setImageSort(button.dataset.imageSort || "Newest");
+    });
+    const clearBaseModel = root.querySelector('[data-action="clear-image-base-model"]');
+    if (clearBaseModel) clearBaseModel.onclick = () => setImageBaseModel("");
+    const clearPeriod = root.querySelector('[data-action="clear-image-period"]');
+    if (clearPeriod) clearPeriod.onclick = () => setImagePeriod("AllTime");
+    const resetFilters = root.querySelector('[data-action="reset-image-filters"]');
+    if (resetFilters) resetFilters.onclick = resetImageFilters;
     const results = root.querySelector(".cmgr-image-results");
     if (results) {
         results.onscroll = () => {

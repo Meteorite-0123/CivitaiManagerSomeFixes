@@ -4877,20 +4877,11 @@ export function injectStyles() {
             color: var(--cmgr-muted);
             font-size: 10.5px;
         }
-        /* Discover → Images: a masonry-ish picture grid with a resource panel. */
-        .cmgr-images .cmgr-image-results {
-            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-            align-content: start;
-        }
+        /* Discover → Images: same grid and 2:3 card box as the model kinds, so
+           the feed reads as one more Discover tab. Photos fill the thumb and
+           the detail panel shows the full frame. */
         .cmgr-image-card {
             cursor: pointer;
-        }
-        /* A picture feed keeps each photo's own shape instead of the 2:3 model
-           card box; a very wide or tall image is capped so rows stay even. */
-        .cmgr-selector-body .cmgr-card.cmgr-image-card {
-            aspect-ratio: var(--cmgr-image-ratio, 1) !important;
-            max-height: 340px;
-            min-height: 140px;
         }
         .cmgr-image-thumb {
             position: relative;
@@ -4934,22 +4925,6 @@ export function injectStyles() {
         .cmgr-image-card-stats svg {
             width: 12px;
             height: 12px;
-        }
-        .cmgr-image-link-bar {
-            display: flex;
-            flex-wrap: wrap;
-            align-items: center;
-            gap: 8px;
-            padding: 0 14px 10px;
-        }
-        .cmgr-image-link-form {
-            display: flex;
-            flex: 1 1 260px;
-            gap: 8px;
-        }
-        .cmgr-image-link-form .cmgr-input {
-            flex: 1 1 auto;
-            min-width: 0;
         }
         .cmgr-image-resources {
             display: grid;
