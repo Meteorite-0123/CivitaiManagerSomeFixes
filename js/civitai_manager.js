@@ -1214,9 +1214,11 @@ function syncDownloadCta(root = bodyEl) {
         ? picks.reduce((sum, file) => sum + Number(file.sizeKB || 0) * 1024, 0)
         : Number(focused.sizeKB || 0) * 1024;
     const label = cta.querySelector(".cmgr-download-cta-label");
-    if (label) label.textContent = downloadCtaLabel(bytes);
+    if (label) {
+        label.textContent = downloadCtaLabel(bytes);
+        cta.title = picks.length > 1 ? t("{count} files selected", { count: picks.length }) : "";
+    }
     cta.disabled = !state.resolution?.download_url;
-    cta.title = picks.length > 1 ? t("{count} files selected", { count: picks.length }) : "";
 }
 
 /** Keeps checkboxes, the "select all" label and the download size in sync. */
@@ -1889,6 +1891,7 @@ function render(options = {}) {
         restoreOpenComboState(comboState);
     }
     bodyEl.innerHTML = renderActiveTab();
+    reuseFocusedFieldInput(bodyEl, focusedField);
     updateTransientMessages();
     bindCommonEvents(bodyEl);
     bindActiveTabEvents(bodyEl);
@@ -1896,39 +1899,75 @@ function render(options = {}) {
     if (scrollState) restoreScrollState(scrollState);
 }
 
+const FIELD_INPUT_SELECTOR = "input[data-field], textarea[data-field]";
+
 function captureFocusedField(root) {
     const active = document.activeElement;
-    if (!root?.contains(active) || !active?.matches?.("input[data-field], textarea[data-field]")) return null;
+    if (!root?.contains(active) || !active?.matches?.(FIELD_INPUT_SELECTOR)) return null;
     return {
         field: active.dataset.field || "",
+        element: active,
         start: Number.isInteger(active.selectionStart) ? active.selectionStart : null,
         end: Number.isInteger(active.selectionEnd) ? active.selectionEnd : null,
         direction: active.selectionDirection || "none",
+        caretPreserved: false,
     };
+}
+
+/**
+ * Puts the live input back into the freshly rendered markup instead of keeping
+ * the newly created one. Re-creating the search field on every result update
+ * drops focus and the caret for a frame, so fast typing lands one character late
+ * ("image" -> "imaeg"). Re-using the node keeps the browser's own selection
+ * untouched; it must happen before the event handlers are bound, so they attach
+ * to the node that survives.
+ */
+function reuseFocusedFieldInput(root, snapshot) {
+    if (!root || !snapshot?.field || !snapshot.element || snapshot.element.isConnected) return;
+    const fresh = Array.from(root.querySelectorAll(FIELD_INPUT_SELECTOR))
+        .find((item) => item.dataset.field === snapshot.field);
+    if (!fresh || fresh === snapshot.element || fresh.tagName !== snapshot.element.tagName) return;
+    fresh.replaceWith(snapshot.element);
+    snapshot.caretPreserved = true;
 }
 
 function restoreFocusedField(root, snapshot) {
     if (!root || !snapshot?.field) return;
-    const apply = () => {
-        const input = Array.from(root.querySelectorAll("input[data-field], textarea[data-field]"))
+    const input = snapshot.element?.isConnected
+        ? snapshot.element
+        : Array.from(root.querySelectorAll(FIELD_INPUT_SELECTOR))
             .find((item) => item.dataset.field === snapshot.field);
-        if (!input) return;
+    if (!input) return;
+    const focusInput = () => {
+        if (document.activeElement === input) return;
         try {
             input.focus({ preventScroll: true });
         } catch (_) {
             input.focus();
         }
-        if (snapshot.start !== null && snapshot.end !== null) {
-            const length = String(input.value || "").length;
-            input.setSelectionRange?.(
-                Math.min(snapshot.start, length),
-                Math.min(snapshot.end, length),
-                snapshot.direction,
-            );
-        }
     };
-    apply();
-    requestAnimationFrame(apply);
+    // A reused node still carries the caret the user left behind, so restoring a
+    // snapshot position would drag it back a character on every render.
+    const placeCaret = () => {
+        if (snapshot.caretPreserved) return;
+        if (snapshot.start === null || snapshot.end === null) return;
+        const length = String(input.value || "").length;
+        input.setSelectionRange?.(
+            Math.min(snapshot.start, length),
+            Math.min(snapshot.end, length),
+            snapshot.direction,
+        );
+    };
+    focusInput();
+    placeCaret();
+    if (document.activeElement !== input) {
+        // Retry only a focus that did not land yet; never move the caret again,
+        // so typing that happened in the meantime is not undone.
+        requestAnimationFrame(() => {
+            focusInput();
+            if (document.activeElement === input) placeCaret();
+        });
+    }
 }
 
 function updateTransientMessages() {
@@ -2667,7 +2706,7 @@ function renderModelActionHub(model, version = {}, file = {}, resolution = state
                 </div>
                 <div class="cmgr-detail-installed-actions">
                     <button class="cmgr-primary cmgr-mini-btn" type="button" data-action="view-in-library" data-asset-id="${escapeAttr(installedAsset.id)}">${escapeHtml(t("View in Library"))}</button>
-                    <button class="cmgr-secondary cmgr-mini-btn" type="button" data-action="download" ${resolution?.download_url ? "" : "disabled"} title="${escapeAttr(t("Re-download"))}">${escapeHtml(t("Re-download"))}</button>
+                    <button class="cmgr-secondary cmgr-mini-btn" type="button" data-action="download" data-download-selection="true" ${resolution?.download_url ? "" : "disabled"} title="${escapeAttr(t("Re-download"))}">${escapeHtml(t("Re-download"))}</button>
                 </div>
             </div>
         `;

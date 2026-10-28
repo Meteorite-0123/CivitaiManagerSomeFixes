@@ -1083,39 +1083,68 @@ function maybeAutoLoadMoreLoras(element) {
     void searchRemote(false);
 }
 
+const POPUP_FIELD_INPUT_SELECTOR = "input[data-field], textarea[data-field]";
+
 function capturePopupFocus() {
     const active = document.activeElement;
-    if (!popupBody?.contains(active) || !active?.matches?.("input[data-field], textarea[data-field]")) return null;
+    if (!popupBody?.contains(active) || !active?.matches?.(POPUP_FIELD_INPUT_SELECTOR)) return null;
     return {
         field: active.dataset.field || "",
+        element: active,
         start: Number.isInteger(active.selectionStart) ? active.selectionStart : null,
         end: Number.isInteger(active.selectionEnd) ? active.selectionEnd : null,
         direction: active.selectionDirection || "none",
+        caretPreserved: false,
     };
+}
+
+/**
+ * Re-inserts the live search input after a re-render for the same reason as the
+ * manager: a freshly built node loses focus and the caret, so the next keystroke
+ * can land a character early. Runs before binding so handlers stay attached.
+ */
+function reusePopupFocusInput(snapshot) {
+    if (!popupBody || !snapshot?.field || !snapshot.element || snapshot.element.isConnected) return;
+    const fresh = Array.from(popupBody.querySelectorAll(POPUP_FIELD_INPUT_SELECTOR))
+        .find((item) => item.dataset.field === snapshot.field);
+    if (!fresh || fresh === snapshot.element || fresh.tagName !== snapshot.element.tagName) return;
+    fresh.replaceWith(snapshot.element);
+    snapshot.caretPreserved = true;
 }
 
 function restorePopupFocus(snapshot) {
     if (!popupBody || !snapshot?.field) return;
-    const apply = () => {
-        const input = Array.from(popupBody.querySelectorAll("input[data-field], textarea[data-field]"))
+    const input = snapshot.element?.isConnected
+        ? snapshot.element
+        : Array.from(popupBody.querySelectorAll(POPUP_FIELD_INPUT_SELECTOR))
             .find((item) => item.dataset.field === snapshot.field);
-        if (!input) return;
+    if (!input) return;
+    const focusInput = () => {
+        if (document.activeElement === input) return;
         try {
             input.focus({ preventScroll: true });
         } catch (_) {
             input.focus();
         }
-        if (snapshot.start !== null && snapshot.end !== null) {
-            const length = String(input.value || "").length;
-            input.setSelectionRange?.(
-                Math.min(snapshot.start, length),
-                Math.min(snapshot.end, length),
-                snapshot.direction,
-            );
-        }
     };
-    apply();
-    requestAnimationFrame(apply);
+    const placeCaret = () => {
+        if (snapshot.caretPreserved) return;
+        if (snapshot.start === null || snapshot.end === null) return;
+        const length = String(input.value || "").length;
+        input.setSelectionRange?.(
+            Math.min(snapshot.start, length),
+            Math.min(snapshot.end, length),
+            snapshot.direction,
+        );
+    };
+    focusInput();
+    placeCaret();
+    if (document.activeElement !== input) {
+        requestAnimationFrame(() => {
+            focusInput();
+            if (document.activeElement === input) placeCaret();
+        });
+    }
 }
 
 function renderPopup(options = {}) {
@@ -1134,6 +1163,7 @@ function renderPopup(options = {}) {
                 ? renderDownloads()
                 : renderDiscover();
     popupBody.innerHTML = content;
+    reusePopupFocusInput(focusedField);
     renderedPopupTab = popup.tab;
     updatePopupMessages();
     bindPopupEvents();
