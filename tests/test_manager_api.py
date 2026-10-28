@@ -13,6 +13,7 @@ import time
 import types
 import unittest
 import urllib.request
+import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest import mock
@@ -1241,6 +1242,34 @@ class DownloadJobTests(unittest.TestCase):
         self.assertEqual(store.snapshot("job")["status"], "completed")
         self.assertTrue(target.with_suffix(".jpg").is_file())
 
+    def test_workflow_zip_download_is_saved_as_a_real_workflow_json(self):
+        store = self.make_store()
+        store.add({"id": "job", "status": "pending", "created_at": 1}, {})
+        target = Path(self.temp_dir.name) / "workflows" / "workflow" / "ponyflow.json"
+        graph = {"nodes": [{"id": 1, "type": "KSampler"}], "links": []}
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as archive:
+            archive.writestr("ponyflow_v3/README.md", "docs")
+            archive.writestr("ponyflow_v3/ponyflow_v3.json", json.dumps(graph))
+        payload = buffer.getvalue()
+
+        response = mock.MagicMock()
+        response.__enter__.return_value = response
+        response.headers = {"Content-Length": str(len(payload))}
+        response.read.side_effect = [payload, b""]
+
+        with (
+            mock.patch.object(manager, "_download_store", return_value=store),
+            mock.patch.object(manager, "load_config", return_value={"save_metadata": False, "save_preview": False}),
+            mock.patch.object(manager._DOWNLOAD_URL_OPENER, "open", return_value=response),
+            mock.patch.object(manager, "_root_for_kind", return_value=str(target.parent.parent)),
+        ):
+            manager._download_worker("job", "https://civitai.red/api/download/models/1", str(target), "workflows", {}, "")
+
+        self.assertEqual(store.snapshot("job")["status"], "completed")
+        saved = json.loads(target.read_text(encoding="utf-8"))
+        self.assertEqual([node["type"] for node in saved["nodes"]], ["KSampler"])
+
     def test_active_count_only_includes_pending_and_downloading(self):
         store = self.make_store()
         for task_id, status in {
@@ -1807,6 +1836,122 @@ class MetadataApiAsyncTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(marker, ["event-loop-responsive"])
         self.assertEqual(response.status, 200)
+
+
+class WorkflowContentApiTests(unittest.IsolatedAsyncioTestCase):
+    async def test_returns_the_saved_workflow_graph(self):
+        with tempfile.TemporaryDirectory() as base:
+            root = Path(base) / "workflows"
+            (root / "Generation").mkdir(parents=True)
+            graph = {
+                "last_node_id": 2,
+                "nodes": [{"id": 1, "type": "KSampler"}, {"id": 2, "type": "SaveImage"}],
+                "links": [],
+            }
+            (root / "Generation" / "flow.json").write_text(json.dumps(graph), encoding="utf-8")
+            with mock.patch.object(manager, "_root_for_kind", return_value=str(root)):
+                response = await manager.workflow_content_api(_JsonRequest({
+                    "root_kind": "workflows",
+                    "relative_path": "Generation/flow.json",
+                }))
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(response.body["filename"], "flow.json")
+        self.assertEqual([node["type"] for node in response.body["workflow"]["nodes"]], ["KSampler", "SaveImage"])
+
+    async def test_missing_workflow_is_reported(self):
+        with tempfile.TemporaryDirectory() as base:
+            root = Path(base) / "workflows"
+            root.mkdir()
+            with mock.patch.object(manager, "_root_for_kind", return_value=str(root)):
+                response = await manager.workflow_content_api(_JsonRequest({
+                    "root_kind": "workflows",
+                    "relative_path": "generation/missing.json",
+                }))
+
+        self.assertEqual(response.status, 404)
+        self.assertFalse(response.body["success"])
+
+    async def test_workflow_shipped_as_zip_returns_the_graph_inside(self):
+        # Civitai serves some bundles as a ZIP named ".json"; the graph lives
+        # inside next to a readme and wildcards, so the raw bytes are not JSON.
+        graph = {"nodes": [{"id": 1, "type": "KSampler"}], "links": []}
+        with tempfile.TemporaryDirectory() as base:
+            root = Path(base) / "workflows"
+            (root / "workflow").mkdir(parents=True)
+            bundle = root / "workflow" / "ponyflow.json"
+            with zipfile.ZipFile(bundle, "w") as archive:
+                archive.writestr("ponyflow_v3/README.md", "docs")
+                archive.writestr("ponyflow_v3/wildcards.yaml", "a: b")
+                archive.writestr("ponyflow_v3/ponyflow_v3.json", json.dumps(graph))
+            with mock.patch.object(manager, "_root_for_kind", return_value=str(root)):
+                response = await manager.workflow_content_api(_JsonRequest({
+                    "root_kind": "workflows",
+                    "relative_path": "workflow/ponyflow.json",
+                }))
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual([node["type"] for node in response.body["workflow"]["nodes"]], ["KSampler"])
+
+    async def test_empty_workflow_file_is_reported_as_empty(self):
+        # A zero-byte file (an interrupted download) used to surface as
+        # "Invalid workflow JSON: Expecting value: line 1 column 1 (char 0)".
+        with tempfile.TemporaryDirectory() as base:
+            root = Path(base) / "workflows"
+            root.mkdir()
+            (root / "empty.json").write_bytes(b"")
+            with mock.patch.object(manager, "_root_for_kind", return_value=str(root)):
+                response = await manager.workflow_content_api(_JsonRequest({
+                    "root_kind": "workflows",
+                    "relative_path": "empty.json",
+                }))
+
+        self.assertEqual(response.status, 400)
+        self.assertIn("empty", response.body["error"])
+
+    async def test_zip_is_detected_even_with_an_empty_archive_signature(self):
+        # Archives can start with the end-of-central-directory marker instead of
+        # a local file header; the old 4-byte check missed those.
+        with tempfile.TemporaryDirectory() as base:
+            path = Path(base) / "bundle.json"
+            with zipfile.ZipFile(path, "w"):
+                pass
+            self.assertTrue(manager._looks_like_zip(str(path)))
+
+    async def test_archive_without_a_workflow_is_rejected(self):
+        with tempfile.TemporaryDirectory() as base:
+            root = Path(base) / "workflows"
+            root.mkdir()
+            with zipfile.ZipFile(root / "bundle.json", "w") as archive:
+                archive.writestr("notes.txt", "nothing here")
+            with mock.patch.object(manager, "_root_for_kind", return_value=str(root)):
+                response = await manager.workflow_content_api(_JsonRequest({
+                    "root_kind": "workflows",
+                    "relative_path": "bundle.json",
+                }))
+
+        self.assertEqual(response.status, 400)
+        self.assertIn("does not contain a workflow", response.body["error"])
+
+    async def test_other_roots_and_invalid_json_are_rejected(self):
+        with tempfile.TemporaryDirectory() as base:
+            root = Path(base) / "workflows"
+            root.mkdir()
+            (root / "broken.json").write_text("{not json", encoding="utf-8")
+            with mock.patch.object(manager, "_root_for_kind", return_value=str(root)):
+                other_root = await manager.workflow_content_api(_JsonRequest({
+                    "root_kind": "loras",
+                    "relative_path": "flow.json",
+                }))
+                broken = await manager.workflow_content_api(_JsonRequest({
+                    "root_kind": "workflows",
+                    "relative_path": "broken.json",
+                }))
+
+        self.assertEqual(other_root.status, 400)
+        self.assertEqual(broken.status, 400)
+        # A broken file must explain itself instead of leaking a decoder error.
+        self.assertIn("not a workflow", broken.body["error"])
 
 
 if __name__ == "__main__":

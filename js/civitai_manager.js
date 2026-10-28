@@ -1909,6 +1909,20 @@ async function openSelectedFolder() {
     }
 }
 
+/** Loads a downloaded workflow onto the canvas; the panel closes to show it. */
+async function openWorkflowAsset(entry) {
+    try {
+        // Imported on demand: a missing or broken helper file must never stop the
+        // whole panel from loading, which is what a top-level import would do.
+        const { openWorkflowInComfyUI } = await import("./civitai/workflow_open.js");
+        await openWorkflowInComfyUI(entry);
+        showToast(t("Workflow opened"));
+        if (overlay?.classList.contains("show")) closeOverlay();
+    } catch (err) {
+        showToast(t(err.message));
+    }
+}
+
 function render(options = {}) {
     if (!state.mounted || !bodyEl) return;
     const preserveScroll = options.preserveScroll !== false;
@@ -3027,7 +3041,12 @@ function renderAssetDetail(asset) {
             </div>
             <section class="cmgr-detail-download-card">
                 <div class="cmgr-detail-action-hub is-inline-cta">
-                    <button class="cmgr-secondary cmgr-detail-local-cta" type="button" data-action="open-folder">${selectorIcon("local")}<span>${escapeHtml(t("Open Folder"))}</span></button>
+                    ${asset.root_kind === "workflows"
+                        ? `<div class="cmgr-detail-cta-stack">
+                            <button class="cmgr-primary cmgr-detail-local-cta" type="button" data-action="open-workflow">${selectorIcon("layers")}<span>${escapeHtml(t("Open in ComfyUI"))}</span></button>
+                            <button class="cmgr-secondary cmgr-detail-local-cta" type="button" data-action="open-folder">${selectorIcon("local")}<span>${escapeHtml(t("Open Folder"))}</span></button>
+                        </div>`
+                        : `<button class="cmgr-secondary cmgr-detail-local-cta" type="button" data-action="open-folder">${selectorIcon("local")}<span>${escapeHtml(t("Open Folder"))}</span></button>`}
                     ${renderFavoriteControls({
                         favorite: Boolean(favorite),
                         folders: state.favoriteFolders,
@@ -3136,8 +3155,12 @@ function downloadActions(job) {
     const taskButton = (action, label, className = "cmgr-secondary") => `<button class="${className}" type="button" data-action="${action}" data-task-id="${escapeAttr(job.id)}">${escapeHtml(t(label))}</button>`;
     if (ACTIVE_DOWNLOAD_STATUSES.has(job.status)) return job.status === "cancelling" ? "" : taskButton("cancel-download", "Cancel");
     const asset = job.status === "completed" ? downloadedAsset(job) : null;
+    const workflow = job.status === "completed" && job.root_kind === "workflows" && job.relative_path
+        ? `<button class="cmgr-primary" type="button" data-action="open-workflow" data-root-kind="workflows" data-relative-path="${escapeAttr(job.relative_path)}">${escapeHtml(t("Open in ComfyUI"))}</button>`
+        : "";
     return `
         ${["failed", "cancelled"].includes(job.status) ? taskButton("retry-download", "Retry", "cmgr-primary") : ""}
+        ${workflow}
         ${asset ? `<button class="cmgr-secondary" type="button" data-action="show-downloaded-asset" data-asset-id="${escapeAttr(asset.id)}">${escapeHtml(t("View in Library"))}</button>` : ""}
         <button class="cmgr-dl-remove" type="button" data-action="remove-download" data-task-id="${escapeAttr(job.id)}" title="${escapeAttr(t("Remove record"))}" aria-label="${escapeAttr(t("Remove record"))}">${selectorIcon("close")}</button>
     `;
@@ -3890,6 +3913,11 @@ function bindLibraryEvents(root) {
     if (favoriteFolder) favoriteFolder.onchange = () => void assignFavoriteFolder(localFavorite(), favoriteFolder.value);
     const openFolder = root.querySelector('[data-action="open-folder"]');
     if (openFolder) openFolder.onclick = () => openSelectedFolder();
+    const openWorkflow = root.querySelector('[data-action="open-workflow"]');
+    if (openWorkflow) openWorkflow.onclick = () => {
+        const asset = getSelectedAsset();
+        if (asset) openWorkflowAsset(assetLocationPayload(asset));
+    };
 }
 
 function bindLibraryCards(root) {
@@ -3934,6 +3962,7 @@ function bindDownloadsEvents(root) {
             "clear-downloads": () => removeDownloadRecord(),
             "show-downloaded-asset": () => showInLibrary(button.dataset.assetId || ""),
             "open-download-folder": () => openDownloadFolder(button.dataset),
+            "open-workflow": () => openWorkflowAsset({ root_kind: button.dataset.rootKind, relative_path: button.dataset.relativePath }),
         };
         actions[button?.dataset.action]?.();
     };
@@ -4322,6 +4351,8 @@ function bindFavoritesEvents(root) {
         if (favorite) favorite.onclick = () => void toggleLocalFavorite(asset);
         const openFolder = detail?.querySelector('[data-action="open-folder"]');
         if (openFolder) openFolder.onclick = () => openSelectedFolder();
+        const openWorkflow = detail?.querySelector('[data-action="open-workflow"]');
+        if (openWorkflow) openWorkflow.onclick = () => openWorkflowAsset(asset);
         const folder = detail?.querySelector('[data-action="assign-asset-favorite-folder"]');
         if (folder) folder.onchange = () => void assignFavoriteFolder(item, folder.value);
     }

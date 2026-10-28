@@ -31,6 +31,7 @@ ROUTE_SPECS = (
     ("post", "/asset/move", "move_asset_api"),
     ("post", "/asset/favorite", "favorite_asset_api"),
     ("post", "/asset/open-folder", "open_folder_api"),
+    ("post", "/workflow-content", "workflow_content_api"),
     ("post", "/asset/metadata", "enrich_metadata_api"),
 )
 

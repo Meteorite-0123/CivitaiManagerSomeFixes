@@ -4579,6 +4579,11 @@ export function injectStyles() {
             align-items: stretch;
             gap: 8px;
         }
+        .cmgr-detail-action-hub.is-inline-cta .cmgr-detail-cta-stack {
+            display: grid;
+            gap: 8px;
+            min-width: 0;
+        }
         .cmgr-detail-action-hub.is-inline-cta .cmgr-favorite-controls.is-compact {
             padding: 0;
             border: 0;

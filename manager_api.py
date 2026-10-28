@@ -19,6 +19,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
@@ -58,6 +59,12 @@ CIVITAI_DOWNLOAD_BASE = "https://civitai.red/api/download/models"
 MODEL_EXTENSIONS = {".ckpt", ".pt", ".pt2", ".bin", ".pth", ".safetensors", ".pkl", ".sft", ".gguf"}
 IMAGE_EXTENSIONS = (".png", ".jpg", ".jpeg", ".webp")
 WORKFLOW_EXTENSIONS = {".json"}
+# A workflow file is parsed in the backend; anything this large is not a graph.
+WORKFLOW_CONTENT_MAX_BYTES = 16 * 1024 * 1024
+# Civitai ships some workflow bundles as a ZIP of graph + wildcards + readme.
+# Archives may start with an empty archive or a spanned marker, not only a
+# local file header, so every documented signature is accepted.
+ZIP_MAGICS = (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 CONFIG_EXTENSIONS = {".json", ".yaml", ".yml", ".txt"}
 REMOTE_IMAGE_CACHE_WIDTH_DEFAULT = 450
 REMOTE_IMAGE_COMMON_WIDTHS = (96, 320, 450, 512, 800, 1200, 1600, 2200)
@@ -1669,6 +1676,15 @@ def _download_worker(
 
         if cancel_event.is_set():
             raise DownloadCancelled()
+        if root_kind == "workflows" and _looks_like_zip(temp_path):
+            # Civitai serves some workflow bundles as a ZIP under a .json name.
+            # Store the graph itself so the file is a real workflow that both
+            # ComfyUI's own loader and this panel can open.
+            graph = _workflow_graph_from_zip(temp_path)
+            if graph is None:
+                raise ValueError("Workflow archive does not contain a workflow")
+            with open(temp_path, "w", encoding="utf-8") as handle:
+                json.dump(graph, handle, ensure_ascii=False)
         final_path = _unique_path(target_path)
         os.replace(temp_path, final_path)
         metadata["saved_path"] = final_path
@@ -3717,6 +3733,125 @@ async def open_folder_api(request: web.Request) -> web.Response:
 
 def sys_platform() -> str:
     return sys.platform
+
+
+def _looks_like_zip(path: str) -> bool:
+    """True for any ZIP container, including empty and spanned archives.
+
+    Checking only the first local-file header (``PK\\x03\\x04``) misses archives
+    that start with a different signature, so the extension name is ignored and
+    the real container format decides.
+    """
+    try:
+        if os.path.getsize(path) < 4:
+            return False
+        with open(path, "rb") as handle:
+            if handle.read(4) in ZIP_MAGICS:
+                return True
+        return zipfile.is_zipfile(path)
+    except OSError:
+        return False
+
+
+def _is_workflow_graph(data: Any) -> bool:
+    """True for an editor graph or an API prompt, the two shapes ComfyUI loads."""
+    if not isinstance(data, dict) or not data:
+        return False
+    if isinstance(data.get("nodes"), list):
+        return True
+    if isinstance(data.get("workflow"), dict) and isinstance(data["workflow"].get("nodes"), list):
+        return True
+    prompt = data.get("prompt") if isinstance(data.get("prompt"), dict) else data
+    values = [value for value in prompt.values() if isinstance(value, dict)]
+    return bool(values) and all(isinstance(value.get("class_type"), str) for value in values)
+
+
+def _workflow_graph_from_zip(path: str) -> dict[str, Any] | None:
+    """Picks the workflow JSON out of a Civitai ZIP bundle.
+
+    Bundles contain the graph next to wildcards, readme files and previews. The
+    graph is the entry that parses as a ComfyUI workflow; nested folders are
+    searched and the shallowest candidate wins so a stray example file deeper
+    in the archive cannot shadow the real one.
+    """
+    try:
+        with zipfile.ZipFile(path) as archive:
+            candidates = [
+                info for info in archive.infolist()
+                if not info.is_dir()
+                and info.filename.lower().endswith(".json")
+                and info.file_size <= WORKFLOW_CONTENT_MAX_BYTES
+            ]
+            # Shallower entries first: "flow.json" before "docs/example/flow.json".
+            candidates.sort(key=lambda info: (info.filename.count("/"), len(info.filename)))
+            for info in candidates:
+                try:
+                    data = json.loads(archive.read(info).decode("utf-8-sig"))
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if _is_workflow_graph(data):
+                    return data
+    except (zipfile.BadZipFile, OSError):
+        return None
+    return None
+
+
+def _workflow_json_from_file(path: str) -> dict[str, Any]:
+    """Reads a workflow file, unwrapping a ZIP bundle served under a .json name.
+
+    Raises ValueError with a message the panel can show, so a truncated or
+    non-workflow file never surfaces as a raw json decode error.
+    """
+    if _looks_like_zip(path):
+        graph = _workflow_graph_from_zip(path)
+        if graph is None:
+            raise ValueError("Workflow archive does not contain a workflow")
+        return graph
+    try:
+        with open(path, "r", encoding="utf-8-sig", errors="replace") as handle:
+            text = handle.read()
+    except OSError as exc:
+        raise ValueError(f"Workflow file could not be read: {exc}") from exc
+    if not text.strip():
+        raise ValueError("Workflow file is empty; download it again")
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        # A workflow that is really an image or a truncated download is a broken
+        # file, not a JSON syntax problem the user can fix by hand.
+        raise ValueError(
+            "This file is not a workflow (it may be a preview image or an interrupted download); download it again"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ValueError("Workflow file does not contain a workflow")
+    return data
+
+
+async def workflow_content_api(request: web.Request) -> web.Response:
+    """Returns a saved workflow so the browser can load it into the canvas."""
+    try:
+        body = await request.json()
+        root_kind = _normalize_root_kind(body.get("root_kind") or "workflows")
+        if root_kind != "workflows":
+            raise ValueError("Only workflow files can be opened in ComfyUI")
+        rel_path = str(body.get("relative_path") or "")
+        abs_path = _resolve_asset_path(root_kind, rel_path, body.get("storage_root_id"))
+        if not os.path.isfile(abs_path):
+            return web.json_response({"success": False, "error": "Workflow not found"}, status=404)
+        if os.path.getsize(abs_path) > WORKFLOW_CONTENT_MAX_BYTES:
+            return web.json_response({"success": False, "error": "Workflow file is too large to open"}, status=413)
+        workflow = _workflow_json_from_file(abs_path)
+        return web.json_response({
+            "success": True,
+            "filename": os.path.basename(abs_path),
+            "workflow": workflow,
+        })
+    except json.JSONDecodeError as exc:
+        return web.json_response({"success": False, "error": f"Invalid workflow JSON: {exc}"}, status=400)
+    except ValueError as exc:
+        return web.json_response({"success": False, "error": str(exc)}, status=400)
+    except Exception as exc:
+        return web.json_response({"success": False, "error": str(exc)}, status=500)
 
 
 async def enrich_metadata_api(request: web.Request) -> web.Response:
