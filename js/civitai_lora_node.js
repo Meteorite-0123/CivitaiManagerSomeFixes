@@ -1189,7 +1189,8 @@ function popupScrollElement() {
     if (!popupBody) return null;
     if (popup.tab === "applied") return popupBody.querySelector(".cmgr-lora-applied-list");
     if (popup.tab === "downloads") return popupBody.querySelector(".cmgr-download-list");
-    return popupBody.querySelector(".cmgr-lora-results");
+    // `.cmgr-results` covers both the LoRA grid and the Images grid.
+    return popupBody.querySelector(".cmgr-results");
 }
 
 function rememberPopupScroll() {
@@ -1199,7 +1200,7 @@ function rememberPopupScroll() {
     let element = null;
     if (renderedPopupTab === "applied") element = popupBody.querySelector(".cmgr-lora-applied-list");
     else if (renderedPopupTab === "downloads") element = popupBody.querySelector(".cmgr-download-list");
-    else element = popupBody.querySelector(".cmgr-lora-results");
+    else element = popupBody.querySelector(".cmgr-results");
     if (element) popup.scroll[renderedPopupTab] = element.scrollTop;
 }
 
@@ -3279,7 +3280,9 @@ async function selectNodeImage(image) {
     state.weights = {};
     state.loadingResources = true;
     openDetailDrawer();
-    renderPopup({ preserveScroll: false });
+    // Keep the grid where the user left it: re-rendering the tab used to reset it
+    // to the first row, so the picture they just picked scrolled out of sight.
+    renderPopup();
     try {
         const detail = await apiGet(`/image-detail?id=${encodeURIComponent(image.id)}`);
         if (detail?.image) {

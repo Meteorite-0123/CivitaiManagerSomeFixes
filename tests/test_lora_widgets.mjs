@@ -224,6 +224,14 @@ test("add, reapply and long-name updates do not duplicate controls or change wid
     assert.ok(row.name.title.includes("copy its trigger words"));
 });
 
+test("popup scroll memory targets the shared results grid, not only the LoRA grid", () => {
+    const scroll = source.slice(source.indexOf("function popupScrollElement"), source.indexOf("function bindPopupScroll"));
+    assert.ok(scroll.includes('querySelector(".cmgr-results")'), "image and LoRA grids share the .cmgr-results class");
+    assert.ok(!scroll.includes(".cmgr-lora-results"), "the LoRA-only class misses the image grid and resets its scroll");
+    const select = source.slice(source.indexOf("async function selectNodeImage"), source.indexOf("async function applyImageLora"));
+    assert.ok(!select.includes("preserveScroll: false"), "selecting an image must keep the grid scroll position");
+});
+
 test("adding and deleting preserves user-added vertical space without cumulative growth", () => {
     const { node, add } = setup([entry("a")]);
     const minimum = node.computeSize()[1];
