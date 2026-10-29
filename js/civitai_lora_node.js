@@ -4,6 +4,9 @@ import {
     CIVITAI_CATEGORY_FILTERS,
     HIGH_PRIORITY_PREVIEW_LOADS,
     INITIAL_PREVIEW_LOADS,
+    MODEL_FILE_FORMAT_OPTIONS,
+    MODEL_PERIODS,
+    MODEL_STATUS_OPTIONS,
     ROOT_LOCAL_FOLDER,
     SEARCH_PAGE_SIZE,
 } from "./civitai/constants.js";
@@ -134,9 +137,14 @@ const popup = {
     discoverQuery: "",
     localQuery: "",
     sort: "Highest Rated",
-    selectedBaseModel: "",
+    // Filters hold arrays: Civitai OR-s the values inside one filter, exactly
+    // like the Discover tab of the manager window.
+    selectedBaseModels: [],
     selectedCategory: "",
     selectedTag: "",
+    period: "AllTime",
+    fileFormats: [],
+    modelStatuses: [],
     selectedLocalFolder: "",
     expandedLocalFolders: {},
     taxonomy: { baseModels: [], tags: [] },
@@ -720,13 +728,36 @@ async function loadLoraTaxonomy() {
 
 function filterOptions(items, selected = "") {
     const names = (Array.isArray(items) ? items : []).map((item) => String(item?.name || item || "").trim()).filter(Boolean);
-    if (selected && !names.some((name) => name.toLocaleLowerCase() === selected.toLocaleLowerCase())) names.unshift(selected);
-    return Array.from(new Set(names));
+    // A selection Civitai has not listed yet stays visible instead of vanishing.
+    const chosen = normalizeFilterValues(selected)
+        .filter((entry) => !names.some((name) => name.toLocaleLowerCase() === entry.toLocaleLowerCase()));
+    return Array.from(new Set([...chosen, ...names]));
+}
+
+function normalizeFilterValues(values) {
+    const list = Array.isArray(values) ? values : [values];
+    return [...new Set(list.map((value) => String(value || "").trim()).filter(Boolean))];
+}
+
+function sameFilterValues(left, right) {
+    const a = normalizeFilterValues(left).map((item) => item.toLocaleLowerCase());
+    const b = normalizeFilterValues(right).map((item) => item.toLocaleLowerCase());
+    return a.length === b.length && a.every((item, index) => item === b[index]);
+}
+
+function modelPeriodValue(label) {
+    return MODEL_PERIODS.find((item) => t(item.label) === label)?.value || "AllTime";
+}
+
+function modelOptionValues(options, labels) {
+    return normalizeFilterValues(labels)
+        .map((label) => (Array.isArray(options) ? options : []).find((item) => t(item.label) === label)?.value || "")
+        .filter(Boolean);
 }
 
 function loraBaseModelOptions() {
     const local = popup.libraryItems.map((item) => item.base_model).filter(Boolean);
-    return filterOptions([...(popup.taxonomy?.baseModels || []), ...local], popup.selectedBaseModel);
+    return filterOptions([...(popup.taxonomy?.baseModels || []), ...local], popup.selectedBaseModels);
 }
 
 function navCount(tab) {
@@ -783,7 +814,7 @@ function renderNav() {
     nav.innerHTML = `
         <div class="cmgr-lora-filter-heading cmgr-selector-filter-heading">
             <h2>${escapeHtml(t(popup.tab === "favorites" ? "Favorites" : "Adjust filters"))}</h2>
-            ${["discover", "local"].includes(popup.tab) && (popup.selectedBaseModel || popup.tab === "discover" && (popup.selectedCategory || popup.selectedTag)) ? `<button class="cmgr-lora-reset cmgr-selector-reset" type="button" data-action="reset-lora-sidebar-filters">${escapeHtml(t("Reset filters"))}</button>` : ""}
+            ${["discover", "local"].includes(popup.tab) && (popup.selectedBaseModels.length || popup.tab === "discover" && (popup.selectedCategory || popup.selectedTag || popup.period !== "AllTime" || popup.fileFormats.length || popup.modelStatuses.length)) ? `<button class="cmgr-lora-reset cmgr-selector-reset" type="button" data-action="reset-lora-sidebar-filters">${escapeHtml(t("Reset filters"))}</button>` : ""}
         </div>
         ${["discover", "local"].includes(popup.tab) ? `
             <div class="cmgr-nav-group cmgr-category-group cmgr-lora-filter-group">
@@ -791,17 +822,62 @@ function renderNav() {
                 <div class="cmgr-search-picker">
                     ${renderSelectorCombo({
                         id: "lora-base-model",
-                        value: popup.selectedBaseModel,
+                        values: popup.selectedBaseModels,
                         items: loraBaseModelOptions(),
                         placeholder: t("Choose a base model"),
                         searchPlaceholder: t("Search base models..."),
                         emptyText: t("No base models found"),
                         clearTitle: t("Clear base model"),
+                        multiHint: t("Pick any number"),
                     })}
                 </div>
             </div>
         ` : ""}
         ${popup.tab === "discover" ? `
+            <div class="cmgr-nav-group cmgr-category-group cmgr-lora-filter-group">
+                <div class="cmgr-nav-title">${escapeHtml(t("Time period"))}</div>
+                <div class="cmgr-search-picker">
+                    ${renderSelectorCombo({
+                        id: "lora-period",
+                        value: popup.period === "AllTime" ? "" : t(MODEL_PERIODS.find((item) => item.value === popup.period)?.label || ""),
+                        items: MODEL_PERIODS.slice(1).map((item) => t(item.label)),
+                        placeholder: t("All time"),
+                        searchPlaceholder: t("Search"),
+                        emptyText: t("No options found"),
+                        clearTitle: t("Clear"),
+                    })}
+                </div>
+            </div>
+            <div class="cmgr-nav-group cmgr-category-group cmgr-lora-filter-group">
+                <div class="cmgr-nav-title">${escapeHtml(t("File format"))}</div>
+                <div class="cmgr-search-picker">
+                    ${renderSelectorCombo({
+                        id: "lora-file-format",
+                        values: popup.fileFormats.map((value) => t(value)),
+                        items: MODEL_FILE_FORMAT_OPTIONS.map((item) => t(item.label)),
+                        placeholder: t("Any format"),
+                        searchPlaceholder: t("Search"),
+                        emptyText: t("No options found"),
+                        clearTitle: t("Clear"),
+                        multiHint: t("Pick any number"),
+                    })}
+                </div>
+            </div>
+            <div class="cmgr-nav-group cmgr-category-group cmgr-lora-filter-group">
+                <div class="cmgr-nav-title">${escapeHtml(t("Model status"))}</div>
+                <div class="cmgr-search-picker">
+                    ${renderSelectorCombo({
+                        id: "lora-model-status",
+                        values: popup.modelStatuses.map((value) => t(MODEL_STATUS_OPTIONS.find((item) => item.value === value)?.label || value)),
+                        items: MODEL_STATUS_OPTIONS.map((item) => t(item.label)),
+                        placeholder: t("Any status"),
+                        searchPlaceholder: t("Search"),
+                        emptyText: t("No options found"),
+                        clearTitle: t("Clear"),
+                        multiHint: t("Pick any number"),
+                    })}
+                </div>
+            </div>
             <div class="cmgr-nav-group cmgr-category-group cmgr-lora-filter-group">
                 <div class="cmgr-nav-title">${escapeHtml(t("Filter by Category"))}</div>
                 <div class="cmgr-search-picker">
@@ -852,20 +928,43 @@ function renderNav() {
     const resetFilters = nav.querySelector('[data-action="reset-lora-sidebar-filters"]');
     if (resetFilters) resetFilters.onclick = resetLoraFilters;
     bindLocalFolderControls(nav);
-    const selectBaseModel = (value) => {
-        if (popup.selectedBaseModel === value) return;
-        popup.selectedBaseModel = value;
+    const selectBaseModels = (values) => {
+        const next = normalizeFilterValues(values);
+        if (sameFilterValues(popup.selectedBaseModels, next)) return;
+        popup.selectedBaseModels = next;
         popup.selectedRemote = null;
-        if (popup.tab === "discover") void searchRemote(true);
-        else {
-            popup.selectedAssetId = "";
-            popup.scroll.local = 0;
-            rerenderNavPreservingScroll();
-            if (!updateLocalFolderView()) renderPopup({ preserveScroll: false });
-            nav.querySelector('[data-combo="lora-base-model"] [data-combo-toggle]')?.focus({ preventScroll: true });
+        if (popup.tab === "discover") {
+            void searchRemote(true);
+            return;
         }
+        popup.selectedAssetId = "";
+        popup.scroll.local = 0;
+        // Only the result list is patched: re-rendering the nav would shut the
+        // picker that is still open for the next value.
+        if (!updateLocalFolderView()) renderPopup({ preserveScroll: false });
     };
-    bindSearchCombo(nav.querySelector('[data-combo="lora-base-model"]'), selectBaseModel);
+    bindSearchCombo(nav.querySelector('[data-combo="lora-base-model"]'), selectBaseModels);
+    bindSearchCombo(nav.querySelector('[data-combo="lora-period"]'), (value) => {
+        const period = modelPeriodValue(value);
+        if (popup.period === period) return;
+        popup.period = period;
+        popup.selectedRemote = null;
+        void searchRemote(true);
+    });
+    bindSearchCombo(nav.querySelector('[data-combo="lora-file-format"]'), (values) => {
+        const next = modelOptionValues(MODEL_FILE_FORMAT_OPTIONS, values);
+        if (sameFilterValues(popup.fileFormats, next)) return;
+        popup.fileFormats = next;
+        popup.selectedRemote = null;
+        void searchRemote(true);
+    });
+    bindSearchCombo(nav.querySelector('[data-combo="lora-model-status"]'), (values) => {
+        const next = modelOptionValues(MODEL_STATUS_OPTIONS, values);
+        if (sameFilterValues(popup.modelStatuses, next)) return;
+        popup.modelStatuses = next;
+        popup.selectedRemote = null;
+        void searchRemote(true);
+    });
     bindSearchCombo(nav.querySelector('[data-combo="lora-category"]'), (value) => {
         const category = CIVITAI_CATEGORY_FILTERS.find((item) => t(item.label) === value)?.value || "";
         if (popup.selectedCategory === category) return;
@@ -909,9 +1008,12 @@ function updateDownloadNavCount() {
 }
 
 function resetLoraFilters() {
-    popup.selectedBaseModel = "";
+    popup.selectedBaseModels = [];
     popup.selectedCategory = "";
     popup.selectedTag = "";
+    popup.period = "AllTime";
+    popup.fileFormats = [];
+    popup.modelStatuses = [];
     popup.selectedRemote = null;
     if (popup.tab === "discover") void searchRemote(true);
     else renderPopup({ preserveScroll: false });
@@ -1353,14 +1455,42 @@ function appendRemoteItems(items, startIndex) {
 
 function renderLoraActiveFilterBar() {
     const chips = [];
-    if (popup.selectedBaseModel) {
+    // One chip per value, so a single × only drops that value.
+    popup.selectedBaseModels.forEach((baseModel) => {
         chips.push({
             key: "base_model",
             label: t("Base Model"),
-            value: popup.selectedBaseModel,
+            value: baseModel,
+            clearValue: baseModel,
             clearAction: "clear-lora-filter-base",
         });
+    });
+    if (popup.tab === "discover" && popup.period !== "AllTime") {
+        chips.push({
+            key: "period",
+            label: t("Time period"),
+            value: t(MODEL_PERIODS.find((item) => item.value === popup.period)?.label || ""),
+            clearAction: "clear-lora-filter-period",
+        });
     }
+    popup.fileFormats.forEach((value) => {
+        chips.push({
+            key: "file_format",
+            label: t("File format"),
+            value: t(value),
+            clearValue: value,
+            clearAction: "clear-lora-filter-file-format",
+        });
+    });
+    popup.modelStatuses.forEach((value) => {
+        chips.push({
+            key: "model_status",
+            label: t("Model status"),
+            value: t(MODEL_STATUS_OPTIONS.find((item) => item.value === value)?.label || value),
+            clearValue: value,
+            clearAction: "clear-lora-filter-model-status",
+        });
+    });
     if (popup.tab === "discover" && popup.selectedCategory) {
         const categoryItem = CIVITAI_CATEGORY_FILTERS.find((item) => item.value === popup.selectedCategory);
         chips.push({
@@ -1771,7 +1901,10 @@ async function searchRemote(reset = true) {
         sort: popup.sort,
         limit: String(SEARCH_PAGE_SIZE),
     });
-    if (popup.selectedBaseModel) params.set("base_model", popup.selectedBaseModel);
+    if (popup.selectedBaseModels.length) params.set("base_model", popup.selectedBaseModels.join(","));
+    if (popup.period && popup.period !== "AllTime") params.set("period", popup.period);
+    if (popup.fileFormats.length) params.set("file_format", popup.fileFormats.join(","));
+    if (popup.modelStatuses.length) params.set("model_status", popup.modelStatuses.join(","));
     if (popup.selectedCategory) params.set("category", popup.selectedCategory);
     if (popup.selectedTag) params.set("tag", popup.selectedTag);
     if (!reset) params.set("cursor", popup.nextCursor);
@@ -2034,7 +2167,7 @@ function filteredLocalItems() {
     const query = popup.localQuery.trim().toLocaleLowerCase();
     const selectedFolder = normalizeLocalFolderPath(popup.selectedLocalFolder);
     return popup.libraryItems.filter((item) => {
-        if (popup.selectedBaseModel && String(item.base_model || "").toLocaleLowerCase() !== popup.selectedBaseModel.toLocaleLowerCase()) return false;
+        if (popup.selectedBaseModels.length && !popup.selectedBaseModels.some((value) => String(item.base_model || "").toLocaleLowerCase() === value.toLocaleLowerCase())) return false;
         if (selectedFolder && !assetMatchesLocalFolder(item, selectedFolder)) return false;
         if (!query) return true;
         return [item.name, item.filename, item.relative_path, item.creator, ...(item.tags || [])]
@@ -3421,13 +3554,37 @@ function bindPopupEvents() {
     });
     bindLocalCards(popupBody);
 
-    const clearFilterBase = popupBody?.querySelector('[data-action="clear-lora-filter-base"]');
-    if (clearFilterBase) clearFilterBase.onclick = () => {
-        popup.selectedBaseModel = "";
+    popupBody?.querySelectorAll('[data-action="clear-lora-filter-base"]').forEach((button) => {
+        button.onclick = () => {
+            const value = button.dataset.clearValue || "";
+            popup.selectedBaseModels = popup.selectedBaseModels.filter((item) => item !== value);
+            popup.selectedRemote = null;
+            if (popup.tab === "discover") void searchRemote(true);
+            else renderPopup({ preserveScroll: false });
+        };
+    });
+    const clearFilterPeriod = popupBody?.querySelector('[data-action="clear-lora-filter-period"]');
+    if (clearFilterPeriod) clearFilterPeriod.onclick = () => {
+        popup.period = "AllTime";
         popup.selectedRemote = null;
-        if (popup.tab === "discover") void searchRemote(true);
-        else renderPopup({ preserveScroll: false });
+        void searchRemote(true);
     };
+    popupBody?.querySelectorAll('[data-action="clear-lora-filter-file-format"]').forEach((button) => {
+        button.onclick = () => {
+            const value = button.dataset.clearValue || "";
+            popup.fileFormats = popup.fileFormats.filter((item) => item !== value);
+            popup.selectedRemote = null;
+            void searchRemote(true);
+        };
+    });
+    popupBody?.querySelectorAll('[data-action="clear-lora-filter-model-status"]').forEach((button) => {
+        button.onclick = () => {
+            const value = button.dataset.clearValue || "";
+            popup.modelStatuses = popup.modelStatuses.filter((item) => item !== value);
+            popup.selectedRemote = null;
+            void searchRemote(true);
+        };
+    });
     const clearFilterCategory = popupBody?.querySelector('[data-action="clear-lora-filter-category"]');
     if (clearFilterCategory) clearFilterCategory.onclick = () => {
         popup.selectedCategory = "";
