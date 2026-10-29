@@ -177,15 +177,17 @@ test("the feed request carries the base model and period filters", async () => {
     imageState.query = "";
     imageState.sort = "Most Reactions";
     imageState.period = "Week";
-    imageState.baseModel = "SDXL 1.0";
+    imageState.baseModels = ["SDXL 1.0", "Pony"];
     imageState.loading = false;
     await loadImageFeed({ reset: true });
     const params = new URLSearchParams(urls.at(-1).split("?")[1]);
-    assert.equal(params.get("base_model"), "SDXL 1.0");
+    // The image endpoint OR-s a comma separated list, so several picks travel
+    // in one value instead of repeated keys.
+    assert.equal(params.get("base_model"), "SDXL 1.0,Pony");
     assert.equal(params.get("period"), "Week");
     assert.equal(params.get("sort"), "Most Reactions");
     imageState.period = "AllTime";
-    imageState.baseModel = "";
+    imageState.baseModels = [];
     imageState.sort = "Newest";
 });
 
@@ -247,14 +249,19 @@ test("the sort menu renders one row per order and marks the current one", () => 
 test("the base model picker receives plain names, never objects", () => {
     renderImageFilters([{ name: "SDXL 1.0", count: 12 }, { name: "Flux.1 D", count: 3 }, "Pony"]);
     assert.equal(JSON.stringify(capturedCombos["image-base-model"].items), JSON.stringify(["SDXL 1.0", "Flux.1 D", "Pony"]));
+    // An array of `values` is what turns the combo into a multi-select.
+    assert.ok(Array.isArray(capturedCombos["image-base-model"].values));
 });
 
-test("a selected base model stays visible even before the taxonomy lists it", () => {
-    imageState.baseModel = "Illustrious";
+test("every selected base model stays visible even before the taxonomy lists it", () => {
+    imageState.baseModels = ["Illustrious", "NoobAI"];
     renderImageFilters([{ name: "SDXL 1.0", count: 12 }]);
-    assert.equal(JSON.stringify(capturedCombos["image-base-model"].items), JSON.stringify(["Illustrious", "SDXL 1.0"]));
-    assert.equal(capturedCombos["image-base-model"].value, "Illustrious");
-    imageState.baseModel = "";
+    assert.equal(
+        JSON.stringify(capturedCombos["image-base-model"].items),
+        JSON.stringify(["Illustrious", "NoobAI", "SDXL 1.0"]),
+    );
+    assert.equal(JSON.stringify(capturedCombos["image-base-model"].values), JSON.stringify(["Illustrious", "NoobAI"]));
+    imageState.baseModels = [];
 });
 
 test("period labels map back to the api values", () => {

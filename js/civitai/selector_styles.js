@@ -163,6 +163,13 @@ export function injectSelectorStyles() {
         .cmgr-selector-nav .cmgr-combo-control:hover { border-color: var(--selector-line); background: var(--selector-hover); }
         .cmgr-selector-nav .cmgr-combo.has-value .cmgr-combo-control { padding-right: 50px; border-color: transparent; background: var(--selector-selected); color: var(--selector-accent); }
         .cmgr-selector-nav .cmgr-combo-value.placeholder { color: var(--selector-muted); font-weight: 400; }
+        .cmgr-selector-nav .cmgr-combo.is-multi .cmgr-combo-control { align-items: flex-start; min-height: 38px; height: auto; padding-top: 7px; padding-bottom: 7px; }
+        .cmgr-selector-nav .cmgr-combo.is-multi .cmgr-combo-value { display: flex; flex-wrap: wrap; gap: 4px; max-height: 62px; overflow: hidden; white-space: normal; text-overflow: clip; }
+        .cmgr-selector-nav .cmgr-combo.is-multi .cmgr-combo-control > svg { top: 18px; }
+        .cmgr-combo-chip { display: inline-flex; align-items: center; max-width: 132px; padding: 1px 6px; border-radius: 5px; background: var(--selector-hover); color: var(--selector-text); font-size: 11px; font-weight: 500; line-height: 16px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+        .cmgr-combo-footer { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 5px; padding: 5px 2px 0; border-top: 1px solid var(--selector-line); color: var(--selector-muted); font-size: 10px; }
+        .cmgr-combo-footer button { padding: 2px 6px; border: 0; border-radius: 4px; background: transparent; color: var(--selector-accent); font-size: 11px; font-weight: 500; cursor: pointer; }
+        .cmgr-combo-footer button:hover { background: var(--selector-hover); }
         .cmgr-selector-nav .cmgr-combo-control > svg { position: absolute; right: 9px; top: 50%; width: 17px; height: 17px; color: var(--selector-muted); transform: translateY(-50%); }
         .cmgr-selector-nav .cmgr-combo.open .cmgr-combo-control > svg { transform: translateY(-50%) rotate(180deg); }
         .cmgr-selector-nav .cmgr-combo-clear { width: 20px; height: 20px; right: 26px; border-radius: 4px; background: transparent; color: var(--selector-muted); }

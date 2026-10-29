@@ -51,7 +51,8 @@ export const imageState = {
     query: "",
     sort: "Most Reactions",
     period: "AllTime",
-    baseModel: "",
+    // The image feed OR-s comma separated base models, so this is a list.
+    baseModels: [],
     loading: false,
     loadingMore: false,
     error: "",
@@ -139,7 +140,7 @@ export async function loadImageFeed({ reset = true, silent = false } = {}) {
         period: imageState.period,
         limit: String(PAGE_SIZE),
     });
-    if (imageState.baseModel) params.set("base_model", imageState.baseModel);
+    if (imageState.baseModels.length) params.set("base_model", imageState.baseModels.join(","));
     if (!reset && imageState.nextCursor) params.set("cursor", imageState.nextCursor);
     try {
         const data = await apiGet(`/images?${params.toString()}`);
@@ -385,20 +386,22 @@ export function renderImageFilters(baseModels = [], options = {}) {
     const names = (Array.isArray(baseModels) ? baseModels : [])
         .map((item) => String(item?.name || item || "").trim())
         .filter(Boolean);
-    const selected = imageState.baseModel;
-    const items = selected && !names.includes(selected) ? [selected, ...names] : names;
+    const selected = imageState.baseModels;
+    const missing = selected.filter((value) => !names.some((name) => name.toLowerCase() === value.toLowerCase()));
+    const items = [...missing, ...names];
     return `
         <div class="cmgr-nav-group cmgr-category-group">
             <div class="cmgr-nav-title">${escapeHtml(t("Base Model"))}</div>
             <div class="cmgr-search-picker">
                 ${renderSelectorCombo({
                     id: "image-base-model",
-                    value: selected,
+                    values: selected,
                     items,
                     placeholder: t("All base models"),
                     searchPlaceholder: t("Search base models..."),
                     emptyText: t("No base models found"),
                     clearTitle: t("Clear base model"),
+                    multiHint: t("Pick any number"),
                 })}
             </div>
             ${!items.length ? `<div class="cmgr-nav-note">${escapeHtml(t(loading ? "Loading base models..." : "Base models appear from Civitai data."))}</div>` : ""}
@@ -422,14 +425,15 @@ export function renderImageFilters(baseModels = [], options = {}) {
 
 function renderImageFilterBar() {
     const chips = [];
-    if (imageState.baseModel) {
+    imageState.baseModels.forEach((baseModel) => {
         chips.push({
             key: "image-base-model",
             label: t("Base Model"),
-            value: imageState.baseModel,
+            value: baseModel,
+            clearValue: baseModel,
             clearAction: "clear-image-base-model",
         });
-    }
+    });
     if (imageState.period !== "AllTime") {
         chips.push({
             key: "image-period",

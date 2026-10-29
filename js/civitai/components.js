@@ -138,7 +138,7 @@ export function renderActiveFilterChips(chips = [], clearAllAction = "reset-all-
         <div class="cmgr-active-filters" role="region" aria-label="${escapeAttr(t("Adjust filters"))}">
             <div class="cmgr-active-filter-list">
                 ${valid.map((chip) => `
-                    <button class="cmgr-active-filter-chip" type="button" data-action="${escapeAttr(chip.clearAction || "")}" data-clear-filter="${escapeAttr(chip.key)}" title="${escapeAttr(`${chip.label}: ${chip.value}`)}">
+                    <button class="cmgr-active-filter-chip" type="button" data-action="${escapeAttr(chip.clearAction || "")}" data-clear-filter="${escapeAttr(chip.key)}"${chip.clearValue ? ` data-clear-value="${escapeAttr(chip.clearValue)}"` : ""} title="${escapeAttr(`${chip.label}: ${chip.value}`)}">
                         <small>${escapeHtml(chip.label)}:</small>
                         <b>${escapeHtml(chip.value)}</b>
                         <i aria-hidden="true">×</i>
@@ -190,6 +190,34 @@ export function bindSearchCombo(combo, applyValue) {
     const searchInput = combo.querySelector("[data-combo-search]");
     const options = Array.from(combo.querySelectorAll("[data-combo-option]"));
     const empty = combo.querySelector("[data-combo-empty]");
+    // A multi combo keeps its popover open while values are toggled and hands
+    // the caller the whole selection, so several filters can be picked at once.
+    const multiple = combo.dataset.comboMulti === "true";
+    const valueEl = combo.querySelector(".cmgr-combo-value");
+    const placeholder = String(
+        valueEl?.dataset.placeholder
+        || (valueEl?.classList.contains("placeholder") ? valueEl.textContent : "")
+        || "",
+    );
+    const chosenValues = () => options.filter((option) => option.classList.contains("active"))
+        .map((option) => option.dataset.comboOption || "");
+    const syncValue = () => {
+        if (!valueEl) return;
+        const chosen = chosenValues();
+        valueEl.classList.toggle("placeholder", !chosen.length);
+        if (!chosen.length) {
+            valueEl.textContent = placeholder || String(toggle?.title || "");
+            combo.classList.remove("has-value");
+            if (clearBtn) clearBtn.hidden = true;
+            return;
+        }
+        combo.classList.add("has-value");
+        if (clearBtn) clearBtn.hidden = false;
+        valueEl.innerHTML = chosen
+            .map((entry) => `<span class="cmgr-combo-chip">${escapeHtml(entry)}</span>`)
+            .join("");
+        toggle?.setAttribute("title", chosen.join(", "));
+    };
     let activeIndex = Math.max(0, options.findIndex((option) => option.classList.contains("active")));
 
     const visibleOptions = () => options.filter((option) => !option.hidden);
@@ -251,8 +279,26 @@ export function bindSearchCombo(combo, applyValue) {
         setActive(selectedIndex >= 0 ? selectedIndex : 0);
     };
     const choose = (value) => {
-        setOpen(false);
-        applyValue(value);
+        if (!multiple) {
+            setOpen(false);
+            applyValue(value);
+            return;
+        }
+        const option = options.find((item) => (item.dataset.comboOption || "") === value);
+        if (!option) {
+            // An empty value means the clear button: drop the whole selection.
+            options.forEach((item) => {
+                item.classList.remove("active");
+                item.setAttribute("aria-selected", "false");
+            });
+        } else {
+            const next = !option.classList.contains("active");
+            option.classList.toggle("active", next);
+            option.setAttribute("aria-selected", next ? "true" : "false");
+        }
+        syncValue();
+        setOpen(true);
+        applyValue(chosenValues());
     };
 
     toggle.onclick = (event) => {
@@ -265,6 +311,15 @@ export function bindSearchCombo(combo, applyValue) {
             event.preventDefault();
             event.stopPropagation();
             choose("");
+        };
+    }
+    const doneBtn = combo.querySelector("[data-combo-done]");
+    if (doneBtn) {
+        doneBtn.onclick = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            setOpen(false);
+            toggle?.focus({ preventScroll: true });
         };
     }
     searchInput.oninput = () => filterOptions(searchInput.value);
@@ -289,7 +344,7 @@ export function bindSearchCombo(combo, applyValue) {
             const option = visibleOptions()[activeIndex];
             if (option) {
                 choose(option.dataset.comboOption || "");
-            } else {
+            } else if (!multiple) {
                 const typed = String(searchInput.value || "").trim();
                 if (typed) choose(typed);
             }

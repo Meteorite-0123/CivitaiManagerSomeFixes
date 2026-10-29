@@ -1130,7 +1130,23 @@ def _taxonomy_cache_get(kind: str, config: dict[str, Any]) -> dict[str, Any] | N
 
 
 def _models_url(params: dict[str, Any]) -> str:
-    return f"{CIVITAI_API_BASE}/models?{urllib.parse.urlencode(params)}"
+    # doseq keeps repeated keys (baseModels=A&baseModels=B), which is the only
+    # shape Civitai accepts for more than one value.
+    return f"{CIVITAI_API_BASE}/models?{urllib.parse.urlencode(params, doseq=True)}"
+
+
+def _split_filter_values(value: Any) -> list[str]:
+    """Turns `a,b` (or a list) into unique, trimmed filter values."""
+    if isinstance(value, (list, tuple, set)):
+        parts = [str(item) for item in value]
+    else:
+        parts = str(value or "").split(",")
+    values: list[str] = []
+    for part in parts:
+        clean = part.strip()
+        if clean and clean not in values:
+            values.append(clean)
+    return values
 
 
 def _cursor_offset_to_page(cursor: str, limit: int) -> str:
@@ -1223,17 +1239,22 @@ def _normalize_model_period(period: str) -> str:
     return "AllTime"
 
 
-def _normalize_model_file_format(value: str) -> str:
-    clean = str(value or "").strip()
-    for option in MODEL_FILE_FORMATS:
-        if option.lower() == clean.lower():
-            return option
-    return ""
+def _normalize_model_file_formats(value: Any) -> list[str]:
+    formats: list[str] = []
+    for part in _split_filter_values(value):
+        for option in MODEL_FILE_FORMATS:
+            if option.lower() == part.lower() and option not in formats:
+                formats.append(option)
+    return formats
 
 
-def _normalize_model_status(value: str) -> str:
-    clean = str(value or "").strip().lower()
-    return clean if clean in MODEL_STATUSES else ""
+def _normalize_model_statuses(value: Any) -> list[str]:
+    statuses: list[str] = []
+    for part in _split_filter_values(value):
+        clean = part.lower()
+        if clean in MODEL_STATUSES and clean not in statuses:
+            statuses.append(clean)
+    return statuses
 
 
 def _model_file_formats(model: dict[str, Any]) -> set[str]:
@@ -1267,17 +1288,30 @@ def _model_status_values(model: dict[str, Any]) -> set[str]:
     return statuses
 
 
-def _model_matches_local_filters(model: dict[str, Any], file_format: str, model_status: str) -> bool:
-    if file_format and file_format.lower() not in _model_file_formats(model):
-        return False
-    if not model_status:
-        return True
-    statuses = _model_status_values(model)
+def _status_matches(model_status: str, statuses: set[str]) -> bool:
     if model_status == "free":
         # Early access is also gated behind a paid membership, so "free" means
         # the download needs neither.
         return not statuses
     return model_status in statuses
+
+
+def _model_matches_local_filters(
+    model: dict[str, Any],
+    file_formats: list[str] | None = None,
+    model_statuses: list[str] | None = None,
+) -> bool:
+    """Values inside one filter are OR-ed; the two filters are AND-ed."""
+    formats = _normalize_model_file_formats(file_formats) if not isinstance(file_formats, list) else file_formats
+    statuses_filter = _normalize_model_statuses(model_statuses) if not isinstance(model_statuses, list) else model_statuses
+    if formats:
+        available = _model_file_formats(model)
+        if not any(value.lower() in available for value in formats):
+            return False
+    if not statuses_filter:
+        return True
+    statuses = _model_status_values(model)
+    return any(_status_matches(value, statuses) for value in statuses_filter)
 
 
 def _build_model_query_params(
@@ -1289,11 +1323,11 @@ def _build_model_query_params(
     config: dict[str, Any] | None = None,
     category: str = "",
     tag: str = "",
-    base_model: str = "",
+    base_model: Any = "",
     period: str = "AllTime",
-) -> dict[str, str]:
+) -> dict[str, Any]:
     config = config or load_config()
-    params = {
+    params: dict[str, Any] = {
         "limit": str(limit),
         "types": _kind_to_civitai_type(kind),
         "sort": _normalize_model_sort(sort),
@@ -1309,8 +1343,9 @@ def _build_model_query_params(
         params["category"] = category.strip()
     if tag.strip():
         params["tag"] = tag.strip()
-    if base_model.strip():
-        params["baseModels"] = base_model.strip()
+    base_models = _split_filter_values(base_model)
+    if base_models:
+        params["baseModels"] = base_models
     return params
 
 
@@ -1328,11 +1363,16 @@ def _tag_matches(model: dict[str, Any], tag: str) -> bool:
     return any(item.lower() == clean for item in _model_tags(model))
 
 
-def _base_model_matches(model: dict[str, Any], base_model: str) -> bool:
-    clean = _safe_segment(base_model, "").lower()
-    if not clean:
+def _base_model_matches(model: dict[str, Any], base_models: Any) -> bool:
+    wanted = [
+        _safe_segment(value, "").lower()
+        for value in _split_filter_values(base_models)
+    ]
+    wanted = [value for value in wanted if value]
+    if not wanted:
         return True
-    return any(item.lower() == clean for item in _model_base_models(model))
+    available = [item.lower() for item in _model_base_models(model)]
+    return any(value in available for value in wanted)
 
 
 def _search_text_values(model: dict[str, Any]) -> list[str]:
@@ -2433,7 +2473,7 @@ def _images_query_params(
     sort: str = "Newest",
     limit: int = IMAGE_FEED_PAGE_SIZE,
     period: str = "AllTime",
-    base_model: str = "",
+    base_model: Any = "",
     config: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     config = config or load_config()
@@ -2450,8 +2490,11 @@ def _images_query_params(
         params["query"] = query.strip()
     if cursor.strip():
         params["cursor"] = cursor.strip()
-    if base_model.strip():
-        params["baseModels"] = base_model.strip()
+    # The image feed OR-s comma separated base models (repeated keys are not
+    # honoured the same way), so they stay in one value here.
+    base_models = _split_filter_values(base_model)
+    if base_models:
+        params["baseModels"] = ",".join(base_models)
     return params
 
 
@@ -2929,12 +2972,15 @@ def _search_civitai_models(
 ) -> dict[str, Any]:
     api_key = str(config.get("civitai_api_key") or "").strip() or None
     period = _normalize_model_period(period)
-    file_format = _normalize_model_file_format(file_format)
-    model_status = _normalize_model_status(model_status)
-    local_filters = bool(file_format or model_status)
+    file_formats = _normalize_model_file_formats(file_format)
+    model_statuses = _normalize_model_statuses(model_status)
+    local_filters = bool(file_formats or model_statuses)
     category = _safe_segment(category, "") if category else ""
     tag = _safe_segment(tag, "") if tag else ""
-    base_model = _safe_segment(base_model, "") if base_model else ""
+    base_models = [
+        value for value in (_safe_segment(item, "") for item in _split_filter_values(base_model)) if value
+    ]
+    base_model_text = ",".join(base_models)
     if category.lower() == "other":
         category = ""
     api_tag = tag or category
@@ -2960,13 +3006,13 @@ def _search_civitai_models(
 
     attempts: list[tuple[str, str, str]] = []
     if not fallback_cursor:
-        add_attempt(attempts, query, api_tag, base_model)
+        add_attempt(attempts, query, api_tag, base_model_text)
         if query and api_tag:
-            add_attempt(attempts, query, "", base_model)
+            add_attempt(attempts, query, "", base_model_text)
         if query and not api_tag:
-            add_attempt(attempts, "", query, base_model)
+            add_attempt(attempts, "", query, base_model_text)
         if query and api_tag:
-            add_attempt(attempts, "", api_tag, base_model)
+            add_attempt(attempts, "", api_tag, base_model_text)
     if cursor:
         # Later pages continue the attempt that produced the first page.
         attempts = attempts[attempt_index:attempt_index + 1]
@@ -2974,7 +3020,7 @@ def _search_civitai_models(
         attempt_index = 0
 
     for index, (attempt_query, attempt_tag, attempt_base) in enumerate(attempts, start=attempt_index):
-        fetch_limit = 100 if base_model else limit
+        fetch_limit = 100 if base_models else limit
         page_cursor = cursor
         # Format and status filters have no Civitai parameter, so the pages that
         # do not match are skipped here and the listing keeps paging until it
@@ -3012,12 +3058,12 @@ def _search_civitai_models(
             page_metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
             next_cursor = str(page_metadata.get("nextCursor") or "")
             _merge_taxonomy_cache(kind, config, page_items)
-            if base_model:
-                page_items = [item for item in page_items if _base_model_matches(item, base_model)]
+            if base_models:
+                page_items = [item for item in page_items if _base_model_matches(item, base_models)]
             if local_filters:
                 page_items = [
                     item for item in page_items
-                    if _model_matches_local_filters(item, file_format, model_status)
+                    if _model_matches_local_filters(item, file_formats, model_statuses)
                 ]
             if page_items:
                 metadata = page_metadata
@@ -3032,7 +3078,7 @@ def _search_civitai_models(
         if collected and (not local_filters or not more_pages or len(collected) >= limit):
             break
 
-    should_fallback = base_model and (query or tag or category) and len(collected) < limit
+    should_fallback = bool(base_models) and (query or tag or category) and len(collected) < limit
     if should_fallback:
         existing_ids = {str(item.get("id")) for item in collected}
         fallback_items, fallback_metadata = _search_base_model_text_fallback(
@@ -3040,7 +3086,7 @@ def _search_civitai_models(
             query,
             tag,
             category,
-            base_model,
+            base_model_text,
             sort,
             limit - len(collected),
             fallback_cursor,
@@ -3156,12 +3202,12 @@ async def search_api(request: web.Request) -> web.Response:
         category = request.query.get("category", "")
         tag = request.query.get("tag", "")
         base_model = request.query.get("base_model") or request.query.get("baseModel") or request.query.get("baseModels") or ""
-        file_format = _normalize_model_file_format(
+        file_format = ",".join(_normalize_model_file_formats(
             request.query.get("file_format") or request.query.get("fileFormat") or ""
-        )
-        model_status = _normalize_model_status(
+        ))
+        model_status = ",".join(_normalize_model_statuses(
             request.query.get("model_status") or request.query.get("modelStatus") or ""
-        )
+        ))
         limit = max(1, min(int(request.query.get("limit", "40")), 100))
         cache_key = (
             kind,

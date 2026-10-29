@@ -136,6 +136,8 @@ const messages = {
         "Model status": "模型状态",
         "Any format": "全部格式",
         "Any status": "全部状态",
+        "Pick any number": "可多选",
+        Done: "完成",
         "Paid Access": "付费访问",
         Free: "免费",
         Clear: "清除",

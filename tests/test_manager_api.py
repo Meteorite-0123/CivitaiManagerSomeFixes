@@ -340,6 +340,12 @@ class ImageFeedTests(unittest.TestCase):
         self.assertEqual(params["baseModels"], "SDXL 1.0")
         self.assertNotIn("cursor", params)
 
+    def test_image_query_params_keep_multiple_base_models_in_one_value(self):
+        params = manager._images_query_params(
+            "", "", "Newest", 40, "AllTime", "SDXL 1.0,Pony", {"allow_nsfw": False},
+        )
+        self.assertEqual(params["baseModels"], "SDXL 1.0,Pony")
+
     def test_resource_resolution_reads_the_pinned_version(self):
         version = {
             "id": 40,
@@ -843,6 +849,48 @@ class SearchFallbackTests(unittest.TestCase):
 
         self.assertEqual([item["id"] for item in run("paid")["items"]], [2])
         self.assertEqual([item["id"] for item in run("free")["items"]], [3])
+        # Several statuses widen the page instead of narrowing it.
+        self.assertEqual([item["id"] for item in run("paid,free")["items"]], [2, 3])
+
+    def test_multiple_values_inside_a_filter_are_or_ed(self):
+        self.assertEqual(manager._normalize_model_file_formats("SafeTensor, GGUF"), ["SafeTensor", "GGUF"])
+        self.assertEqual(manager._normalize_model_file_formats(["gguf", "nonsense"]), ["GGUF"])
+        self.assertEqual(manager._normalize_model_statuses("paid,free"), ["paid", "free"])
+
+        safe = {"modelVersions": [{"files": [{"metadata": {"format": "SafeTensor"}}]}]}
+        gguf = {"modelVersions": [{"files": [{"metadata": {"format": "GGUF"}}]}]}
+        pickled = {"modelVersions": [{"files": [{"metadata": {"format": "PickleTensor"}}]}]}
+        self.assertTrue(manager._model_matches_local_filters(safe, ["SafeTensor", "GGUF"], []))
+        self.assertTrue(manager._model_matches_local_filters(gguf, ["SafeTensor", "GGUF"], []))
+        self.assertFalse(manager._model_matches_local_filters(pickled, ["SafeTensor", "GGUF"], []))
+        # Different filters still narrow each other.
+        self.assertFalse(manager._model_matches_local_filters(safe, ["SafeTensor"], ["paid"]))
+
+    def test_multiple_base_models_are_sent_as_repeated_params(self):
+        params = manager._build_model_query_params(
+            "lora", "", "", "Newest", 40, manager._default_config(), "", "", "SDXL 1.0,Pony",
+        )
+        self.assertEqual(params["baseModels"], ["SDXL 1.0", "Pony"])
+        # doseq keeps both keys; Civitai ignores a comma separated model list.
+        self.assertIn("baseModels=SDXL+1.0&baseModels=Pony", manager._models_url(params))
+
+    def test_several_base_models_keep_every_model_on_the_page(self):
+        items = [
+            {"id": 1, "name": "A", "modelVersions": [{"baseModel": "SDXL 1.0"}]},
+            {"id": 2, "name": "B", "modelVersions": [{"baseModel": "Pony"}]},
+            {"id": 3, "name": "C", "modelVersions": [{"baseModel": "Illustrious"}]},
+        ]
+        with (
+            mock.patch.object(manager, "_read_models_json", return_value={"items": items, "metadata": {}}) as read_models,
+            mock.patch.object(manager, "_merge_taxonomy_cache"),
+            mock.patch.object(manager, "_taxonomy_cache_get", return_value={}),
+        ):
+            response = manager._search_civitai_models(
+                "lora", "", "", "Newest", 40, "", "SDXL 1.0,Pony", "", manager._default_config(),
+            )
+
+        self.assertEqual([item["id"] for item in response["items"]], [1, 2])
+        self.assertEqual(read_models.call_args.args[0]["baseModels"], ["SDXL 1.0", "Pony"])
 
     def search(self, query, cursor, pages):
         with (
@@ -904,7 +952,7 @@ class SearchFallbackTests(unittest.TestCase):
 
         self.assertEqual([item["id"] for item in items], [2])
         self.assertEqual(metadata["nextCursor"], f"{manager.SEARCH_FALLBACK_CURSOR_PREFIX}200")
-        self.assertEqual(read_models.call_args.args[0]["baseModels"], "SDXL 1.0")
+        self.assertEqual(read_models.call_args.args[0]["baseModels"], ["SDXL 1.0"])
 
 
 class LibraryScanTests(unittest.TestCase):

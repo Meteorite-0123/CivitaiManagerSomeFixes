@@ -927,12 +927,12 @@ async function search(reset = true, options = {}) {
         sort: state.sort,
         limit: String(SEARCH_PAGE_SIZE),
     });
-    if (state.selectedBaseModel) params.set("base_model", state.selectedBaseModel);
+    if (state.selectedBaseModels.length) params.set("base_model", state.selectedBaseModels.join(","));
     if (state.selectedTag) params.set("tag", state.selectedTag);
     if (state.selectedCivitaiCategory) params.set("category", state.selectedCivitaiCategory);
     if (state.period && state.period !== "AllTime") params.set("period", state.period);
-    if (state.fileFormat) params.set("file_format", state.fileFormat);
-    if (state.modelStatus) params.set("model_status", state.modelStatus);
+    if (state.fileFormats.length) params.set("file_format", state.fileFormats.join(","));
+    if (state.modelStatuses.length) params.set("model_status", state.modelStatuses.join(","));
     if (!reset && state.nextCursor) params.set("cursor", state.nextCursor);
     const requestPath = `/search?${params.toString()}`;
     const cached = forceRefresh ? null : getSearchCache(requestPath);
@@ -1058,12 +1058,12 @@ function currentSearchSignature() {
         state.assetKind,
         state.query,
         state.sort,
-        state.selectedBaseModel,
+        state.selectedBaseModels.join(","),
         state.selectedTag,
         state.selectedCivitaiCategory,
         state.period,
-        state.fileFormat,
-        state.modelStatus,
+        state.fileFormats.join(","),
+        state.modelStatuses.join(","),
     ].map((item) => String(item || "").trim()).join("\u001f");
 }
 
@@ -2141,7 +2141,7 @@ function renderNav(nav) {
     overlay.querySelector('[data-action="view-library"]').innerHTML = `${selectorIcon("layers")}<span>${escapeHtml(t("Library"))}</span><b>${state.libraryItems.length}</b>`;
     setManagerFiltersOpen(filtersOpen);
     if (imagesMode) {
-        const imageFiltered = Boolean(imageState.baseModel) || imageState.period !== "AllTime";
+        const imageFiltered = imageState.baseModels.length > 0 || imageState.period !== "AllTime";
         nav.innerHTML = `
             <div class="cmgr-selector-filter-heading">
                 <h2>${escapeHtml(t("Adjust filters"))}</h2>
@@ -2151,14 +2151,14 @@ function renderNav(nav) {
         `;
         const resetImages = nav.querySelector('[data-action="reset-image-filters"]');
         if (resetImages) resetImages.onclick = resetImageFilters;
-        bindSearchCombo(nav.querySelector('[data-combo="image-base-model"]'), (value) => setImageBaseModel(value));
+        bindSearchCombo(nav.querySelector('[data-combo="image-base-model"]'), (values) => setImageBaseModels(values));
         bindSearchCombo(nav.querySelector('[data-combo="image-period"]'), (value) => setImagePeriod(imagePeriodValue(value)));
         return;
     }
     nav.innerHTML = `
         <div class="cmgr-selector-filter-heading">
             <h2>${escapeHtml(t(state.activeTab === "Favorites" ? "Favorites" : "Adjust filters"))}</h2>
-            ${["Discover", "Library"].includes(state.activeTab) && (state.selectedBaseModel || state.selectedTag || state.period !== "AllTime" || state.fileFormat || state.modelStatus || (state.activeTab === "Library" ? state.selectedCategory : state.selectedCivitaiCategory)) ? `<button class="cmgr-selector-reset" type="button" data-action="reset-manager-filters">${escapeHtml(t("Reset filters"))}</button>` : ""}
+            ${["Discover", "Library"].includes(state.activeTab) && (state.selectedBaseModels.length || state.selectedTag || state.period !== "AllTime" || state.fileFormats.length || state.modelStatuses.length || (state.activeTab === "Library" ? state.selectedCategory : state.selectedCivitaiCategory)) ? `<button class="cmgr-selector-reset" type="button" data-action="reset-manager-filters">${escapeHtml(t("Reset filters"))}</button>` : ""}
         </div>
         ${["Discover", "Library"].includes(state.activeTab) && !imagesMode ? renderAssetSidebar() : ""}
         ${state.activeTab === "Favorites" ? renderFavoritesSidebar() : ""}
@@ -2182,11 +2182,11 @@ function renderNav(nav) {
             animateSelectorFolder(btn, () => toggleLocalFolder(btn.dataset.localFolderToggle || ""));
         };
     });
-    bindSearchCombo(nav.querySelector('[data-combo="base-model"]'), (value) => selectBaseModel(value));
+    bindSearchCombo(nav.querySelector('[data-combo="base-model"]'), (values) => selectBaseModels(values));
     bindSearchCombo(nav.querySelector('[data-combo="category"]'), (value) => selectManagerCategory(CIVITAI_CATEGORY_FILTERS.find((item) => t(item.label) === value)?.value || ""));
     bindSearchCombo(nav.querySelector('[data-combo="period"]'), (value) => selectModelPeriod(modelPeriodValue(value)));
-    bindSearchCombo(nav.querySelector('[data-combo="file-format"]'), (value) => selectModelFileFormat(modelOptionValue(MODEL_FILE_FORMAT_OPTIONS, value)));
-    bindSearchCombo(nav.querySelector('[data-combo="model-status"]'), (value) => selectModelStatus(modelOptionValue(MODEL_STATUS_OPTIONS, value)));
+    bindSearchCombo(nav.querySelector('[data-combo="file-format"]'), (values) => selectModelFileFormats(values.map((value) => modelOptionValue(MODEL_FILE_FORMAT_OPTIONS, value))));
+    bindSearchCombo(nav.querySelector('[data-combo="model-status"]'), (values) => selectModelStatuses(values.map((value) => modelOptionValue(MODEL_STATUS_OPTIONS, value))));
     bindSearchCombo(nav.querySelector('[data-combo="tag"]'), (value) => selectTag(value));
     if (state.activeTab === "Favorites") bindFavoritesSidebar(nav);
 }
@@ -2224,7 +2224,7 @@ function renderAssetSidebar() {
     const tags = state.activeTab === "Library" ? libraryTagsForKind(state.assetKind) : taxonomy.tags;
     const selectedCategory = state.activeTab === "Library" ? state.selectedCategory || "" : state.selectedCivitaiCategory || "";
     const localFolderTree = state.activeTab === "Library" ? libraryFolderTreeForKind(state.assetKind) : null;
-    const baseModelOptions = ensureSelectedOption(baseModels, state.selectedBaseModel);
+    const baseModelOptions = ensureSelectedOptions(baseModels, state.selectedBaseModels);
     const tagOptions = ensureSelectedOption(tags, state.selectedTag);
     return `
         <div class="cmgr-nav-group cmgr-category-group">
@@ -2232,12 +2232,13 @@ function renderAssetSidebar() {
             <div class="cmgr-search-picker">
                 ${renderSelectorCombo({
                     id: "base-model",
-                    value: state.selectedBaseModel,
+                    values: state.selectedBaseModels,
                     items: baseModelOptions,
                     placeholder: t("Choose a base model"),
                     searchPlaceholder: t("Search base models..."),
                     emptyText: t("No base models found"),
                     clearTitle: t("Clear base model"),
+                    multiHint: t("Pick any number"),
                 })}
             </div>
             ${state.taxonomyLoading && state.activeTab === "Discover" ? `<div class="cmgr-nav-note">${escapeHtml(t("Loading base models..."))}</div>` : ""}
@@ -2263,12 +2264,13 @@ function renderAssetSidebar() {
                 <div class="cmgr-search-picker">
                     ${renderSelectorCombo({
                         id: "file-format",
-                        value: state.fileFormat ? t(state.fileFormat) : "",
+                        values: state.fileFormats.map((value) => t(value)),
                         items: MODEL_FILE_FORMAT_OPTIONS.map((item) => t(item.label)),
                         placeholder: t("Any format"),
                         searchPlaceholder: t("Search"),
                         emptyText: t("No options found"),
                         clearTitle: t("Clear"),
+                        multiHint: t("Pick any number"),
                     })}
                 </div>
             </div>
@@ -2277,12 +2279,13 @@ function renderAssetSidebar() {
                 <div class="cmgr-search-picker">
                     ${renderSelectorCombo({
                         id: "model-status",
-                        value: state.modelStatus ? t(MODEL_STATUS_OPTIONS.find((item) => item.value === state.modelStatus)?.label || "") : "",
+                        values: state.modelStatuses.map((value) => t(MODEL_STATUS_OPTIONS.find((item) => item.value === value)?.label || value)),
                         items: MODEL_STATUS_OPTIONS.map((item) => t(item.label)),
                         placeholder: t("Any status"),
                         searchPlaceholder: t("Search"),
                         emptyText: t("No options found"),
                         clearTitle: t("Clear"),
+                        multiHint: t("Pick any number"),
                     })}
                 </div>
             </div>
@@ -2520,11 +2523,11 @@ function selectManagerCategory(category) {
 }
 
 function resetManagerFilters() {
-    state.selectedBaseModel = "";
+    state.selectedBaseModels = [];
     state.selectedTag = "";
     state.period = "AllTime";
-    state.fileFormat = "";
-    state.modelStatus = "";
+    state.fileFormats = [];
+    state.modelStatuses = [];
     if (state.activeTab === "Discover") state.selectedCivitaiCategory = "";
     else state.selectedCategory = "";
     state.selectedModel = null;
@@ -2532,10 +2535,6 @@ function resetManagerFilters() {
     state.resolution = null;
     if (state.activeTab === "Discover") void search(true, { silent: true });
     else render();
-}
-
-function selectBaseModelButton(btn) {
-    btn.onclick = () => selectBaseModel(btn.dataset.baseModel || "");
 }
 
 function selectTagButton(btn) {
@@ -2590,24 +2589,25 @@ function selectModelPeriod(period) {
     refreshDiscoverListing();
 }
 
-function selectModelFileFormat(format) {
-    const next = String(format || "");
-    if (state.fileFormat === next) return;
-    state.fileFormat = next;
+function selectModelFileFormats(formats) {
+    const next = uniqueFilterValues(formats);
+    if (sameFilterValues(state.fileFormats, next)) return;
+    state.fileFormats = next;
     refreshDiscoverListing();
 }
 
-function selectModelStatus(status) {
-    const next = String(status || "");
-    if (state.modelStatus === next) return;
-    state.modelStatus = next;
+function selectModelStatuses(statuses) {
+    const next = uniqueFilterValues(statuses);
+    if (sameFilterValues(state.modelStatuses, next)) return;
+    state.modelStatuses = next;
     refreshDiscoverListing();
 }
 
-function selectBaseModel(baseModel) {
-    baseModel = normalizePickerChoice(baseModel, currentBaseModelItems());
-    if (state.selectedBaseModel === baseModel) return;
-    state.selectedBaseModel = baseModel;
+function selectBaseModels(values) {
+    const next = uniqueFilterValues((Array.isArray(values) ? values : [values])
+        .map((value) => normalizePickerChoice(value, currentBaseModelItems())));
+    if (sameFilterValues(state.selectedBaseModels, next)) return;
+    state.selectedBaseModels = next;
     state.selectedModel = null;
     state.selectedAssetId = "";
     state.resolution = null;
@@ -2642,10 +2642,10 @@ function selectAssetKind(kind) {
     state.assetKind = kind;
     state.selectedCategory = "";
     state.selectedCivitaiCategory = "";
-    state.selectedBaseModel = "";
+    state.selectedBaseModels = [];
     state.selectedTag = "";
-    state.fileFormat = "";
-    state.modelStatus = "";
+    state.fileFormats = [];
+    state.modelStatuses = [];
     state.selectedModel = null;
     state.selectedAssetId = "";
     state.resolution = null;
@@ -2710,14 +2710,15 @@ function renderToolbarKindTabs() {
 
 function renderActiveFilterBar() {
     const chips = [];
-    if (state.selectedBaseModel) {
+    state.selectedBaseModels.forEach((baseModel) => {
         chips.push({
             key: "base_model",
             label: t("Base Model"),
-            value: state.selectedBaseModel,
+            value: baseModel,
+            clearValue: baseModel,
             clearAction: "clear-filter-base",
         });
-    }
+    });
     if (state.activeTab === "Discover" && state.selectedCivitaiCategory) {
         chips.push({
             key: "category",
@@ -2750,20 +2751,24 @@ function renderActiveFilterBar() {
             clearAction: "clear-filter-period",
         });
     }
-    if (state.activeTab === "Discover" && state.fileFormat) {
-        chips.push({
-            key: "file_format",
-            label: t("File format"),
-            value: t(state.fileFormat),
-            clearAction: "clear-filter-file-format",
+    if (state.activeTab === "Discover") {
+        state.fileFormats.forEach((format) => {
+            chips.push({
+                key: "file_format",
+                label: t("File format"),
+                value: t(format),
+                clearValue: format,
+                clearAction: "clear-filter-file-format",
+            });
         });
-    }
-    if (state.activeTab === "Discover" && state.modelStatus) {
-        chips.push({
-            key: "model_status",
-            label: t("Model status"),
-            value: t(MODEL_STATUS_OPTIONS.find((item) => item.value === state.modelStatus)?.label || ""),
-            clearAction: "clear-filter-model-status",
+        state.modelStatuses.forEach((status) => {
+            chips.push({
+                key: "model_status",
+                label: t("Model status"),
+                value: t(MODEL_STATUS_OPTIONS.find((item) => item.value === status)?.label || status),
+                clearValue: status,
+                clearAction: "clear-filter-model-status",
+            });
         });
     }
     return renderActiveFilterChips(chips, "reset-all-filters");
@@ -3382,16 +3387,20 @@ function bindCommonEvents(root) {
     root.querySelectorAll("[data-asset-kind]").forEach((btn) => {
         btn.onclick = () => selectAssetKind(btn.dataset.assetKind);
     });
-    const clearBase = root.querySelector('[data-action="clear-filter-base"]');
-    if (clearBase) clearBase.onclick = () => selectBaseModel("");
+    // One chip per selected value, so each clear button only drops that value.
+    root.querySelectorAll('[data-action="clear-filter-base"]').forEach((btn) => {
+        btn.onclick = () => selectBaseModels(state.selectedBaseModels.filter((value) => value !== btn.dataset.clearValue));
+    });
     const clearTag = root.querySelector('[data-action="clear-filter-tag"]');
     if (clearTag) clearTag.onclick = () => selectTag("");
     const clearPeriod = root.querySelector('[data-action="clear-filter-period"]');
     if (clearPeriod) clearPeriod.onclick = () => selectModelPeriod("AllTime");
-    const clearFileFormat = root.querySelector('[data-action="clear-filter-file-format"]');
-    if (clearFileFormat) clearFileFormat.onclick = () => selectModelFileFormat("");
-    const clearModelStatus = root.querySelector('[data-action="clear-filter-model-status"]');
-    if (clearModelStatus) clearModelStatus.onclick = () => selectModelStatus("");
+    root.querySelectorAll('[data-action="clear-filter-file-format"]').forEach((btn) => {
+        btn.onclick = () => selectModelFileFormats(state.fileFormats.filter((value) => value !== btn.dataset.clearValue));
+    });
+    root.querySelectorAll('[data-action="clear-filter-model-status"]').forEach((btn) => {
+        btn.onclick = () => selectModelStatuses(state.modelStatuses.filter((value) => value !== btn.dataset.clearValue));
+    });
     const clearCategory = root.querySelector('[data-action="clear-filter-category"]');
     if (clearCategory) clearCategory.onclick = () => {
         if (state.activeTab === "Discover") state.selectedCivitaiCategory = "";
@@ -3620,10 +3629,10 @@ function reloadImageFeed() {
     void loadImageFeed({ reset: true }).then(() => render());
 }
 
-function setImageBaseModel(baseModel) {
-    const next = String(baseModel || "");
-    if (imageState.baseModel === next) return;
-    imageState.baseModel = next;
+function setImageBaseModels(values) {
+    const next = uniqueFilterValues(values);
+    if (sameFilterValues(imageState.baseModels, next)) return;
+    imageState.baseModels = next;
     reloadImageFeed();
 }
 
@@ -3642,7 +3651,7 @@ function setImageSort(sort) {
 }
 
 function resetImageFilters() {
-    imageState.baseModel = "";
+    imageState.baseModels = [];
     imageState.period = "AllTime";
     reloadImageFeed();
 }
@@ -3701,8 +3710,11 @@ function bindImageEvents(root) {
     root.querySelectorAll('[data-image-sort]').forEach((button) => {
         button.onclick = () => setImageSort(button.dataset.imageSort || "Newest");
     });
-    const clearBaseModel = root.querySelector('[data-action="clear-image-base-model"]');
-    if (clearBaseModel) clearBaseModel.onclick = () => setImageBaseModel("");
+    root.querySelectorAll('[data-action="clear-image-base-model"]').forEach((btn) => {
+        btn.onclick = () => setImageBaseModels(
+            imageState.baseModels.filter((value) => value !== btn.dataset.clearValue),
+        );
+    });
     const clearPeriod = root.querySelector('[data-action="clear-image-period"]');
     if (clearPeriod) clearPeriod.onclick = () => setImagePeriod("AllTime");
     const resetFilters = root.querySelector('[data-action="reset-image-filters"]');
@@ -4185,7 +4197,7 @@ function assetTags(asset) {
 
 function activeFilterText() {
     const category = state.activeTab === "Discover" ? categoryFilterLabel(state.selectedCivitaiCategory) : localFolderFilterLabel(state.selectedCategory);
-    return [state.selectedBaseModel, category, state.selectedTag]
+    return [state.selectedBaseModels.join(", "), category, state.selectedTag]
         .filter(Boolean)
         .join(" · ");
 }
@@ -4206,6 +4218,33 @@ function ensureSelectedOption(items, selected) {
     const list = Array.isArray(items) ? items : [];
     if (!selected || list.some((item) => item.name === selected)) return list;
     return [{ name: selected, count: 0 }, ...list];
+}
+
+// Selections that are not in the taxonomy yet (for example the base model a
+// shared card carried) still have to render as a ticked row.
+function ensureSelectedOptions(items, selected) {
+    const values = uniqueFilterValues(selected);
+    return values.reduceRight(
+        (list, value) => ensureSelectedOption(list, value),
+        Array.isArray(items) ? items : [],
+    );
+}
+
+function uniqueFilterValues(values) {
+    const result = [];
+    (Array.isArray(values) ? values : [values]).forEach((value) => {
+        const clean = String(value ?? "").trim();
+        if (!clean) return;
+        if (result.some((item) => item.toLowerCase() === clean.toLowerCase())) return;
+        result.push(clean);
+    });
+    return result;
+}
+
+function sameFilterValues(left, right) {
+    const a = uniqueFilterValues(left).map((item) => item.toLowerCase());
+    const b = uniqueFilterValues(right).map((item) => item.toLowerCase());
+    return a.length === b.length && a.every((item, index) => item === b[index]);
 }
 
 function currentBaseModelItems() {
@@ -4230,7 +4269,7 @@ function filteredLibraryItems() {
     const query = String(state.libraryQuery || "").trim().toLocaleLowerCase();
     return state.libraryItems.filter((item) => {
         if (!assetMatchesKind(item)) return false;
-        if (state.selectedBaseModel && assetBaseModel(item).toLowerCase() !== state.selectedBaseModel.toLowerCase()) return false;
+        if (state.selectedBaseModels.length && !state.selectedBaseModels.some((value) => assetBaseModel(item).toLowerCase() === value.toLowerCase())) return false;
         if (selectedFolder && !assetMatchesLocalFolder(item, selectedFolder)) return false;
         if (state.selectedTag && !assetTags(item).some((tag) => tag.toLowerCase() === state.selectedTag.toLowerCase())) return false;
         if (query && ![

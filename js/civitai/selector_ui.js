@@ -38,21 +38,33 @@ export function selectorIcon(name) {
 
 
 export function renderSelectorCombo(options) {
-    const value = String(options.value || "");
+    // Multi-select combos take `values`; single ones keep the `value` contract.
+    const multiple = Array.isArray(options.values) || options.multiple === true;
+    const chosen = [...new Set((Array.isArray(options.values) ? options.values : [options.value])
+        .map((item) => String(item || "").trim())
+        .filter(Boolean))];
+    const value = chosen.join(", ");
     const items = [...new Set(options.items.map((item) => String(item?.name || item)).filter(Boolean))];
+    const isChosen = (item) => chosen.some((entry) => entry.toLowerCase() === item.toLowerCase());
+    const display = chosen.length
+        ? (multiple
+            ? chosen.map((entry) => `<span class="cmgr-combo-chip" title="${escapeAttr(entry)}">${escapeHtml(entry)}</span>`).join("")
+            : escapeHtml(value))
+        : escapeHtml(options.placeholder);
     return `
-        <div class="cmgr-combo ${value ? "has-value" : ""}" data-combo="${escapeAttr(options.id)}">
+        <div class="cmgr-combo ${value ? "has-value" : ""} ${multiple ? "is-multi" : ""}" data-combo="${escapeAttr(options.id)}" ${multiple ? 'data-combo-multi="true"' : ""}>
             <button class="cmgr-combo-control" type="button" data-combo-toggle aria-haspopup="listbox" aria-expanded="false" title="${escapeAttr(value || options.placeholder)}">
-                <span class="cmgr-combo-value ${value ? "" : "placeholder"}">${escapeHtml(value || options.placeholder)}</span>
+                <span class="cmgr-combo-value ${value ? "" : "placeholder"}" data-placeholder="${escapeAttr(options.placeholder)}">${display}</span>
                 ${selectorIcon("chevron")}
             </button>
             <button class="cmgr-combo-clear" type="button" data-combo-clear aria-label="${escapeAttr(options.clearTitle)}" ${value ? "" : "hidden"}>${selectorIcon("close")}</button>
             <div class="cmgr-combo-popover" data-combo-popover>
                 <div class="cmgr-selector-combo-search">${selectorIcon("search")}<input class="cmgr-combo-search" data-combo-search placeholder="${escapeAttr(options.searchPlaceholder)}" aria-label="${escapeAttr(options.searchPlaceholder)}" autocomplete="off" /></div>
-                <div class="cmgr-combo-list" data-combo-list role="listbox">
-                    ${items.map((item) => `<button class="cmgr-combo-option ${item === value ? "active" : ""}" type="button" role="option" aria-selected="${item === value}" data-combo-option="${escapeAttr(item)}"><span>${escapeHtml(item)}</span></button>`).join("")}
+                <div class="cmgr-combo-list" data-combo-list role="listbox" ${multiple ? 'aria-multiselectable="true"' : ""}>
+                    ${items.map((item) => `<button class="cmgr-combo-option ${isChosen(item) ? "active" : ""}" type="button" role="option" aria-selected="${isChosen(item)}" data-combo-option="${escapeAttr(item)}"><span>${escapeHtml(item)}</span></button>`).join("")}
                     <div class="cmgr-combo-empty" data-combo-empty ${items.length ? "hidden" : ""}>${escapeHtml(options.emptyText)}</div>
                 </div>
+                ${multiple ? `<div class="cmgr-combo-footer"><span>${escapeHtml(options.multiHint || t("Pick any number"))}</span><button type="button" data-combo-done>${escapeHtml(t("Done"))}</button></div>` : ""}
             </div>
         </div>
     `;
