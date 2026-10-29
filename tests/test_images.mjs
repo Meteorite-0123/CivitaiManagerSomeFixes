@@ -225,6 +225,8 @@ test("pasted weights land on the matching lora resources only", () => {
 
 test("the sort menu offers exactly the five orders the image api accepts", () => {
     // JSON round-trip keeps the cross-realm array from failing a strict compare.
+    // Random and Recently Added are listed in Civitai's schema but the endpoint
+    // answers "not supported", so they must not be offered.
     assert.equal(
         JSON.stringify(IMAGE_SORTS.map((item) => item.value)),
         JSON.stringify(["Most Reactions", "Most Comments", "Most Collected", "Newest", "Oldest"]),
@@ -235,7 +237,7 @@ test("the sort menu offers exactly the five orders the image api accepts", () =>
 test("the sort menu renders one row per order and marks the current one", () => {
     imageState.sort = "Most Collected";
     const html = renderImageSort();
-    assert.equal((html.match(/data-image-sort=/g) || []).length, 5);
+    assert.equal((html.match(/data-image-sort=/g) || []).length, IMAGE_SORTS.length);
     assert.ok(html.includes('data-image-sort="Most Reactions"'));
     assert.ok(html.includes('data-image-sort="Oldest"'));
     assert.ok(html.includes('aria-checked="true" data-image-sort="Most Collected"'));

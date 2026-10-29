@@ -20,6 +20,41 @@ export const ASSET_KINDS = [
 // Library-only tab that collects every model folder outside the classic kinds.
 export const OTHER_LIBRARY_KIND = "other";
 
+// The exact sort values Civitai's own model browser lists for every model
+// type, so the picker behaves like the site instead of offering three.
+export const MODEL_SORTS = [
+    "Hot",
+    "Highest Rated",
+    "Most Downloaded",
+    "Most Liked",
+    "Most Discussed",
+    "Most Collected",
+    "Most Images",
+    "Newest",
+    "Oldest",
+];
+
+// Time period and the filters Civitai exposes for models. File format and
+// status are matched against the downloaded model data by the backend.
+export const MODEL_PERIODS = [
+    { value: "AllTime", label: "All time" },
+    { value: "Day", label: "Past day" },
+    { value: "Week", label: "Past week" },
+    { value: "Month", label: "Past month" },
+    { value: "Year", label: "Past year" },
+];
+
+const MODEL_FILE_FORMATS = ["SafeTensor", "PickleTensor", "GGUF", "Diffusers", "ONNX", "Core ML", "Other"];
+
+export const MODEL_FILE_FORMAT_OPTIONS = MODEL_FILE_FORMATS.map((value) => ({ value, label: value }));
+
+// Civitai's public listing never returns early-access models, so the only
+// statuses that can be matched against a fetched page are paid and free.
+export const MODEL_STATUS_OPTIONS = [
+    { value: "paid", label: "Paid Access" },
+    { value: "free", label: "Free" },
+];
+
 export const CIVITAI_CATEGORY_FILTERS = [
     { label: "Action", value: "action" },
     { label: "Animal", value: "animal" },

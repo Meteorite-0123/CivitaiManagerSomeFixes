@@ -12,7 +12,8 @@ const PAGE_SIZE = 40;
 const DOWNLOADABLE_KINDS = new Set(["checkpoint", "lora", "workflow"]);
 // Civitai's image feed only sorts these ways, and only filters base model and
 // period; the model categories and tags have no image counterpart there.
-// These five values are the ones the endpoint accepts; anything else is a 400.
+// These five are the ones the endpoint really answers; anything else comes
+// back as "Sort ... is not supported".
 export const IMAGE_SORTS = [
     { value: "Most Reactions", label: "Most Reactions" },
     { value: "Most Comments", label: "Most Comments" },

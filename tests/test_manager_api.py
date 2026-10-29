@@ -784,6 +784,66 @@ class SearchFallbackTests(unittest.TestCase):
 
         self.assertTrue(response["content_filter_active"])
 
+    def test_every_site_sort_and_period_reaches_the_api(self):
+        with (
+            mock.patch.object(manager, "_read_models_json", return_value={"items": [], "metadata": {}}) as read_models,
+            mock.patch.object(manager, "_merge_taxonomy_cache"),
+            mock.patch.object(manager, "_taxonomy_cache_get", return_value={}),
+        ):
+            manager._search_civitai_models(
+                "lora", "", "", "Most Collected", 40, "", "", "", manager._default_config(), "Month",
+            )
+
+        params = read_models.call_args.args[0]
+        self.assertEqual(params["sort"], "Most Collected")
+        self.assertEqual(params["period"], "Month")
+
+    def test_unknown_sort_and_period_fall_back_instead_of_400(self):
+        self.assertEqual(manager._normalize_model_sort("Most Liked"), "Most Liked")
+        self.assertEqual(manager._normalize_model_sort("made up"), "Highest Rated")
+        self.assertEqual(manager._normalize_model_period("year"), "Year")
+        self.assertEqual(manager._normalize_model_period("decade"), "AllTime")
+
+    def test_file_format_filter_keeps_paging_until_it_finds_a_match(self):
+        pickled = {
+            "items": [{"id": 1, "name": "Old", "modelVersions": [{"files": [{"metadata": {"format": "PickleTensor"}}]}]}],
+            "metadata": {"nextCursor": "9|8"},
+        }
+        safe = {
+            "items": [{"id": 2, "name": "Safe", "modelVersions": [{"files": [{"metadata": {"format": "SafeTensor"}}]}]}],
+            "metadata": {},
+        }
+        with (
+            mock.patch.object(manager, "_read_models_json", side_effect=[pickled, safe]) as read_models,
+            mock.patch.object(manager, "_merge_taxonomy_cache"),
+            mock.patch.object(manager, "_taxonomy_cache_get", return_value={}),
+        ):
+            response = manager._search_civitai_models(
+                "lora", "", "", "Newest", 40, "", "", "", manager._default_config(), "AllTime", "SafeTensor",
+            )
+
+        self.assertEqual([item["id"] for item in response["items"]], [2])
+        self.assertEqual(read_models.call_count, 2)
+        self.assertEqual(read_models.call_args.args[0]["cursor"], "9|8")
+
+    def test_model_status_filter_understands_paid_and_free(self):
+        early = {"id": 1, "name": "Early", "availability": "EarlyAccess", "modelVersions": []}
+        paid = {"id": 2, "name": "Paid", "hasActivePaidAccess": True, "modelVersions": []}
+        plain = {"id": 3, "name": "Plain", "modelVersions": []}
+
+        def run(status):
+            with (
+                mock.patch.object(manager, "_read_models_json", return_value={"items": [early, paid, plain], "metadata": {}}),
+                mock.patch.object(manager, "_merge_taxonomy_cache"),
+                mock.patch.object(manager, "_taxonomy_cache_get", return_value={}),
+            ):
+                return manager._search_civitai_models(
+                    "lora", "", "", "Newest", 40, "", "", "", manager._default_config(), "AllTime", "", status,
+                )
+
+        self.assertEqual([item["id"] for item in run("paid")["items"]], [2])
+        self.assertEqual([item["id"] for item in run("free")["items"]], [3])
+
     def search(self, query, cursor, pages):
         with (
             mock.patch.object(manager, "_read_models_json", side_effect=pages) as read_models,

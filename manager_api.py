@@ -85,6 +85,26 @@ SEARCH_VERSION_FIELDS = ("id", "name", "baseModel", "baseModelType", "publishedA
 SEARCH_FILE_FIELDS = ("id", "name", "sizeKB", "type", "primary", "metadata", "hashes", "downloadUrl")
 SEARCH_IMAGE_FIELDS = ("url", "type", "nsfwLevel", "width", "height")
 SEARCH_PRIMARY_IMAGE_LIMIT = 12
+# The sort values Civitai's own model browser offers. Anything outside this
+# list is silently rewritten server-side, so an old saved value can never make
+# the endpoint answer 400.
+MODEL_SORTS = (
+    "Hot",
+    "Highest Rated",
+    "Most Downloaded",
+    "Most Liked",
+    "Most Discussed",
+    "Most Collected",
+    "Most Images",
+    "Newest",
+    "Oldest",
+)
+MODEL_PERIODS = ("AllTime", "Day", "Week", "Month", "Year")
+MODEL_FILE_FORMATS = ("SafeTensor", "PickleTensor", "GGUF", "Diffusers", "ONNX", "Core ML", "Other")
+# Status filters have no query parameter in the public API, so they are applied
+# to the fetched pages here (the same place base models are checked).
+MODEL_STATUSES = ("paid", "free")
+SEARCH_FILTER_PAGE_LIMIT = 5
 # Civitai's image feed and the resources each image was generated with.
 IMAGES_URL = f"{CIVITAI_API_BASE}/images"
 IMAGE_FEED_PAGE_SIZE = 40
@@ -1187,6 +1207,79 @@ def _enums_url() -> str:
     return f"{CIVITAI_API_BASE}/enums"
 
 
+def _normalize_model_sort(sort: str) -> str:
+    clean = str(sort or "").strip()
+    for option in MODEL_SORTS:
+        if option.lower() == clean.lower():
+            return option
+    return "Highest Rated"
+
+
+def _normalize_model_period(period: str) -> str:
+    clean = str(period or "").strip()
+    for option in MODEL_PERIODS:
+        if option.lower() == clean.lower():
+            return option
+    return "AllTime"
+
+
+def _normalize_model_file_format(value: str) -> str:
+    clean = str(value or "").strip()
+    for option in MODEL_FILE_FORMATS:
+        if option.lower() == clean.lower():
+            return option
+    return ""
+
+
+def _normalize_model_status(value: str) -> str:
+    clean = str(value or "").strip().lower()
+    return clean if clean in MODEL_STATUSES else ""
+
+
+def _model_file_formats(model: dict[str, Any]) -> set[str]:
+    formats: set[str] = set()
+    for version in model.get("modelVersions") or []:
+        if not isinstance(version, dict):
+            continue
+        for file in version.get("files") or []:
+            if not isinstance(file, dict):
+                continue
+            metadata = file.get("metadata") if isinstance(file.get("metadata"), dict) else {}
+            value = str(metadata.get("format") or "").strip().lower()
+            if value:
+                formats.add(value)
+    return formats
+
+
+def _model_status_values(model: dict[str, Any]) -> set[str]:
+    statuses: set[str] = set()
+    if str(model.get("availability") or "").strip().lower() == "earlyaccess":
+        statuses.add("early_access")
+    if model.get("hasActivePaidAccess"):
+        statuses.add("paid")
+    for version in model.get("modelVersions") or []:
+        if not isinstance(version, dict):
+            continue
+        if str(version.get("availability") or "").strip().lower() == "earlyaccess":
+            statuses.add("early_access")
+        if version.get("paidAccess"):
+            statuses.add("paid")
+    return statuses
+
+
+def _model_matches_local_filters(model: dict[str, Any], file_format: str, model_status: str) -> bool:
+    if file_format and file_format.lower() not in _model_file_formats(model):
+        return False
+    if not model_status:
+        return True
+    statuses = _model_status_values(model)
+    if model_status == "free":
+        # Early access is also gated behind a paid membership, so "free" means
+        # the download needs neither.
+        return not statuses
+    return model_status in statuses
+
+
 def _build_model_query_params(
     kind: str,
     query: str = "",
@@ -1203,8 +1296,8 @@ def _build_model_query_params(
     params = {
         "limit": str(limit),
         "types": _kind_to_civitai_type(kind),
-        "sort": str(sort or "Highest Rated"),
-        "period": str(period or "AllTime"),
+        "sort": _normalize_model_sort(sort),
+        "period": _normalize_model_period(period),
         "nsfw": "true" if config.get("allow_nsfw") else "false",
         "primaryFileOnly": "true",
     }
@@ -2317,6 +2410,23 @@ def _image_feed_card(image: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+IMAGE_SORTS = (
+    "Most Reactions",
+    "Most Comments",
+    "Most Collected",
+    "Newest",
+    "Oldest",
+)
+
+
+def _normalize_image_sort(sort: str) -> str:
+    clean = str(sort or "").strip()
+    for option in IMAGE_SORTS:
+        if option.lower() == clean.lower():
+            return option
+    return "Newest"
+
+
 def _images_query_params(
     query: str = "",
     cursor: str = "",
@@ -2329,7 +2439,7 @@ def _images_query_params(
     config = config or load_config()
     params: dict[str, str] = {
         "limit": str(max(1, min(int(limit or IMAGE_FEED_PAGE_SIZE), 100))),
-        "sort": str(sort or "Newest"),
+        "sort": _normalize_image_sort(sort),
         "period": str(period or "AllTime"),
         "nsfw": "true" if config.get("allow_nsfw") else "false",
         # The generation data (and with it every LoRA weight) is only attached
@@ -2813,8 +2923,15 @@ def _search_civitai_models(
     base_model: str,
     category: str,
     config: dict[str, Any],
+    period: str = "AllTime",
+    file_format: str = "",
+    model_status: str = "",
 ) -> dict[str, Any]:
     api_key = str(config.get("civitai_api_key") or "").strip() or None
+    period = _normalize_model_period(period)
+    file_format = _normalize_model_file_format(file_format)
+    model_status = _normalize_model_status(model_status)
+    local_filters = bool(file_format or model_status)
     category = _safe_segment(category, "") if category else ""
     tag = _safe_segment(tag, "") if tag else ""
     base_model = _safe_segment(base_model, "") if base_model else ""
@@ -2858,42 +2975,62 @@ def _search_civitai_models(
 
     for index, (attempt_query, attempt_tag, attempt_base) in enumerate(attempts, start=attempt_index):
         fetch_limit = 100 if base_model else limit
-        params = _build_model_query_params(
-            kind,
-            attempt_query,
-            cursor,
-            sort,
-            fetch_limit,
-            config,
-            "",
-            attempt_tag,
-            attempt_base,
-        )
-        result = _read_models_json(params, api_key, 30)
-        if not result:
-            warning = "Empty response from Civitai"
-            continue
-        if isinstance(result, dict) and result.get("error"):
-            warning = str(result.get("error") or "")
-            continue
+        page_cursor = cursor
+        # Format and status filters have no Civitai parameter, so the pages that
+        # do not match are skipped here and the listing keeps paging until it
+        # can fill a whole page (or runs out).
+        page_budget = SEARCH_FILTER_PAGE_LIMIT if local_filters else 1
+        more_pages = False
+        for _ in range(page_budget):
+            more_pages = False
+            params = _build_model_query_params(
+                kind,
+                attempt_query,
+                page_cursor,
+                sort,
+                fetch_limit,
+                config,
+                "",
+                attempt_tag,
+                attempt_base,
+                period,
+            )
+            result = _read_models_json(params, api_key, 30)
+            if not result:
+                warning = "Empty response from Civitai"
+                break
+            if isinstance(result, dict) and result.get("error"):
+                warning = str(result.get("error") or "")
+                break
 
-        page_items = result.get("items") if isinstance(result.get("items"), list) else []
-        page_items = [item for item in page_items if isinstance(item, dict)]
-        if attempt_tag and not attempt_query and attempt_tag == query.strip():
-            # Civitai ignores unknown tags, so a query retried as a tag must
-            # still match the query or the page is just the unfiltered listing.
-            page_items = [item for item in page_items if _model_text_matches(item, query)]
-        if page_items:
-            metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
-            if index and metadata.get("nextCursor"):
-                metadata = {**metadata, "nextCursor": f"{SEARCH_ATTEMPT_CURSOR_PREFIX}{index}:{metadata['nextCursor']}"}
+            page_items = result.get("items") if isinstance(result.get("items"), list) else []
+            page_items = [item for item in page_items if isinstance(item, dict)]
+            if attempt_tag and not attempt_query and attempt_tag == query.strip():
+                # Civitai ignores unknown tags, so a query retried as a tag must
+                # still match the query or the page is just the unfiltered listing.
+                page_items = [item for item in page_items if _model_text_matches(item, query)]
+            page_metadata = result.get("metadata") if isinstance(result.get("metadata"), dict) else {}
+            next_cursor = str(page_metadata.get("nextCursor") or "")
             _merge_taxonomy_cache(kind, config, page_items)
             if base_model:
                 page_items = [item for item in page_items if _base_model_matches(item, base_model)]
-            collected.extend(page_items)
-            warning = ""
-            if collected or not base_model:
+            if local_filters:
+                page_items = [
+                    item for item in page_items
+                    if _model_matches_local_filters(item, file_format, model_status)
+                ]
+            if page_items:
+                metadata = page_metadata
+                if index and next_cursor:
+                    metadata = {**metadata, "nextCursor": f"{SEARCH_ATTEMPT_CURSOR_PREFIX}{index}:{next_cursor}"}
+                collected.extend(page_items)
+                warning = ""
+            if len(collected) >= limit or not next_cursor:
                 break
+            page_cursor = next_cursor
+            more_pages = True
+        if collected and (not local_filters or not more_pages or len(collected) >= limit):
+            break
 
     should_fallback = base_model and (query or tag or category) and len(collected) < limit
     if should_fallback:
@@ -3014,16 +3151,26 @@ async def search_api(request: web.Request) -> web.Response:
         kind = _normalize_asset_kind(request.query.get("kind", "lora"))
         query = request.query.get("query", "")
         cursor = request.query.get("cursor", "")
-        sort = request.query.get("sort", "Highest Rated")
+        sort = _normalize_model_sort(request.query.get("sort", "Highest Rated"))
+        period = _normalize_model_period(request.query.get("period", "AllTime"))
         category = request.query.get("category", "")
         tag = request.query.get("tag", "")
         base_model = request.query.get("base_model") or request.query.get("baseModel") or request.query.get("baseModels") or ""
+        file_format = _normalize_model_file_format(
+            request.query.get("file_format") or request.query.get("fileFormat") or ""
+        )
+        model_status = _normalize_model_status(
+            request.query.get("model_status") or request.query.get("modelStatus") or ""
+        )
         limit = max(1, min(int(request.query.get("limit", "40")), 100))
         cache_key = (
             kind,
             query,
             cursor,
             sort,
+            period,
+            file_format,
+            model_status,
             limit,
             tag,
             base_model,
@@ -3047,6 +3194,9 @@ async def search_api(request: web.Request) -> web.Response:
             base_model,
             category,
             config,
+            period,
+            file_format,
+            model_status,
         )
         if isinstance(result, dict) and not result.get("error"):
             with _SEARCH_RESULT_CACHE_LOCK:

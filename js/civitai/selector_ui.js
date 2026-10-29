@@ -1,3 +1,4 @@
+import { MODEL_SORTS } from "./constants.js";
 import { t } from "./i18n.js";
 
 const menuOverlays = new WeakSet();
@@ -170,7 +171,7 @@ export function renderSelectorSort(selectedSort) {
         <details class="cmgr-selector-tools cmgr-selector-sort">
             <summary aria-label="${escapeAttr(t("Sort"))}" aria-haspopup="menu"><span>${escapeHtml(t(selectedSort))}</span>${selectorIcon("chevron")}</summary>
             <div class="cmgr-selector-menu" role="menu" aria-label="${escapeAttr(t("Sort"))}">
-                ${["Highest Rated", "Most Downloaded", "Newest"].map((sort) => `<button type="button" role="menuitemradio" aria-checked="${selectedSort === sort}" data-selector-sort="${sort}">${escapeHtml(t(sort))}</button>`).join("")}
+                ${MODEL_SORTS.map((sort) => `<button type="button" role="menuitemradio" aria-checked="${selectedSort === sort}" data-selector-sort="${sort}">${escapeHtml(t(sort))}</button>`).join("")}
             </div>
         </details>
     `;

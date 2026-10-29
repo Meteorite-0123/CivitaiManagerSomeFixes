@@ -6,6 +6,9 @@ import {
     DEFAULT_TARGET_KINDS,
     HIGH_PRIORITY_PREVIEW_LOADS,
     INITIAL_PREVIEW_LOADS,
+    MODEL_FILE_FORMAT_OPTIONS,
+    MODEL_PERIODS,
+    MODEL_STATUS_OPTIONS,
     OTHER_LIBRARY_KIND,
     ROOT_KINDS,
     ROOT_LOCAL_FOLDER,
@@ -927,6 +930,9 @@ async function search(reset = true, options = {}) {
     if (state.selectedBaseModel) params.set("base_model", state.selectedBaseModel);
     if (state.selectedTag) params.set("tag", state.selectedTag);
     if (state.selectedCivitaiCategory) params.set("category", state.selectedCivitaiCategory);
+    if (state.period && state.period !== "AllTime") params.set("period", state.period);
+    if (state.fileFormat) params.set("file_format", state.fileFormat);
+    if (state.modelStatus) params.set("model_status", state.modelStatus);
     if (!reset && state.nextCursor) params.set("cursor", state.nextCursor);
     const requestPath = `/search?${params.toString()}`;
     const cached = forceRefresh ? null : getSearchCache(requestPath);
@@ -1055,6 +1061,9 @@ function currentSearchSignature() {
         state.selectedBaseModel,
         state.selectedTag,
         state.selectedCivitaiCategory,
+        state.period,
+        state.fileFormat,
+        state.modelStatus,
     ].map((item) => String(item || "").trim()).join("\u001f");
 }
 
@@ -2149,7 +2158,7 @@ function renderNav(nav) {
     nav.innerHTML = `
         <div class="cmgr-selector-filter-heading">
             <h2>${escapeHtml(t(state.activeTab === "Favorites" ? "Favorites" : "Adjust filters"))}</h2>
-            ${["Discover", "Library"].includes(state.activeTab) && (state.selectedBaseModel || state.selectedTag || (state.activeTab === "Library" ? state.selectedCategory : state.selectedCivitaiCategory)) ? `<button class="cmgr-selector-reset" type="button" data-action="reset-manager-filters">${escapeHtml(t("Reset filters"))}</button>` : ""}
+            ${["Discover", "Library"].includes(state.activeTab) && (state.selectedBaseModel || state.selectedTag || state.period !== "AllTime" || state.fileFormat || state.modelStatus || (state.activeTab === "Library" ? state.selectedCategory : state.selectedCivitaiCategory)) ? `<button class="cmgr-selector-reset" type="button" data-action="reset-manager-filters">${escapeHtml(t("Reset filters"))}</button>` : ""}
         </div>
         ${["Discover", "Library"].includes(state.activeTab) && !imagesMode ? renderAssetSidebar() : ""}
         ${state.activeTab === "Favorites" ? renderFavoritesSidebar() : ""}
@@ -2175,6 +2184,9 @@ function renderNav(nav) {
     });
     bindSearchCombo(nav.querySelector('[data-combo="base-model"]'), (value) => selectBaseModel(value));
     bindSearchCombo(nav.querySelector('[data-combo="category"]'), (value) => selectManagerCategory(CIVITAI_CATEGORY_FILTERS.find((item) => t(item.label) === value)?.value || ""));
+    bindSearchCombo(nav.querySelector('[data-combo="period"]'), (value) => selectModelPeriod(modelPeriodValue(value)));
+    bindSearchCombo(nav.querySelector('[data-combo="file-format"]'), (value) => selectModelFileFormat(modelOptionValue(MODEL_FILE_FORMAT_OPTIONS, value)));
+    bindSearchCombo(nav.querySelector('[data-combo="model-status"]'), (value) => selectModelStatus(modelOptionValue(MODEL_STATUS_OPTIONS, value)));
     bindSearchCombo(nav.querySelector('[data-combo="tag"]'), (value) => selectTag(value));
     if (state.activeTab === "Favorites") bindFavoritesSidebar(nav);
 }
@@ -2232,6 +2244,48 @@ function renderAssetSidebar() {
             ${!baseModels.length && !state.taxonomyLoading ? `<div class="cmgr-nav-note">${escapeHtml(t("Base models appear from Civitai data."))}</div>` : ""}
         </div>
         ${state.activeTab === "Discover" ? `
+            <div class="cmgr-nav-group cmgr-category-group">
+                <div class="cmgr-nav-title">${escapeHtml(t("Time period"))}</div>
+                <div class="cmgr-search-picker">
+                    ${renderSelectorCombo({
+                        id: "period",
+                        value: state.period === "AllTime" ? "" : t(MODEL_PERIODS.find((item) => item.value === state.period)?.label || ""),
+                        items: MODEL_PERIODS.slice(1).map((item) => t(item.label)),
+                        placeholder: t("All time"),
+                        searchPlaceholder: t("Search"),
+                        emptyText: t("No options found"),
+                        clearTitle: t("Clear"),
+                    })}
+                </div>
+            </div>
+            <div class="cmgr-nav-group cmgr-category-group">
+                <div class="cmgr-nav-title">${escapeHtml(t("File format"))}</div>
+                <div class="cmgr-search-picker">
+                    ${renderSelectorCombo({
+                        id: "file-format",
+                        value: state.fileFormat ? t(state.fileFormat) : "",
+                        items: MODEL_FILE_FORMAT_OPTIONS.map((item) => t(item.label)),
+                        placeholder: t("Any format"),
+                        searchPlaceholder: t("Search"),
+                        emptyText: t("No options found"),
+                        clearTitle: t("Clear"),
+                    })}
+                </div>
+            </div>
+            <div class="cmgr-nav-group cmgr-category-group">
+                <div class="cmgr-nav-title">${escapeHtml(t("Model status"))}</div>
+                <div class="cmgr-search-picker">
+                    ${renderSelectorCombo({
+                        id: "model-status",
+                        value: state.modelStatus ? t(MODEL_STATUS_OPTIONS.find((item) => item.value === state.modelStatus)?.label || "") : "",
+                        items: MODEL_STATUS_OPTIONS.map((item) => t(item.label)),
+                        placeholder: t("Any status"),
+                        searchPlaceholder: t("Search"),
+                        emptyText: t("No options found"),
+                        clearTitle: t("Clear"),
+                    })}
+                </div>
+            </div>
             <div class="cmgr-nav-group cmgr-category-group">
                 <div class="cmgr-nav-title">${escapeHtml(t("Filter by Category"))}</div>
                 ${renderSelectorCombo({
@@ -2468,6 +2522,9 @@ function selectManagerCategory(category) {
 function resetManagerFilters() {
     state.selectedBaseModel = "";
     state.selectedTag = "";
+    state.period = "AllTime";
+    state.fileFormat = "";
+    state.modelStatus = "";
     if (state.activeTab === "Discover") state.selectedCivitaiCategory = "";
     else state.selectedCategory = "";
     state.selectedModel = null;
@@ -2510,6 +2567,43 @@ function localFolderStateKey(path) {
     return `${state.assetKind}:${normalizeLocalFolderPath(path)}`;
 }
 
+function modelPeriodValue(label) {
+    return MODEL_PERIODS.find((item) => t(item.label) === label)?.value || "AllTime";
+}
+
+function modelOptionValue(options, label) {
+    return (Array.isArray(options) ? options : []).find((item) => t(item.label) === label)?.value || "";
+}
+
+function refreshDiscoverListing() {
+    state.selectedModel = null;
+    state.selectedAssetId = "";
+    state.resolution = null;
+    state.scroll.discoverResults = 0;
+    void search(true, { silent: true });
+}
+
+function selectModelPeriod(period) {
+    const next = String(period || "AllTime");
+    if (state.period === next) return;
+    state.period = next;
+    refreshDiscoverListing();
+}
+
+function selectModelFileFormat(format) {
+    const next = String(format || "");
+    if (state.fileFormat === next) return;
+    state.fileFormat = next;
+    refreshDiscoverListing();
+}
+
+function selectModelStatus(status) {
+    const next = String(status || "");
+    if (state.modelStatus === next) return;
+    state.modelStatus = next;
+    refreshDiscoverListing();
+}
+
 function selectBaseModel(baseModel) {
     baseModel = normalizePickerChoice(baseModel, currentBaseModelItems());
     if (state.selectedBaseModel === baseModel) return;
@@ -2550,6 +2644,8 @@ function selectAssetKind(kind) {
     state.selectedCivitaiCategory = "";
     state.selectedBaseModel = "";
     state.selectedTag = "";
+    state.fileFormat = "";
+    state.modelStatus = "";
     state.selectedModel = null;
     state.selectedAssetId = "";
     state.resolution = null;
@@ -2644,6 +2740,30 @@ function renderActiveFilterBar() {
             label: t("Search Tags"),
             value: state.selectedTag,
             clearAction: "clear-filter-tag",
+        });
+    }
+    if (state.activeTab === "Discover" && state.period !== "AllTime") {
+        chips.push({
+            key: "period",
+            label: t("Time period"),
+            value: t(MODEL_PERIODS.find((item) => item.value === state.period)?.label || ""),
+            clearAction: "clear-filter-period",
+        });
+    }
+    if (state.activeTab === "Discover" && state.fileFormat) {
+        chips.push({
+            key: "file_format",
+            label: t("File format"),
+            value: t(state.fileFormat),
+            clearAction: "clear-filter-file-format",
+        });
+    }
+    if (state.activeTab === "Discover" && state.modelStatus) {
+        chips.push({
+            key: "model_status",
+            label: t("Model status"),
+            value: t(MODEL_STATUS_OPTIONS.find((item) => item.value === state.modelStatus)?.label || ""),
+            clearAction: "clear-filter-model-status",
         });
     }
     return renderActiveFilterChips(chips, "reset-all-filters");
@@ -3266,6 +3386,12 @@ function bindCommonEvents(root) {
     if (clearBase) clearBase.onclick = () => selectBaseModel("");
     const clearTag = root.querySelector('[data-action="clear-filter-tag"]');
     if (clearTag) clearTag.onclick = () => selectTag("");
+    const clearPeriod = root.querySelector('[data-action="clear-filter-period"]');
+    if (clearPeriod) clearPeriod.onclick = () => selectModelPeriod("AllTime");
+    const clearFileFormat = root.querySelector('[data-action="clear-filter-file-format"]');
+    if (clearFileFormat) clearFileFormat.onclick = () => selectModelFileFormat("");
+    const clearModelStatus = root.querySelector('[data-action="clear-filter-model-status"]');
+    if (clearModelStatus) clearModelStatus.onclick = () => selectModelStatus("");
     const clearCategory = root.querySelector('[data-action="clear-filter-category"]');
     if (clearCategory) clearCategory.onclick = () => {
         if (state.activeTab === "Discover") state.selectedCivitaiCategory = "";
