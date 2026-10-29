@@ -111,6 +111,19 @@ test("detail panel lists resources with ticked files and a bulk button", () => {
     imageState.checked = [];
 });
 
+test("the tick box lives inside its file row so the whole row can toggle it", () => {
+    imageState.selectedImage = { id: 9, url: "https://example.com/a.jpg", username: "bob" };
+    imageState.loadingResources = false;
+    imageState.resourceError = "";
+    imageState.checked = [];
+    imageState.resources = [resource([{ name: "s.safetensors", sizeKB: 100, type: "Model" }])];
+    const html = renderImageDetailAside();
+    const row = html.split('data-image-file-row="0::s.safetensors"')[1].split("</div>")[0];
+    assert.ok(row.includes('data-image-file-check="0::s.safetensors"'));
+    assert.ok(row.includes("cmgr-file-main"));
+    imageState.resources = [];
+});
+
 test("the loras of an image share one card instead of one card each", () => {
     const entry = (name, kind) => ({
         kind,

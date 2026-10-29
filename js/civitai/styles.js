@@ -5052,6 +5052,11 @@ export function injectStyles() {
         }
         .cmgr-image-resource .cmgr-file-row {
             padding: 6px 8px;
+            cursor: pointer;
+        }
+        .cmgr-image-resource .cmgr-file-row .cmgr-file-target,
+        .cmgr-image-resource .cmgr-file-row .cmgr-file-check {
+            cursor: pointer;
         }
         .cmgr-image-prompt {
             margin: 0 !important;

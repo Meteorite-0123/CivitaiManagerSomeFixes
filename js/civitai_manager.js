@@ -3581,9 +3581,40 @@ function refreshImageDetail() {
     const split = bodyEl?.querySelector(".cmgr-images .cmgr-split");
     if (!split) return;
     split.classList.toggle("is-detail-open", Boolean(imageState.selectedImage));
-    const aside = split.querySelector(":scope > .cmgr-detail");
-    if (aside) aside.outerHTML = renderImageDetailAside();
-    else split.insertAdjacentHTML("beforeend", renderImageDetailAside());
+    const existing = split.querySelector(":scope > .cmgr-detail");
+    const next = htmlToElement(renderImageDetailAside());
+    // Ticking a file box re-renders this panel for the download counter, so the
+    // scroll position and the resource cards the user opened must survive it.
+    // The checkpoint/UNet card starts folded, and it used to snap shut again.
+    // Another image starts fresh: it opens at the top with the default folds.
+    const sameImage = Boolean(existing)
+        && existing.dataset.detailSubject === next.dataset.detailSubject;
+    const openState = sameImage
+        ? [...existing.querySelectorAll("[data-image-resource-kind]")].map((item) => ({
+            kind: item.dataset.imageResourceKind,
+            open: item.hasAttribute("open"),
+        }))
+        : [];
+    const keepScroll = sameImage ? existing.querySelector(".cmgr-detail-scroll")?.scrollTop || 0 : 0;
+    // Fold state goes on before the swap: the scroll restore would otherwise be
+    // clamped to the shorter, still folded panel and stop short of the bottom.
+    openState.forEach(({ kind, open }) => {
+        const group = [...next.querySelectorAll("[data-image-resource-kind]")]
+            .find((item) => item.dataset.imageResourceKind === kind);
+        if (group) group.toggleAttribute("open", open);
+    });
+    if (existing) swapDetail(existing, next);
+    else split.appendChild(next);
+    // The fresh gallery media settles a frame later and was pulling the panel
+    // back up, so the position is restored again once the layout is final.
+    if (keepScroll) {
+        const restore = () => {
+            const scroll = split.querySelector(".cmgr-detail-scroll");
+            if (scroll?.isConnected) scroll.scrollTop = keepScroll;
+        };
+        requestAnimationFrame(restore);
+        setTimeout(restore, 120);
+    }
     bindCommonEvents(bodyEl);
     bindImageEvents(bodyEl);
     observeCardMedia(split.querySelector(".cmgr-detail"));
@@ -3733,6 +3764,17 @@ function bindImageEvents(root) {
             if (event.key !== "Enter" && event.key !== " ") return;
             event.preventDefault();
             card.click();
+        };
+    });
+    // The whole file row is the target, like the model download list: clicking
+    // the name area used to do nothing, so the box was the only way in.
+    root.querySelectorAll("[data-image-file-row]").forEach((row) => {
+        row.onclick = (event) => {
+            if (event.target.closest("[data-image-file-target], [data-image-file-check], a")) return;
+            const box = row.querySelector("[data-image-file-check]");
+            if (!box) return;
+            box.checked = !box.checked;
+            box.onchange?.();
         };
     });
     root.querySelectorAll("[data-image-file-check]").forEach((box) => {
